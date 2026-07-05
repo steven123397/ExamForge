@@ -19,9 +19,8 @@
 - `docs/plan/history_plan.md`：已完成计划的历史摘要。
 - `docs/plan/agent_b_precheck_conflicts_plan.md`：Agent B 预检与冲突解释计划。
 - `docs/plan/agent_c_solver_plan.md`：Agent C 硬约束求解器计划。
-- `docs/plan/agent_d_scoring_report_plan.md`：Agent D 评分与报告计划。
 
-当前活动计划为 Agent B、Agent C、Agent D 三条并行调度器实现 lane。计划完成后归入 `history_plan.md` 并删除活动文件。
+当前活动计划为 Agent B、Agent C 两条并行调度器实现 lane。Agent D 评分与报告计划已完成并归入 `history_plan.md`。
 
 ## 状态文档
 
