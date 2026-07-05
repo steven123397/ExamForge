@@ -17,10 +17,8 @@
 
 - `docs/plan/README.md`：计划文档模板和生命周期规则。
 - `docs/plan/history_plan.md`：已完成计划的历史摘要。
-- `docs/plan/agent_b_precheck_conflicts_plan.md`：Agent B 预检与冲突解释计划。
-- `docs/plan/agent_c_solver_plan.md`：Agent C 硬约束求解器计划。
 
-当前活动计划为 Agent B、Agent C 两条并行调度器实现 lane。Agent D 评分与报告计划已完成并归入 `history_plan.md`。
+当前没有活动计划文件。Agent A/B/C/D 的调度器第一版并行计划均已完成并归入 `history_plan.md`。
 
 ## 状态文档
 
