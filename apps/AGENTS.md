@@ -2,29 +2,25 @@
 
 ## 1. 适用范围
 
-本文件适用于 `apps/` 下所有应用实现。当前已落地的应用是 `apps/scheduler/`，其余 Web、API、数据库相关目录只有在计划明确要求时再创建。
+本文件适用于 `apps/` 下所有应用实现。具体阶段状态以 `docs/status/project_status.md` 为准，长期架构边界以 `docs/design/` 为准。
 
 ## 2. 阶段边界
 
-当前第一版优先完成排考算法原型闭环：
+应用层长期拆分如下：
 
-- 数据模型
-- 测试数据生成
-- 预检
-- 求解
-- 评分
-- 冲突解释
-- 运行统计和报告素材
+- `apps/scheduler/`：Python 排考算法、预检、求解、评分、冲突解释和报告整理。
+- `apps/api/`：业务 API、排考运行入口、数据聚合和外部系统边界。
+- `apps/web/`：企业运营台、排考结果展示、冲突解释和资源分析。
 
-不要为了未来平台提前引入 Next.js、Fastify、PostgreSQL、Redis、Docker 或队列，除非当前计划明确要求。
+Web/API 层不得承载算法核心逻辑；需要通过明确接口调用 scheduler。新增应用目录时必须同步设计文档、状态文档和启动说明。
 
 ## 3. 开发前阅读
 
 实现前至少阅读：
 
 - `docs/status/project_status.md`
-- `docs/design/第一版实现内容设计.md`
 - `docs/design/总体设计与技术选型.md`
+- 与当前任务相关的设计或计划文档
 - 目标应用目录下的 `AGENTS.md`
 
 ## 4. 验证口径

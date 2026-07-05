@@ -7,6 +7,8 @@ venv/
 .worktrees/
 
 node_modules/
+.next/
+*.tsbuildinfo
 dist/
 build/
 coverage/

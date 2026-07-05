@@ -46,3 +46,12 @@
 - 完成内容：将预检与冲突解释、硬约束求解器、软约束评分与报告整理合并到 `main`，并在 `examforge_scheduler/__init__.py` 同时导出 `solve_schedule()`、`calculate_score()` 和 `build_schedule_report()`。
 - 验证结果：在 `apps/scheduler/` 下运行 `uv run --python 3.12 --extra dev python -m pytest -q`，最终结果为 `31 passed`；仓库根目录运行 `git diff --check`，结果为通过。
 - 当前风险：默认系统 `python` 命令仍不存在，`python3` 为 3.10.12；调度器验证应继续使用 `uv run --python 3.12 --extra dev` 或准备正式 Python 3.12 虚拟环境。
+
+## 2026-07-05 企业级全栈平台第一阶段
+
+- 原计划：`docs/plan/企业级全栈平台第一阶段计划.md`
+- 完成内容：创建 npm workspace、`packages/shared`、`packages/db`、`apps/api` 和 `apps/web`；补充 PostgreSQL/Drizzle schema、迁移 SQL、Docker Compose、Fastify API、Next.js 企业运营台、Python scheduler JSON CLI 和项目 README。
+- 范围边界：API 第一阶段使用内置演示仓储保证无数据库也可演示；PostgreSQL schema 和迁移已存在，但持久化仓储留到下一阶段；未实现真实登录、SSO、多租户权限、完整 CRUD、Redis 队列和 WebSocket。
+- 验证结果：`apps/scheduler` 全量测试通过，结果为 `32 passed`；`npm test` 的 API 测试通过，结果为 `2 passed`；`npm run typecheck` 通过；`npm run build` 通过；`git diff --check` 通过。
+- 集成验证：启动 API 后调用 `POST /api/schedule-runs`，返回 `status=feasible`、`assignments=6`、`conflicts=0`、`score=60`；启动 Web 后 `http://127.0.0.1:3000` 返回 `200 OK`。
+- 当前风险：`npm audit` 仍报告 Next 15.5.20 依赖链中的 2 个 moderate 级 PostCSS 相关公告，npm 给出的自动修复方案会降级到不适合本项目的旧 Next 版本。

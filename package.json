@@ -1,0 +1,21 @@
+{
+  "name": "examforge",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build --workspace @examforge/shared && (npm run dev --workspace @examforge/api & npm run dev --workspace @examforge/web)",
+    "build": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run build --workspace @examforge/api && npm run build --workspace @examforge/web",
+    "test": "npm run build --workspace @examforge/shared && npm test --workspace @examforge/api",
+    "typecheck": "npm run build --workspace @examforge/shared && npm run typecheck --workspace @examforge/db && npm run typecheck --workspace @examforge/api && npm run typecheck --workspace @examforge/web"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}

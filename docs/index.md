@@ -11,6 +11,7 @@
 
 - `docs/design/总体设计与技术选型.md`：总体架构、技术选型、模块边界和阶段策略。
 - `docs/design/第一版实现内容设计.md`：第一版算法原型的实现内容、数据模型、约束和验收标准。
+- `docs/design/企业级全栈平台第一阶段设计.md`：企业级 Web/API/数据库平台第一阶段设计。
 - `docs/design/README.md`：设计文档模板。
 
 ## 计划文档
@@ -18,7 +19,7 @@
 - `docs/plan/README.md`：计划文档模板和生命周期规则。
 - `docs/plan/history_plan.md`：已完成计划的历史摘要。
 
-当前没有活动计划文件。Agent A/B/C/D 的调度器第一版并行计划均已完成并归入 `history_plan.md`。
+当前没有活动计划文件。企业级全栈平台第一阶段计划和 Agent A/B/C/D 的调度器第一版并行计划均已完成并归入 `history_plan.md`。
 
 ## 状态文档
 
@@ -27,6 +28,7 @@
 
 ## 工作规则
 
+- `README.md`：项目启动、验证和演示入口。
 - `AGENTS.md`：仓库级工作规则。
 - `docs/AGENTS.md`：文档治理规则。
 - `apps/AGENTS.md`：应用实现阶段边界。
