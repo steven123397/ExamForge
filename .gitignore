@@ -1,0 +1,15 @@
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.worktrees
+.worktrees/
+
+node_modules/
+dist/
+build/
+coverage/
+
+.DS_Store
+*.log
