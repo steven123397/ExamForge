@@ -5,6 +5,7 @@ __pycache__/
 venv/
 .worktrees
 .worktrees/
+.codegraph/
 
 node_modules/
 .next/

@@ -4,6 +4,8 @@
 
 项目已完成正式需求分析、总体设计、第一版实现内容设计、可行性分析和第二版四个实现阶段。第一版 `apps/scheduler/` Python 排考算法原型的核心模块已合并到 `main`，包括数据模型、测试数据生成、预检、冲突解释、硬约束求解器、软约束评分和报告整理。第二版已形成“自动排考 → 异步作业 → 方案草稿 → 人工调整/锁定/局部再平衡 → 硬约束校验 → 对比确认 → 发布/废弃 → 查询/通知/导出”的人机协同排考闭环，并补齐浏览器级交互验收、课程报告终稿、部署说明和演示脚本。
 
+存留问题、代码审查发现、风险和技术债统一维护在 `docs/status/code_review_status.md`；本文只维护开发进度、已实现内容、验证结果和下一步。
+
 ## 最新进展
 
 - 日期：2026-07-06
@@ -47,6 +49,7 @@
 - 变更：第四阶段已新增已发布排考学生群体通知预览和 CSV 导出 API，并在运营台提供刷新通知和导出入口。
 - 变更：已新增 `docs/background/第二版课程报告终稿.md` 和 `docs/background/第二版部署与演示说明.md`，并更新第二版设计文档的增强方向落地边界。
 - 变更：第二版增强方向第四阶段计划已归入 `docs/plan/history_plan.md`，第二版设计文档中列出的增强方向已完成轻量闭环实现。
+- 变更：CodeGraph 已启用；已新增 `docs/plan/全量代码审查计划.md` 和 `docs/status/code_review_status.md`，后续全量代码审查结果和存留问题状态统一写入 `code_review_status.md`。
 - 验证：PostgreSQL 运行路径已完成真实验证，包括按顺序执行 `packages/db/drizzle/*.sql`、运行 `npm run seed --workspace @examforge/db`、API 带 `DATABASE_URL` 读取 dashboard、发起一次排考运行并写入 `schedule_runs`、`scheduled_exams` 和 `audit_events`。
 - 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `10 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
 - 验证：真实 PostgreSQL API 路径已验证 `POST /api/schedule-runs`、`POST /api/schedule-runs/:id/publish`、`GET /api/published-schedule`、`POST /api/published-schedule/rollback` 和回滚后的 `404` 查询结果；数据库已写入对应 `schedule_run.created`、`schedule_run.published` 和 `schedule_run.rollback` 审计事件。
@@ -68,23 +71,9 @@
 - 验证：第四阶段调度器回归已通过，`uv run --python 3.12 --extra dev python -m pytest -q` 结果为 `32 passed`。
 - 验证：第四阶段 `git diff --check` 通过。
 
-## 当前风险
-
-- 风险：本机默认 `python` 命令不可用，`python3` 为 3.10.12，而调度器配置要求 Python 3.12 及以上。
-- 影响：不能在当前默认环境直接运行计划中的裸 `python -m pytest` 命令。
-- 处理建议：创建 Python 3.12 虚拟环境并安装 `apps/scheduler` 测试依赖后再运行调度器测试。
-- 风险：`npm audit` 仍报告 Next 15.5.20 依赖链中的 2 个 moderate 级 PostCSS 相关公告，npm 给出的自动修复方案会降级到不适合本项目的旧 Next 版本。
-- 影响：当前不阻塞本地演示，但后续应跟踪 Next 官方依赖更新。
-- 处理建议：保留审计记录，后续升级 Next 或等待其依赖 PostCSS 修复版本。
-- 风险：Docker daemon 依赖当前 WSL 到 Windows 代理 `http://172.22.112.1:7897` 拉取 Docker Hub 镜像。
-- 影响：如果 Windows 代理端口或地址变化，后续重新拉取镜像可能失败；已存在的 `postgres:16-alpine` 镜像和容器不受影响。
-- 处理建议：代理变化时同步更新 `/etc/systemd/system/docker.service.d/proxy.conf` 并重启 `docker.service`。
-- 风险：当前 SQL 迁移文件不是全部幂等；重复执行旧迁移时会出现类型或表已存在的提示。
-- 影响：不影响已完成的真实库验证，但后续需要更正式的迁移执行器或迁移状态表，避免人工重复执行造成噪声。
-- 处理建议：后续数据库治理阶段引入标准迁移命令，并在文档中区分“首次初始化”和“增量迁移”。
-
 ## 下一步
 
+- [x] 建立全量代码审查计划和独立问题状态文档，明确 `project_status.md` 与 `code_review_status.md` 的分工。
 - [x] 将 API 内置演示仓储替换为 PostgreSQL 持久化仓储。
 - [x] 扩展基础数据管理页面，补齐学生群体、时间段、考试任务编辑和删除/导入能力。
 - [x] 增加排考运行历史、版本对比和审计详情。
@@ -95,4 +84,5 @@
 - [x] 规划第三阶段：拖拽式工作台、局部重排建议、权限审计或报告导出。
 - [x] 执行第三阶段：拖拽式矩阵调整、单场局部调整建议、报告图示材料和浏览器级拖拽验收。
 - [x] 执行第四阶段：异步排考作业、草稿锁定、局部再平衡、角色权限护栏、教师不可用维护、通知导出和课程交付文档。
+- [ ] 执行全量代码审查，并将审查发现写入 `docs/status/code_review_status.md`。
 - [ ] 规划第三版或后续企业化阶段：持久化任务队列、真实认证授权、消息投递状态、下载审计、标准迁移执行器和部署监控。

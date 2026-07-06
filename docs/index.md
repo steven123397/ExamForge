@@ -22,12 +22,14 @@
 
 - `docs/plan/README.md`：计划文档模板和生命周期规则。
 - `docs/plan/history_plan.md`：已完成计划的历史摘要。
+- `docs/plan/全量代码审查计划.md`：当前活动计划，面向第二版第四阶段后的全量代码审查。
 
-当前没有活动计划。第二版增强方向第四阶段计划、第二版方案草稿工作台第三阶段计划、第二阶段计划、第一阶段计划、企业级全栈平台第一阶段计划和 Agent A/B/C/D 的调度器第一版并行计划均已完成并归入 `history_plan.md`。
+当前活动计划为 `docs/plan/全量代码审查计划.md`。第二版增强方向第四阶段计划、第二版方案草稿工作台第三阶段计划、第二阶段计划、第一阶段计划、企业级全栈平台第一阶段计划和 Agent A/B/C/D 的调度器第一版并行计划均已完成并归入 `history_plan.md`。
 
 ## 状态文档
 
-- `docs/status/project_status.md`：当前项目事实、风险和下一步。
+- `docs/status/project_status.md`：当前开发进度、已实现内容、验证结果和下一步。
+- `docs/status/code_review_status.md`：代码审查结果、存留问题、风险、技术债和修复状态。
 - `docs/status/README.md`：状态文档模板。
 
 ## 工作规则
