@@ -10,6 +10,13 @@ import {
   type ReferenceRecord,
   type ReferenceDataResponse,
   type ReferenceResource,
+  type ConflictRecord,
+  type ScheduleDraftChangeEvent,
+  type ScheduleDraftComparisonResponse,
+  type ScheduleDraftDetailResponse,
+  type ScheduleDraftListResponse,
+  type ScheduleDraftPublishResponse,
+  type ScheduleDraftSummary,
   type ScheduleRunComparisonResponse,
   type ScheduleRunListResponse,
   type ScheduleRollbackResponse,
@@ -44,11 +51,23 @@ export interface PlatformRepository {
   publishScheduleRun(id: string): Promise<PublishedScheduleResponse | null>;
   getPublishedSchedule(): Promise<PublishedScheduleResponse | null>;
   rollbackPublishedSchedule(): Promise<ScheduleRollbackResponse>;
+  createScheduleDraftFromRun(id: string): Promise<ScheduleDraftDetailResponse | null>;
+  listScheduleDrafts(): Promise<ScheduleDraftListResponse>;
+  getScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null>;
+  updateScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+    patch: Partial<ScheduleResult["assignments"][number]>,
+  ): Promise<ScheduleDraftDetailResponse | null>;
+  validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null>;
+  compareScheduleDraft(id: string): Promise<ScheduleDraftComparisonResponse | null>;
+  publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | null>;
   close?(): Promise<void>;
 }
 
 export class InMemoryPlatformRepository implements PlatformRepository {
   private runs = new Map<string, ScheduleRunResponse>();
+  private drafts = new Map<string, ScheduleDraftDetailResponse>();
   private auditEvents: AuditEventSummary[] = [];
   private batch = structuredClone(demoBatch);
   private publishedRunId: string | null = null;
@@ -210,6 +229,197 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     };
   }
 
+  async createScheduleDraftFromRun(id: string): Promise<ScheduleDraftDetailResponse | null> {
+    const source = this.runs.get(id);
+    if (!source) {
+      return null;
+    }
+    const now = new Date().toISOString();
+    const draftId = `draft-${randomUUID()}`;
+    const assignments = structuredClone(source.result.assignments);
+    const conflicts = validateDraftAssignments(this.scheduleInput, assignments);
+    const draft: ScheduleDraftSummary = {
+      id: draftId,
+      batchId: this.batch.id,
+      sourceRunId: id,
+      basePublishedRunId: this.publishedRunId,
+      status: conflicts.length > 0 ? "blocked" : "validated",
+      score: scoreDraft(conflicts),
+      conflictCount: conflicts.length,
+      assignmentCount: assignments.length,
+      createdBy: "admin",
+      createdAt: now,
+      updatedAt: now,
+    };
+    const detail = {
+      draft,
+      assignments,
+      conflicts,
+      changeEvents: [],
+    };
+    this.drafts.set(draftId, detail);
+    this.recordAuditEvent("schedule_draft.created", "schedule_draft", draftId, {
+      sourceRunId: id,
+      assignmentCount: assignments.length,
+      conflictCount: conflicts.length,
+    });
+    return detail;
+  }
+
+  async listScheduleDrafts(): Promise<ScheduleDraftListResponse> {
+    return {
+      drafts: Array.from(this.drafts.values())
+        .map((item) => item.draft)
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+    };
+  }
+
+  async getScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null> {
+    return this.drafts.get(id) ?? null;
+  }
+
+  async updateScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+    patch: Partial<ScheduleResult["assignments"][number]>,
+  ): Promise<ScheduleDraftDetailResponse | null> {
+    const current = this.drafts.get(id);
+    if (!current || current.draft.status === "published" || current.draft.status === "discarded") {
+      return null;
+    }
+    const index = current.assignments.findIndex((assignment) => (
+      assignment.exam_task_id === examTaskId
+    ));
+    if (index === -1) {
+      return null;
+    }
+
+    const before = structuredClone(current.assignments[index]);
+    const after = {
+      ...before,
+      ...patch,
+      exam_task_id: examTaskId,
+    };
+    const assignments = [...current.assignments];
+    assignments[index] = after;
+    const conflicts = validateDraftAssignments(this.scheduleInput, assignments);
+    const now = new Date().toISOString();
+    const changeEvent: ScheduleDraftChangeEvent = {
+      id: `draft-change-${randomUUID()}`,
+      draftId: id,
+      examTaskId,
+      before,
+      after,
+      actor: "admin",
+      createdAt: now,
+    };
+    const detail = {
+      draft: {
+        ...current.draft,
+        status: conflicts.length > 0 ? "blocked" as const : "validated" as const,
+        score: scoreDraft(conflicts),
+        conflictCount: conflicts.length,
+        assignmentCount: assignments.length,
+        updatedAt: now,
+      },
+      assignments,
+      conflicts,
+      changeEvents: [...current.changeEvents, changeEvent],
+    };
+    this.drafts.set(id, detail);
+    this.recordAuditEvent("schedule_draft.assignment_updated", "schedule_draft", id, {
+      examTaskId,
+      before,
+      after,
+      conflictCount: conflicts.length,
+    });
+    return detail;
+  }
+
+  async validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null> {
+    const current = this.drafts.get(id);
+    if (!current) {
+      return null;
+    }
+    const conflicts = validateDraftAssignments(this.scheduleInput, current.assignments);
+    const now = new Date().toISOString();
+    const detail = {
+      ...current,
+      draft: {
+        ...current.draft,
+        status: conflicts.length > 0 ? "blocked" as const : "validated" as const,
+        score: scoreDraft(conflicts),
+        conflictCount: conflicts.length,
+        updatedAt: now,
+      },
+      conflicts,
+    };
+    this.drafts.set(id, detail);
+    this.recordAuditEvent("schedule_draft.validated", "schedule_draft", id, {
+      conflictCount: conflicts.length,
+    });
+    return detail;
+  }
+
+  async compareScheduleDraft(id: string): Promise<ScheduleDraftComparisonResponse | null> {
+    const current = this.drafts.get(id);
+    const source = current ? this.runs.get(current.draft.sourceRunId) : null;
+    if (!current || !source) {
+      return null;
+    }
+    return buildDraftComparison(current.draft, source, current.assignments);
+  }
+
+  async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | null> {
+    const current = await this.validateScheduleDraft(id);
+    if (!current) {
+      return null;
+    }
+    if (current.conflicts.some((conflict) => conflict.severity === "error")) {
+      return "conflict";
+    }
+
+    const runId = `run-${randomUUID()}`;
+    const createdAt = new Date().toISOString();
+    const result = buildDraftScheduleResult(current);
+    const run: ScheduleRunSummary = {
+      id: runId,
+      status: "feasible",
+      createdAt,
+      elapsedMs: 0,
+      score: current.draft.score,
+      conflictCount: current.conflicts.length,
+      assignmentCount: current.assignments.length,
+    };
+    this.runs.set(runId, { run, result });
+    this.publishedRunId = runId;
+    this.batch = {
+      ...this.batch,
+      status: "published",
+    };
+    const draft = {
+      ...current.draft,
+      status: "published" as const,
+      updatedAt: createdAt,
+    };
+    const detail = {
+      ...current,
+      draft,
+    };
+    this.drafts.set(id, detail);
+    this.recordAuditEvent("schedule_draft.published", "schedule_draft", id, {
+      runId,
+      sourceRunId: current.draft.sourceRunId,
+      score: current.draft.score,
+    });
+    return {
+      batch: this.batch,
+      draft,
+      run,
+      result,
+    };
+  }
+
   async getPublishedSchedule(): Promise<PublishedScheduleResponse | null> {
     if (!this.publishedRunId) {
       return null;
@@ -312,4 +522,231 @@ function assignmentKey(assignment: ScheduleResult["assignments"][number]) {
     assignment.time_slot_id,
     ...assignment.teacher_ids,
   ].join("|");
+}
+
+export function buildDraftComparison(
+  draft: ScheduleDraftSummary,
+  source: ScheduleRunResponse,
+  draftAssignments: ScheduleResult["assignments"],
+): ScheduleDraftComparisonResponse {
+  const sourceByTask = new Map(source.result.assignments.map((assignment) => [
+    assignment.exam_task_id,
+    assignment,
+  ]));
+  const changed: ScheduleDraftComparisonResponse["assignmentChanges"]["changed"] = [];
+  let unchanged = 0;
+
+  for (const after of draftAssignments) {
+    const before = sourceByTask.get(after.exam_task_id);
+    if (!before) {
+      continue;
+    }
+    if (assignmentKey(before) === assignmentKey(after)) {
+      unchanged += 1;
+    } else {
+      changed.push({ before, after });
+    }
+  }
+
+  return {
+    draft,
+    sourceRun: source.run,
+    assignmentChanges: {
+      unchanged,
+      changed,
+    },
+  };
+}
+
+export function validateDraftAssignments(
+  scheduleInput: ReferenceDataResponse["scheduleInput"],
+  assignments: ScheduleResult["assignments"],
+): ConflictRecord[] {
+  const conflicts: ConflictRecord[] = [];
+  const tasks = new Map(scheduleInput.exam_tasks.map((task) => [task.id, task]));
+  const rooms = new Map(scheduleInput.rooms.map((room) => [room.id, room]));
+  const teachers = new Map(scheduleInput.teachers.map((teacher) => [teacher.id, teacher]));
+  const roomSlot = new Map<string, string>();
+  const teacherSlot = new Map<string, string>();
+  const groupSlot = new Map<string, string>();
+
+  assignments.forEach((assignment) => {
+    const task = tasks.get(assignment.exam_task_id);
+    const room = rooms.get(assignment.room_id);
+
+    if (!task) {
+      conflicts.push(buildConflict(
+        "exam_task_not_found",
+        [assignment.exam_task_id],
+        `考试任务 ${assignment.exam_task_id} 不存在。`,
+        "请重新选择有效考试任务后再调整草稿。",
+      ));
+      return;
+    }
+
+    if (!task.allowed_slot_ids.includes(assignment.time_slot_id)) {
+      conflicts.push(buildConflict(
+        "allowed_slot",
+        [task.id, assignment.time_slot_id],
+        `${task.id} 不能安排在当前时间段。`,
+        "请选择考试任务允许的时间段。",
+      ));
+    }
+
+    if (assignment.teacher_ids.length < task.invigilator_count) {
+      conflicts.push(buildConflict(
+        "invigilator_count",
+        [task.id],
+        `${task.id} 需要至少 ${task.invigilator_count} 名监考教师。`,
+        "补齐监考教师后重新校验。",
+      ));
+    }
+
+    if (!room) {
+      conflicts.push(buildConflict(
+        "room_not_found",
+        [assignment.room_id],
+        `考场 ${assignment.room_id} 不存在。`,
+        "请选择有效考场。",
+      ));
+    } else {
+      if (room.capacity < task.expected_count) {
+        conflicts.push(buildConflict(
+          "room_capacity",
+          [task.id, room.id],
+          `${room.name} 容量不足，无法容纳 ${task.expected_count} 人。`,
+          "选择容量更大的考场。",
+        ));
+      }
+      if (room.room_type !== task.required_room_type) {
+        conflicts.push(buildConflict(
+          "room_requirement",
+          [task.id, room.id],
+          `${room.name} 类型不满足 ${task.required_room_type} 考试要求。`,
+          "选择符合考试类型的考场。",
+        ));
+      }
+      const missingEquipment = task.required_equipment_tags.filter((tag) => (
+        !room.equipment_tags.includes(tag)
+      ));
+      if (missingEquipment.length > 0) {
+        conflicts.push(buildConflict(
+          "room_equipment",
+          [task.id, room.id, ...missingEquipment],
+          `${room.name} 缺少 ${missingEquipment.join("、")} 设备。`,
+          "选择设备满足要求的考场。",
+        ));
+      }
+    }
+
+    const roomSlotKey = `${assignment.room_id}|${assignment.time_slot_id}`;
+    const existingRoomTask = roomSlot.get(roomSlotKey);
+    if (existingRoomTask) {
+      conflicts.push(buildConflict(
+        "room_time_unique",
+        [existingRoomTask, assignment.exam_task_id, assignment.room_id, assignment.time_slot_id],
+        "同一考场同一时间段存在多场考试。",
+        "调整其中一场考试的时间或考场。",
+      ));
+    } else {
+      roomSlot.set(roomSlotKey, assignment.exam_task_id);
+    }
+
+    for (const groupId of task.student_group_ids) {
+      const key = `${groupId}|${assignment.time_slot_id}`;
+      const existingGroupTask = groupSlot.get(key);
+      if (existingGroupTask) {
+        conflicts.push(buildConflict(
+          "student_group_time_unique",
+          [existingGroupTask, assignment.exam_task_id, groupId, assignment.time_slot_id],
+          `学生群体 ${groupId} 同一时间段存在多场考试。`,
+          "调整其中一场考试时间。",
+        ));
+      } else {
+        groupSlot.set(key, assignment.exam_task_id);
+      }
+    }
+
+    for (const teacherId of assignment.teacher_ids) {
+      const teacher = teachers.get(teacherId);
+      if (!teacher) {
+        conflicts.push(buildConflict(
+          "teacher_not_found",
+          [teacherId],
+          `教师 ${teacherId} 不存在。`,
+          "请选择有效监考教师。",
+        ));
+        continue;
+      }
+      if (teacher.unavailable_slot_ids.includes(assignment.time_slot_id)) {
+        conflicts.push(buildConflict(
+          "teacher_unavailable",
+          [teacherId, assignment.time_slot_id],
+          `${teacher.name} 当前时间段不可用。`,
+          "替换监考教师或调整考试时间。",
+        ));
+      }
+      const key = `${teacherId}|${assignment.time_slot_id}`;
+      const existingTeacherTask = teacherSlot.get(key);
+      if (existingTeacherTask) {
+        conflicts.push(buildConflict(
+          "teacher_time_unique",
+          [existingTeacherTask, assignment.exam_task_id, teacherId, assignment.time_slot_id],
+          `${teacher.name} 同一时间段被安排多场监考。`,
+          "调整监考教师或考试时间。",
+        ));
+      } else {
+        teacherSlot.set(key, assignment.exam_task_id);
+      }
+    }
+  });
+
+  return conflicts;
+}
+
+export function buildDraftScheduleResult(detail: ScheduleDraftDetailResponse): ScheduleResult {
+  return {
+    assignments: structuredClone(detail.assignments),
+    conflicts: structuredClone(detail.conflicts),
+    score: {
+      total_score: detail.draft.score,
+      hard_violation_count: detail.conflicts.filter((conflict) => conflict.severity === "error").length,
+      soft_penalty_items: [],
+    },
+    statistics: {
+      status: detail.conflicts.length > 0 ? "partial" : "feasible",
+      elapsed_ms: 0,
+      exam_count: detail.assignments.length,
+      room_count: new Set(detail.assignments.map((assignment) => assignment.room_id)).size,
+      slot_count: new Set(detail.assignments.map((assignment) => assignment.time_slot_id)).size,
+      attempted_assignments: detail.assignments.length,
+    },
+    report: {
+      source: "schedule_draft",
+      draft_id: detail.draft.id,
+      source_run_id: detail.draft.sourceRunId,
+    },
+  };
+}
+
+function scoreDraft(conflicts: ConflictRecord[]) {
+  const penalty = conflicts.reduce((total, conflict) => (
+    total + (conflict.severity === "error" ? 20 : 5)
+  ), 0);
+  return Math.max(0, 100 - penalty);
+}
+
+function buildConflict(
+  type: string,
+  affectedIds: string[],
+  message: string,
+  suggestion: string,
+): ConflictRecord {
+  return {
+    type,
+    severity: "error",
+    affected_ids: affectedIds,
+    message,
+    suggestion,
+  };
 }

@@ -25,11 +25,18 @@
 - 变更：API 已新增排考运行历史、审计事件列表和排考运行版本对比接口；运营台已新增运行历史、版本对比摘要和审计详情面板。
 - 变更：API 已新增排考方案发布、当前发布方案查询和发布回滚接口；PostgreSQL `exam_batches` 已增加 `published_run_id` 字段，运营台运行历史已支持发布标记和回滚操作。
 - 变更：API 已新增教师和学生群体维度的已发布排考查询接口；运营台已新增“已发布查询”面板，可按教师或学生群体查看课程、时间、考场和监考教师。
+- 变更：已新增 `docs/design/第二版实现内容设计.md` 和 `docs/plan/第二版方案草稿工作台第一阶段计划.md`，第二版主线聚焦人机协同排考、草稿版本、人工调整、硬约束校验和发布治理。
+- 变更：API 已新增排考草稿接口，支持从 `schedule_runs` 创建草稿、读取草稿列表和详情、调整单场考试安排、重新校验、对比来源运行，以及在无硬冲突时发布草稿。
+- 变更：内存仓储和 PostgreSQL 仓储已新增草稿模型、草稿安排、草稿冲突和草稿变更事件；新增迁移 `packages/db/drizzle/0003_schedule_drafts.sql`。
+- 变更：人工调整校验已覆盖考场时间唯一、学生群体时间唯一、教师时间唯一、教师不可用、考场容量、考场类型、设备要求、允许时间段和监考教师数量。
+- 变更：运营台已新增“方案工作台”，支持创建草稿、读取草稿、通过时间段 × 考场矩阵选择考试、表单调整时间/考场/监考教师、展示冲突和变更记录，并在无冲突时发布草稿。
 - 验证：PostgreSQL 运行路径已完成真实验证，包括按顺序执行 `packages/db/drizzle/*.sql`、运行 `npm run seed --workspace @examforge/db`、API 带 `DATABASE_URL` 读取 dashboard、发起一次排考运行并写入 `schedule_runs`、`scheduled_exams` 和 `audit_events`。
 - 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `10 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
 - 验证：真实 PostgreSQL API 路径已验证 `POST /api/schedule-runs`、`POST /api/schedule-runs/:id/publish`、`GET /api/published-schedule`、`POST /api/published-schedule/rollback` 和回滚后的 `404` 查询结果；数据库已写入对应 `schedule_run.created`、`schedule_run.published` 和 `schedule_run.rollback` 审计事件。
 - 验证：真实 PostgreSQL API 路径已验证 `GET /api/published-schedule/teachers/:teacherId` 和 `GET /api/published-schedule/student-groups/:studentGroupId`，本地已发布版本 `run-362133c8-ab13-4993-b7e1-fed5f1b3d71f` 可返回教师 `t-zhang` 的 4 条安排和学生群体 `g-cs-2301` 的 3 条安排。
 - 验证：真实 PostgreSQL API 路径已验证 `POST /api/reference-data/time-slots/import`、同 `id` 覆盖导入、`DELETE /api/reference-data/time-slots/:id` 和删除后的基础数据查询结果。
+- 验证：第二版草稿 API 行为测试已覆盖创建草稿、读取草稿列表、人工调整产生硬冲突、硬冲突阻塞发布、修复冲突后发布，并随 `npm test` 通过。
+- 验证：第二版第一阶段本轮验证包括 `npm test` 通过、`npm run typecheck` 通过、`npm run build` 通过、`apps/scheduler` 全量测试 `32 passed`、`git diff --check` 通过。
 
 ## 当前风险
 
@@ -50,3 +57,5 @@
 - [x] 增加排考运行历史、版本对比和审计详情。
 - [x] 增加方案发布和回滚。
 - [x] 增加教师/学生查询已发布安排。
+- [x] 增加排考方案草稿、人工调整、硬约束校验、草稿发布治理和方案工作台第一阶段闭环。
+- [ ] 基于真实 PostgreSQL 容器重新执行 `0003_schedule_drafts.sql` 后，验证草稿创建、调整、发布和已发布查询的真实数据库路径。

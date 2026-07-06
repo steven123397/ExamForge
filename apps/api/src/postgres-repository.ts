@@ -2,9 +2,13 @@ import {
   auditEvents,
   conflictRecords,
   courses,
+  draftChangeEvents,
+  draftConflictRecords,
+  draftScheduledExams,
   examBatches,
   examTasks,
   rooms,
+  scheduleDrafts,
   scheduledExams,
   scheduleRuns,
   studentGroups,
@@ -23,16 +27,29 @@ import {
   type ReferenceRecord,
   type ReferenceDataResponse,
   type ReferenceResource,
+  type ScheduleDraftChangeEvent,
+  type ScheduleDraftComparisonResponse,
+  type ScheduleDraftDetailResponse,
+  type ScheduleDraftListResponse,
+  type ScheduleDraftPublishResponse,
+  type ScheduleDraftSummary,
   type ScheduleRunComparisonResponse,
   type ScheduleRunListResponse,
   type ScheduleRollbackResponse,
   type ScheduleResult,
   type ScheduleRunResponse,
   type ScheduleRunSummary,
+  type ScheduledExam,
 } from "@examforge/shared";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { buildRunComparison, type PlatformRepository } from "./repository.js";
+import {
+  buildDraftComparison,
+  buildDraftScheduleResult,
+  buildRunComparison,
+  validateDraftAssignments,
+  type PlatformRepository,
+} from "./repository.js";
 
 type BatchRow = typeof examBatches.$inferSelect;
 type RunRow = typeof scheduleRuns.$inferSelect;
@@ -43,6 +60,8 @@ type CourseRow = typeof courses.$inferSelect;
 type RoomRow = typeof rooms.$inferSelect;
 type TimeSlotRow = typeof timeSlots.$inferSelect;
 type ExamTaskRow = typeof examTasks.$inferSelect;
+type DraftRow = typeof scheduleDrafts.$inferSelect;
+type DraftChangeEventRow = typeof draftChangeEvents.$inferSelect;
 
 export class PostgresPlatformRepository implements PlatformRepository {
   constructor(private readonly client: ExamForgeDbClient) {}
@@ -474,6 +493,366 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return base && target ? buildRunComparison(base, target) : null;
   }
 
+  async createScheduleDraftFromRun(id: string): Promise<ScheduleDraftDetailResponse | null> {
+    const source = await this.getScheduleRun(id);
+    if (!source) {
+      return null;
+    }
+    const batch = await this.getActiveBatch();
+    const referenceData = await this.getReferenceData();
+    const draftId = `draft-${randomUUID()}`;
+    const now = new Date();
+    const assignments = structuredClone(source.result.assignments);
+    const conflicts = validateDraftAssignments(referenceData.scheduleInput, assignments);
+    const draft: ScheduleDraftSummary = {
+      id: draftId,
+      batchId: batch.id,
+      sourceRunId: id,
+      basePublishedRunId: batch.publishedRunId,
+      status: conflicts.length > 0 ? "blocked" : "validated",
+      score: scoreDraft(conflicts.length),
+      conflictCount: conflicts.length,
+      assignmentCount: assignments.length,
+      createdBy: "admin",
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+
+    await this.client.db.transaction(async (tx) => {
+      await tx.insert(scheduleDrafts).values({
+        id: draft.id,
+        batchId: draft.batchId,
+        sourceRunId: draft.sourceRunId,
+        basePublishedRunId: draft.basePublishedRunId,
+        status: draft.status,
+        score: draft.score,
+        conflictCount: draft.conflictCount,
+        assignmentCount: draft.assignmentCount,
+        createdBy: draft.createdBy,
+        createdAt: now,
+        updatedAt: now,
+      });
+      if (assignments.length > 0) {
+        await tx.insert(draftScheduledExams).values(assignments.map((assignment, index) => ({
+          id: `${draftId}-exam-${index + 1}`,
+          draftId,
+          examTaskId: assignment.exam_task_id,
+          roomId: assignment.room_id,
+          timeSlotId: assignment.time_slot_id,
+          teacherIds: assignment.teacher_ids,
+          updatedAt: now,
+        })));
+      }
+      if (conflicts.length > 0) {
+        await tx.insert(draftConflictRecords).values(conflicts.map((conflict, index) => ({
+          id: `${draftId}-conflict-${index + 1}`,
+          draftId,
+          type: conflict.type,
+          severity: conflict.severity,
+          affectedIds: conflict.affected_ids,
+          message: conflict.message,
+          suggestion: conflict.suggestion,
+        })));
+      }
+      await tx.insert(auditEvents).values({
+        id: `audit-${randomUUID()}`,
+        actor: "system",
+        action: "schedule_draft.created",
+        entityType: "schedule_draft",
+        entityId: draftId,
+        payload: {
+          sourceRunId: id,
+          assignmentCount: assignments.length,
+          conflictCount: conflicts.length,
+        },
+      });
+    });
+
+    return {
+      draft,
+      assignments,
+      conflicts,
+      changeEvents: [],
+    };
+  }
+
+  async listScheduleDrafts(): Promise<ScheduleDraftListResponse> {
+    const rows = await this.client.db
+      .select()
+      .from(scheduleDrafts)
+      .orderBy(desc(scheduleDrafts.updatedAt))
+      .limit(30);
+    return {
+      drafts: rows.map((row) => this.toDraftSummary(row)),
+    };
+  }
+
+  async getScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null> {
+    const [draft] = await this.client.db
+      .select()
+      .from(scheduleDrafts)
+      .where(eq(scheduleDrafts.id, id))
+      .limit(1);
+    if (!draft) {
+      return null;
+    }
+
+    const [assignmentRows, conflictRows, changeRows] = await Promise.all([
+      this.client.db.select().from(draftScheduledExams).where(eq(draftScheduledExams.draftId, id)),
+      this.client.db.select().from(draftConflictRecords).where(eq(draftConflictRecords.draftId, id)),
+      this.client.db
+        .select()
+        .from(draftChangeEvents)
+        .where(eq(draftChangeEvents.draftId, id))
+        .orderBy(desc(draftChangeEvents.createdAt)),
+    ]);
+
+    return {
+      draft: this.toDraftSummary(draft),
+      assignments: assignmentRows.map((assignment) => ({
+        exam_task_id: assignment.examTaskId,
+        room_id: assignment.roomId,
+        time_slot_id: assignment.timeSlotId,
+        teacher_ids: assignment.teacherIds,
+      })),
+      conflicts: conflictRows.map((conflict) => ({
+        type: conflict.type,
+        severity: conflict.severity,
+        affected_ids: conflict.affectedIds,
+        message: conflict.message,
+        suggestion: conflict.suggestion,
+      })),
+      changeEvents: changeRows.map((event) => this.toDraftChangeEvent(event)),
+    };
+  }
+
+  async updateScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+    patch: Partial<ScheduledExam>,
+  ): Promise<ScheduleDraftDetailResponse | null> {
+    const current = await this.getScheduleDraft(id);
+    if (!current || current.draft.status === "published" || current.draft.status === "discarded") {
+      return null;
+    }
+    const index = current.assignments.findIndex((assignment) => (
+      assignment.exam_task_id === examTaskId
+    ));
+    if (index === -1) {
+      return null;
+    }
+
+    const referenceData = await this.getReferenceData();
+    const before = structuredClone(current.assignments[index]);
+    const after = {
+      ...before,
+      ...patch,
+      exam_task_id: examTaskId,
+    };
+    const assignments = [...current.assignments];
+    assignments[index] = after;
+    const conflicts = validateDraftAssignments(referenceData.scheduleInput, assignments);
+    const updatedAt = new Date();
+    const status = conflicts.length > 0 ? "blocked" : "validated";
+    const score = scoreDraft(conflicts.length);
+    const changeId = `draft-change-${randomUUID()}`;
+
+    await this.client.db.transaction(async (tx) => {
+      await tx.update(draftScheduledExams)
+        .set({
+          roomId: after.room_id,
+          timeSlotId: after.time_slot_id,
+          teacherIds: after.teacher_ids,
+          updatedAt,
+        })
+        .where(and(
+          eq(draftScheduledExams.draftId, id),
+          eq(draftScheduledExams.examTaskId, examTaskId),
+        ));
+      await tx.delete(draftConflictRecords).where(eq(draftConflictRecords.draftId, id));
+      if (conflicts.length > 0) {
+        await tx.insert(draftConflictRecords).values(conflicts.map((conflict, conflictIndex) => ({
+          id: `${id}-conflict-${updatedAt.getTime()}-${conflictIndex + 1}`,
+          draftId: id,
+          type: conflict.type,
+          severity: conflict.severity,
+          affectedIds: conflict.affected_ids,
+          message: conflict.message,
+          suggestion: conflict.suggestion,
+        })));
+      }
+      await tx.insert(draftChangeEvents).values({
+        id: changeId,
+        draftId: id,
+        examTaskId,
+        before,
+        after,
+        actor: "admin",
+        createdAt: updatedAt,
+      });
+      await tx.update(scheduleDrafts)
+        .set({
+          status,
+          score,
+          conflictCount: conflicts.length,
+          assignmentCount: assignments.length,
+          updatedAt,
+        })
+        .where(eq(scheduleDrafts.id, id));
+      await tx.insert(auditEvents).values({
+        id: `audit-${randomUUID()}`,
+        actor: "system",
+        action: "schedule_draft.assignment_updated",
+        entityType: "schedule_draft",
+        entityId: id,
+        payload: {
+          examTaskId,
+          before,
+          after,
+          conflictCount: conflicts.length,
+        },
+      });
+    });
+
+    return this.getScheduleDraft(id);
+  }
+
+  async validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null> {
+    const current = await this.getScheduleDraft(id);
+    if (!current) {
+      return null;
+    }
+    const referenceData = await this.getReferenceData();
+    const conflicts = validateDraftAssignments(referenceData.scheduleInput, current.assignments);
+    const updatedAt = new Date();
+    await this.client.db.transaction(async (tx) => {
+      await tx.delete(draftConflictRecords).where(eq(draftConflictRecords.draftId, id));
+      if (conflicts.length > 0) {
+        await tx.insert(draftConflictRecords).values(conflicts.map((conflict, index) => ({
+          id: `${id}-conflict-${updatedAt.getTime()}-${index + 1}`,
+          draftId: id,
+          type: conflict.type,
+          severity: conflict.severity,
+          affectedIds: conflict.affected_ids,
+          message: conflict.message,
+          suggestion: conflict.suggestion,
+        })));
+      }
+      await tx.update(scheduleDrafts)
+        .set({
+          status: conflicts.length > 0 ? "blocked" : "validated",
+          score: scoreDraft(conflicts.length),
+          conflictCount: conflicts.length,
+          updatedAt,
+        })
+        .where(eq(scheduleDrafts.id, id));
+      await tx.insert(auditEvents).values({
+        id: `audit-${randomUUID()}`,
+        actor: "system",
+        action: "schedule_draft.validated",
+        entityType: "schedule_draft",
+        entityId: id,
+        payload: { conflictCount: conflicts.length },
+      });
+    });
+    return this.getScheduleDraft(id);
+  }
+
+  async compareScheduleDraft(id: string): Promise<ScheduleDraftComparisonResponse | null> {
+    const current = await this.getScheduleDraft(id);
+    const source = current ? await this.getScheduleRun(current.draft.sourceRunId) : null;
+    return current && source ? buildDraftComparison(current.draft, source, current.assignments) : null;
+  }
+
+  async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | null> {
+    const current = await this.validateScheduleDraft(id);
+    if (!current) {
+      return null;
+    }
+    if (current.conflicts.some((conflict) => conflict.severity === "error")) {
+      return "conflict";
+    }
+    const batch = await this.getActiveBatch();
+    const runId = `run-${randomUUID()}`;
+    const createdAt = new Date();
+    const result = buildDraftScheduleResult(current);
+    const run: ScheduleRunSummary = {
+      id: runId,
+      status: "feasible",
+      createdAt: createdAt.toISOString(),
+      elapsedMs: 0,
+      score: current.draft.score,
+      conflictCount: current.conflicts.length,
+      assignmentCount: current.assignments.length,
+    };
+
+    await this.client.db.transaction(async (tx) => {
+      await tx.insert(scheduleRuns).values({
+        id: runId,
+        batchId: batch.id,
+        status: run.status,
+        score: run.score,
+        scoreBreakdown: result.score,
+        conflictCount: run.conflictCount,
+        assignmentCount: run.assignmentCount,
+        elapsedMs: run.elapsedMs,
+        statistics: result.statistics,
+        report: result.report ?? {},
+        createdAt,
+      });
+      if (current.assignments.length > 0) {
+        await tx.insert(scheduledExams).values(current.assignments.map((assignment, index) => ({
+          id: `${runId}-exam-${index + 1}`,
+          runId,
+          examTaskId: assignment.exam_task_id,
+          roomId: assignment.room_id,
+          timeSlotId: assignment.time_slot_id,
+          teacherIds: assignment.teacher_ids,
+        })));
+      }
+      await tx.update(examBatches)
+        .set({
+          status: "published",
+          publishedRunId: runId,
+        })
+        .where(eq(examBatches.id, batch.id));
+      await tx.update(scheduleDrafts)
+        .set({
+          status: "published",
+          updatedAt: createdAt,
+        })
+        .where(eq(scheduleDrafts.id, id));
+      await tx.insert(auditEvents).values({
+        id: `audit-${randomUUID()}`,
+        actor: "system",
+        action: "schedule_draft.published",
+        entityType: "schedule_draft",
+        entityId: id,
+        payload: {
+          runId,
+          sourceRunId: current.draft.sourceRunId,
+          score: current.draft.score,
+        },
+      });
+    });
+
+    const updatedBatch = {
+      ...batch,
+      status: "published" as const,
+      publishedRunId: runId,
+    };
+    return {
+      batch: this.toBatchSummary(updatedBatch),
+      draft: {
+        ...current.draft,
+        status: "published",
+        updatedAt: createdAt.toISOString(),
+      },
+      run,
+      result,
+    };
+  }
+
   async listAuditEvents(): Promise<AuditEventListResponse> {
     const rows = await this.client.db
       .select()
@@ -676,6 +1055,34 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
+  private toDraftSummary(draft: DraftRow): ScheduleDraftSummary {
+    return {
+      id: draft.id,
+      batchId: draft.batchId,
+      sourceRunId: draft.sourceRunId,
+      basePublishedRunId: draft.basePublishedRunId,
+      status: draft.status,
+      score: draft.score,
+      conflictCount: draft.conflictCount,
+      assignmentCount: draft.assignmentCount,
+      createdBy: draft.createdBy,
+      createdAt: draft.createdAt.toISOString(),
+      updatedAt: draft.updatedAt.toISOString(),
+    };
+  }
+
+  private toDraftChangeEvent(event: DraftChangeEventRow): ScheduleDraftChangeEvent {
+    return {
+      id: event.id,
+      draftId: event.draftId,
+      examTaskId: event.examTaskId,
+      before: event.before as ScheduledExam,
+      after: event.after as ScheduledExam,
+      actor: event.actor,
+      createdAt: event.createdAt.toISOString(),
+    };
+  }
+
   private findReferenceRecord(
     referenceData: ReferenceDataResponse,
     resource: ReferenceResource,
@@ -718,4 +1125,8 @@ function stripUndefined<T extends Record<string, unknown>>(value: T): Partial<T>
   return Object.fromEntries(
     Object.entries(value).filter(([, item]) => item !== undefined),
   ) as Partial<T>;
+}
+
+function scoreDraft(conflictCount: number) {
+  return Math.max(0, 100 - conflictCount * 20);
 }

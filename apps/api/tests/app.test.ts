@@ -47,6 +47,46 @@ class FakeScheduler implements SchedulerClient {
   }
 }
 
+class DraftWorkflowScheduler implements SchedulerClient {
+  async solve(input: ScheduleInput): Promise<ScheduleResult> {
+    return {
+      assignments: [
+        {
+          exam_task_id: "e-data-structures",
+          room_id: "r-101",
+          time_slot_id: "s-001",
+          teacher_ids: [input.teachers[0].id],
+        },
+        {
+          exam_task_id: "e-database",
+          room_id: "r-lab-1",
+          time_slot_id: "s-003",
+          teacher_ids: [input.teachers[1].id],
+        },
+      ],
+      conflicts: [],
+      score: {
+        total_score: 94,
+        hard_violation_count: 0,
+        soft_penalty_items: [],
+      },
+      statistics: {
+        status: "feasible",
+        elapsed_ms: 22,
+        exam_count: input.exam_tasks.length,
+        room_count: input.rooms.length,
+        slot_count: input.time_slots.length,
+        attempted_assignments: 12,
+      },
+      report: {
+        summary: {
+          status: "feasible",
+        },
+      },
+    };
+  }
+}
+
 describe("ExamForge API", () => {
   it("returns dashboard data", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
@@ -235,6 +275,15 @@ describe("ExamForge API", () => {
         publishScheduleRun: (id) => repository.publishScheduleRun(id),
         getPublishedSchedule: () => repository.getPublishedSchedule(),
         rollbackPublishedSchedule: () => repository.rollbackPublishedSchedule(),
+        createScheduleDraftFromRun: (id) => repository.createScheduleDraftFromRun(id),
+        listScheduleDrafts: () => repository.listScheduleDrafts(),
+        getScheduleDraft: (id) => repository.getScheduleDraft(id),
+        updateScheduleDraftAssignment: (id, examTaskId, patch) => (
+          repository.updateScheduleDraftAssignment(id, examTaskId, patch)
+        ),
+        validateScheduleDraft: (id) => repository.validateScheduleDraft(id),
+        compareScheduleDraft: (id) => repository.compareScheduleDraft(id),
+        publishScheduleDraft: (id) => repository.publishScheduleDraft(id),
       },
     });
 
@@ -374,6 +423,98 @@ describe("ExamForge API", () => {
 
     assert.equal(response.statusCode, 400);
     assert.equal(response.json().error, "invalid_reference_data");
+
+    await app.close();
+  });
+
+  it("creates, adjusts, validates, and publishes a schedule draft", async () => {
+    const app = createApp({ scheduler: new DraftWorkflowScheduler() });
+
+    const runResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+    });
+    assert.equal(runResponse.statusCode, 201);
+    const run = runResponse.json();
+
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${run.run.id}/drafts`,
+    });
+    assert.equal(draftResponse.statusCode, 201);
+    const createdDraft = draftResponse.json();
+    assert.equal(createdDraft.draft.sourceRunId, run.run.id);
+    assert.equal(createdDraft.draft.status, "validated");
+    assert.equal(createdDraft.assignments.length, 2);
+    assert.equal(createdDraft.conflicts.length, 0);
+
+    const listResponse = await app.inject({
+      method: "GET",
+      url: "/api/schedule-drafts",
+    });
+    assert.equal(listResponse.statusCode, 200);
+    assert.deepEqual(
+      listResponse.json().drafts.map((draft: { id: string }) => draft.id),
+      [createdDraft.draft.id],
+    );
+
+    const conflictingAdjustment = await app.inject({
+      method: "PATCH",
+      url: `/api/schedule-drafts/${createdDraft.draft.id}/assignments/e-database`,
+      payload: {
+        room_id: "r-101",
+        time_slot_id: "s-001",
+        teacher_ids: ["t-zhang"],
+      },
+    });
+    assert.equal(conflictingAdjustment.statusCode, 200);
+    const blockedDraft = conflictingAdjustment.json();
+    assert.equal(blockedDraft.draft.status, "blocked");
+    assert.ok(blockedDraft.conflicts.some((conflict: { type: string }) => (
+      conflict.type === "room_time_unique"
+    )));
+    assert.ok(blockedDraft.conflicts.some((conflict: { type: string }) => (
+      conflict.type === "teacher_time_unique"
+    )));
+    assert.equal(blockedDraft.changeEvents.length, 1);
+
+    const blockedPublish = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${createdDraft.draft.id}/publish`,
+    });
+    assert.equal(blockedPublish.statusCode, 409);
+    assert.equal(blockedPublish.json().error, "schedule_draft_has_conflicts");
+
+    const fixedAdjustment = await app.inject({
+      method: "PATCH",
+      url: `/api/schedule-drafts/${createdDraft.draft.id}/assignments/e-database`,
+      payload: {
+        room_id: "r-lab-2",
+        time_slot_id: "s-005",
+        teacher_ids: ["t-li"],
+      },
+    });
+    assert.equal(fixedAdjustment.statusCode, 200);
+    const fixedDraft = fixedAdjustment.json();
+    assert.equal(fixedDraft.draft.status, "validated");
+    assert.equal(fixedDraft.conflicts.length, 0);
+    assert.equal(fixedDraft.changeEvents.length, 2);
+
+    const publishResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${createdDraft.draft.id}/publish`,
+    });
+    assert.equal(publishResponse.statusCode, 200);
+    assert.equal(publishResponse.json().batch.status, "published");
+    assert.equal(publishResponse.json().result.assignments.length, 2);
+    assert.equal(publishResponse.json().result.assignments[1].room_id, "r-lab-2");
+
+    const publishedResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule",
+    });
+    assert.equal(publishedResponse.statusCode, 200);
+    assert.equal(publishedResponse.json().run.id, publishResponse.json().run.id);
 
     await app.close();
   });

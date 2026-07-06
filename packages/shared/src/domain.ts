@@ -273,6 +273,64 @@ export interface ScheduleRollbackResponse {
   previousRun: ScheduleRunSummary | null;
 }
 
+export type ScheduleDraftStatus =
+  | "editing"
+  | "validated"
+  | "blocked"
+  | "published"
+  | "discarded";
+
+export interface ScheduleDraftSummary {
+  id: string;
+  batchId: string;
+  sourceRunId: string;
+  basePublishedRunId: string | null;
+  status: ScheduleDraftStatus;
+  score: number;
+  conflictCount: number;
+  assignmentCount: number;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduleDraftChangeEvent {
+  id: string;
+  draftId: string;
+  examTaskId: string;
+  before: ScheduledExam;
+  after: ScheduledExam;
+  actor: string;
+  createdAt: string;
+}
+
+export interface ScheduleDraftDetailResponse {
+  draft: ScheduleDraftSummary;
+  assignments: ScheduledExam[];
+  conflicts: ConflictRecord[];
+  changeEvents: ScheduleDraftChangeEvent[];
+}
+
+export interface ScheduleDraftListResponse {
+  drafts: ScheduleDraftSummary[];
+}
+
+export interface ScheduleDraftComparisonResponse {
+  draft: ScheduleDraftSummary;
+  sourceRun: ScheduleRunSummary;
+  assignmentChanges: {
+    unchanged: number;
+    changed: Array<{
+      before: ScheduledExam;
+      after: ScheduledExam;
+    }>;
+  };
+}
+
+export interface ScheduleDraftPublishResponse extends PublishedScheduleResponse {
+  draft: ScheduleDraftSummary;
+}
+
 export interface PublishedScheduleAssignmentView {
   assignment: ScheduledExam;
   examTask: ExamTask | null;

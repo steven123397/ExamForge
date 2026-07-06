@@ -28,6 +28,13 @@ export const runStatus = pgEnum("run_status", [
   "error",
 ]);
 export const conflictSeverity = pgEnum("conflict_severity", ["error", "warning"]);
+export const draftStatus = pgEnum("draft_status", [
+  "editing",
+  "validated",
+  "blocked",
+  "published",
+  "discarded",
+]);
 
 export const examBatches = pgTable("exam_batches", {
   id: text("id").primaryKey(),
@@ -128,6 +135,50 @@ export const conflictRecords = pgTable("conflict_records", {
   affectedIds: jsonb("affected_ids").$type<string[]>().notNull(),
   message: text("message").notNull(),
   suggestion: text("suggestion").notNull(),
+});
+
+export const scheduleDrafts = pgTable("schedule_drafts", {
+  id: text("id").primaryKey(),
+  batchId: text("batch_id").notNull(),
+  sourceRunId: text("source_run_id").notNull(),
+  basePublishedRunId: text("base_published_run_id"),
+  status: draftStatus("status").notNull(),
+  score: integer("score").notNull(),
+  conflictCount: integer("conflict_count").notNull(),
+  assignmentCount: integer("assignment_count").notNull(),
+  createdBy: text("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const draftScheduledExams = pgTable("draft_scheduled_exams", {
+  id: text("id").primaryKey(),
+  draftId: text("draft_id").notNull(),
+  examTaskId: text("exam_task_id").notNull(),
+  roomId: text("room_id").notNull(),
+  timeSlotId: text("time_slot_id").notNull(),
+  teacherIds: jsonb("teacher_ids").$type<string[]>().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const draftConflictRecords = pgTable("draft_conflict_records", {
+  id: text("id").primaryKey(),
+  draftId: text("draft_id").notNull(),
+  type: text("type").notNull(),
+  severity: conflictSeverity("severity").notNull(),
+  affectedIds: jsonb("affected_ids").$type<string[]>().notNull(),
+  message: text("message").notNull(),
+  suggestion: text("suggestion").notNull(),
+});
+
+export const draftChangeEvents = pgTable("draft_change_events", {
+  id: text("id").primaryKey(),
+  draftId: text("draft_id").notNull(),
+  examTaskId: text("exam_task_id").notNull(),
+  before: jsonb("before").notNull(),
+  after: jsonb("after").notNull(),
+  actor: text("actor").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const auditEvents = pgTable("audit_events", {

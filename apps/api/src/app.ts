@@ -5,6 +5,7 @@ import {
   referenceRecordCreateSchemas,
   referenceRecordUpdateSchemas,
   referenceResourceSchema,
+  scheduledExamSchema,
   type PublishedScheduleAudienceResponse,
   type PublishedScheduleResponse,
   type ReferenceDataResponse,
@@ -173,6 +174,109 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.get("/api/schedule-runs", async () => repository.listScheduleRuns());
+
+  app.post<{ Params: { id: string } }>(
+    "/api/schedule-runs/:id/drafts",
+    async (request, reply) => {
+      const draft = await repository.createScheduleDraftFromRun(request.params.id);
+      if (!draft) {
+        return reply.code(404).send({
+          error: "schedule_run_not_found",
+          message: `Schedule run ${request.params.id} does not exist.`,
+        });
+      }
+      return reply.code(201).send(draft);
+    },
+  );
+
+  app.get("/api/schedule-drafts", async () => repository.listScheduleDrafts());
+
+  app.get<{ Params: { id: string } }>("/api/schedule-drafts/:id", async (request, reply) => {
+    const draft = await repository.getScheduleDraft(request.params.id);
+    if (!draft) {
+      return reply.code(404).send({
+        error: "schedule_draft_not_found",
+        message: `Schedule draft ${request.params.id} does not exist.`,
+      });
+    }
+    return draft;
+  });
+
+  app.patch<{ Params: { id: string; examTaskId: string } }>(
+    "/api/schedule-drafts/:id/assignments/:examTaskId",
+    async (request, reply) => {
+      const parsed = scheduledExamSchema
+        .omit({ exam_task_id: true })
+        .partial()
+        .strict()
+        .safeParse(request.body);
+      if (!parsed.success || Object.keys(parsed.data).length === 0) {
+        return reply.code(400).send({
+          error: "invalid_schedule_draft_assignment",
+          message: "Schedule draft assignment patch is invalid.",
+          issues: parsed.success ? [] : parsed.error.issues,
+        });
+      }
+
+      const draft = await repository.updateScheduleDraftAssignment(
+        request.params.id,
+        request.params.examTaskId,
+        parsed.data,
+      );
+      if (!draft) {
+        return reply.code(404).send({
+          error: "schedule_draft_assignment_not_found",
+          message: "Schedule draft or assignment does not exist.",
+        });
+      }
+      return draft;
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/schedule-drafts/:id/validate",
+    async (request, reply) => {
+      const draft = await repository.validateScheduleDraft(request.params.id);
+      if (!draft) {
+        return reply.code(404).send({
+          error: "schedule_draft_not_found",
+          message: `Schedule draft ${request.params.id} does not exist.`,
+        });
+      }
+      return draft;
+    },
+  );
+
+  app.get<{ Params: { id: string } }>("/api/schedule-drafts/:id/compare", async (request, reply) => {
+    const comparison = await repository.compareScheduleDraft(request.params.id);
+    if (!comparison) {
+      return reply.code(404).send({
+        error: "schedule_draft_not_found",
+        message: `Schedule draft ${request.params.id} or its source run does not exist.`,
+      });
+    }
+    return comparison;
+  });
+
+  app.post<{ Params: { id: string } }>(
+    "/api/schedule-drafts/:id/publish",
+    async (request, reply) => {
+      const published = await repository.publishScheduleDraft(request.params.id);
+      if (!published) {
+        return reply.code(404).send({
+          error: "schedule_draft_not_found",
+          message: `Schedule draft ${request.params.id} does not exist.`,
+        });
+      }
+      if (published === "conflict") {
+        return reply.code(409).send({
+          error: "schedule_draft_has_conflicts",
+          message: "Schedule draft has hard conflicts and cannot be published.",
+        });
+      }
+      return published;
+    },
+  );
 
   app.get<{
     Querystring: {
