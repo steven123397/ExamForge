@@ -13,13 +13,15 @@ import {
   Database,
   Gauge,
   History,
+  Lightbulb,
+  Move,
   Plus,
   Play,
   Save,
   ShieldCheck,
   Users,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   DashboardResponse,
   AuditEventSummary,
@@ -28,6 +30,8 @@ import type {
   ReferenceDataResponse,
   ReferenceRecord,
   ReferenceResource,
+  ScheduleDraftAdjustmentSuggestion,
+  ScheduleDraftAdjustmentSuggestionsResponse,
   ScheduleRunComparisonResponse,
   ScheduleDraftComparisonResponse,
   ScheduleDraftDetailResponse,
@@ -173,6 +177,7 @@ export function OperationsConsole() {
   const [drafts, setDrafts] = useState<ScheduleDraftSummary[]>([]);
   const [currentDraft, setCurrentDraft] = useState<ScheduleDraftDetailResponse | null>(null);
   const [draftComparison, setDraftComparison] = useState<ScheduleDraftComparisonResponse | null>(null);
+  const [draftSuggestions, setDraftSuggestions] = useState<ScheduleDraftAdjustmentSuggestionsResponse | null>(null);
   const [selectedDraftAssignmentId, setSelectedDraftAssignmentId] = useState("");
   const [draftForm, setDraftForm] = useState<DraftAssignmentForm>({
     room_id: "",
@@ -185,6 +190,7 @@ export function OperationsConsole() {
   const [runState, setRunState] = useState<LoadState>("idle");
   const [compareState, setCompareState] = useState<LoadState>("idle");
   const [draftState, setDraftState] = useState<LoadState>("idle");
+  const [suggestionState, setSuggestionState] = useState<LoadState>("idle");
   const [publishState, setPublishState] = useState<LoadState>("idle");
   const [queryState, setQueryState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -205,6 +211,16 @@ export function OperationsConsole() {
       });
     }
   }, [currentDraft, selectedDraftAssignmentId]);
+
+  useEffect(() => {
+    const draftLocked = currentDraft?.draft.status === "published" || currentDraft?.draft.status === "discarded";
+    if (currentDraft && selectedDraftAssignmentId && !draftLocked) {
+      void loadDraftSuggestions(currentDraft.draft.id, selectedDraftAssignmentId);
+    } else {
+      setDraftSuggestions(null);
+      setSuggestionState("idle");
+    }
+  }, [currentDraft?.draft.id, currentDraft?.draft.status, currentDraft?.draft.updatedAt, selectedDraftAssignmentId]);
 
   async function loadInitialData() {
     setState("loading");
@@ -373,21 +389,54 @@ export function OperationsConsole() {
     if (!currentDraft || !selectedDraftAssignmentId) {
       return;
     }
+    await saveDraftAssignment(selectedDraftAssignmentId, {
+      room_id: draftForm.room_id,
+      time_slot_id: draftForm.time_slot_id,
+      teacher_ids: splitList(draftForm.teacher_ids),
+    });
+  }
+
+  async function applyDraftSuggestion(suggestion: ScheduleDraftAdjustmentSuggestion) {
+    await saveDraftAssignment(suggestion.assignment.exam_task_id, {
+      room_id: suggestion.assignment.room_id,
+      time_slot_id: suggestion.assignment.time_slot_id,
+      teacher_ids: suggestion.assignment.teacher_ids,
+    });
+  }
+
+  async function moveDraftAssignment(examTaskId: string, roomId: string, timeSlotId: string) {
+    const currentAssignment = currentDraft?.assignments.find((assignment) => (
+      assignment.exam_task_id === examTaskId
+    ));
+    if (!currentAssignment) {
+      return;
+    }
+    setSelectedDraftAssignmentId(examTaskId);
+    await saveDraftAssignment(examTaskId, {
+      room_id: roomId,
+      time_slot_id: timeSlotId,
+      teacher_ids: currentAssignment.teacher_ids,
+    });
+  }
+
+  async function saveDraftAssignment(
+    examTaskId: string,
+    patch: Pick<ScheduledExam, "room_id" | "time_slot_id" | "teacher_ids">,
+  ) {
+    if (!currentDraft) {
+      return;
+    }
     setDraftState("loading");
     setError(null);
     try {
       const response = await fetch(
-        `${apiBase}/api/schedule-drafts/${encodeURIComponent(currentDraft.draft.id)}/assignments/${encodeURIComponent(selectedDraftAssignmentId)}`,
+        `${apiBase}/api/schedule-drafts/${encodeURIComponent(currentDraft.draft.id)}/assignments/${encodeURIComponent(examTaskId)}`,
         {
           method: "PATCH",
           headers: {
             "content-type": "application/json",
           },
-          body: JSON.stringify({
-            room_id: draftForm.room_id,
-            time_slot_id: draftForm.time_slot_id,
-            teacher_ids: splitList(draftForm.teacher_ids),
-          }),
+          body: JSON.stringify(patch),
         },
       );
       if (!response.ok) {
@@ -395,12 +444,33 @@ export function OperationsConsole() {
       }
       const payload = (await response.json()) as ScheduleDraftDetailResponse;
       setCurrentDraft(payload);
+      setSelectedDraftAssignmentId(examTaskId);
       await loadDraftComparison(payload.draft.id);
       await loadOperationalHistory();
       setDraftState("ready");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "草稿调整失败");
       setDraftState("error");
+    }
+  }
+
+  async function loadDraftSuggestions(id: string, examTaskId: string) {
+    setSuggestionState("loading");
+    try {
+      const response = await fetch(
+        `${apiBase}/api/schedule-drafts/${encodeURIComponent(id)}/assignments/${encodeURIComponent(examTaskId)}/suggestions`,
+        { cache: "no-store" },
+      );
+      if (response.ok) {
+        setDraftSuggestions((await response.json()) as ScheduleDraftAdjustmentSuggestionsResponse);
+        setSuggestionState("ready");
+      } else {
+        setDraftSuggestions(null);
+        setSuggestionState(response.status === 404 ? "idle" : "error");
+      }
+    } catch {
+      setDraftSuggestions(null);
+      setSuggestionState("error");
     }
   }
 
@@ -729,15 +799,19 @@ export function OperationsConsole() {
             runs={runHistory}
             draft={currentDraft}
             comparison={draftComparison}
+            suggestions={draftSuggestions}
             referenceData={referenceData}
             selectedAssignmentId={selectedDraftAssignmentId}
             draftForm={draftForm}
             draftState={draftState}
+            suggestionState={suggestionState}
             onCreateDraft={createDraftFromRun}
             onLoadDraft={loadDraft}
             onSelectAssignment={setSelectedDraftAssignmentId}
             onDraftFormChange={setDraftForm}
             onSaveAdjustment={adjustDraftAssignment}
+            onApplySuggestion={applyDraftSuggestion}
+            onMoveAssignment={moveDraftAssignment}
             onPublishDraft={publishDraft}
             onDiscardDraft={discardDraft}
           />
@@ -1016,15 +1090,19 @@ function ScheduleDraftWorkspace({
   runs,
   draft,
   comparison,
+  suggestions,
   referenceData,
   selectedAssignmentId,
   draftForm,
   draftState,
+  suggestionState,
   onCreateDraft,
   onLoadDraft,
   onSelectAssignment,
   onDraftFormChange,
   onSaveAdjustment,
+  onApplySuggestion,
+  onMoveAssignment,
   onPublishDraft,
   onDiscardDraft,
 }: {
@@ -1032,19 +1110,27 @@ function ScheduleDraftWorkspace({
   runs: ScheduleRunSummary[];
   draft: ScheduleDraftDetailResponse | null;
   comparison: ScheduleDraftComparisonResponse | null;
+  suggestions: ScheduleDraftAdjustmentSuggestionsResponse | null;
   referenceData: ReferenceDataResponse | null;
   selectedAssignmentId: string;
   draftForm: DraftAssignmentForm;
   draftState: LoadState;
+  suggestionState: LoadState;
   onCreateDraft(id: string): Promise<void>;
   onLoadDraft(id: string): Promise<void>;
   onSelectAssignment(id: string): void;
   onDraftFormChange(form: DraftAssignmentForm): void;
   onSaveAdjustment(): Promise<void>;
+  onApplySuggestion(suggestion: ScheduleDraftAdjustmentSuggestion): Promise<void>;
+  onMoveAssignment(examTaskId: string, roomId: string, timeSlotId: string): Promise<void>;
   onPublishDraft(): Promise<void>;
   onDiscardDraft(): Promise<void>;
 }) {
   const [sourceRunId, setSourceRunId] = useState("");
+  const [draggedAssignmentId, setDraggedAssignmentId] = useState("");
+  const [dragTargetKey, setDragTargetKey] = useState("");
+  const draggedAssignmentIdRef = useRef("");
+  const dragSourceKeyRef = useRef("");
   const scheduleInput = referenceData?.scheduleInput;
   const selectedAssignment = draft?.assignments.find((assignment) => (
     assignment.exam_task_id === selectedAssignmentId
@@ -1071,8 +1157,43 @@ function ScheduleDraftWorkspace({
     )) ?? false;
   }
 
+  function clearDragState() {
+    draggedAssignmentIdRef.current = "";
+    dragSourceKeyRef.current = "";
+    setDraggedAssignmentId("");
+    setDragTargetKey("");
+  }
+
+  function beginDrag(examTaskId: string, sourceKey: string) {
+    draggedAssignmentIdRef.current = examTaskId;
+    dragSourceKeyRef.current = sourceKey;
+    setDraggedAssignmentId(examTaskId);
+    onSelectAssignment(examTaskId);
+  }
+
+  function handleDrop(roomId: string, slotId: string, transferredAssignmentId = "") {
+    const moving = transferredAssignmentId || draggedAssignmentIdRef.current || draggedAssignmentId;
+    if (!moving || draftLocked) {
+      return;
+    }
+    clearDragState();
+    void onMoveAssignment(moving, roomId, slotId);
+  }
+
+  function handlePointerDrop(roomId: string, slotId: string) {
+    const targetKey = `${slotId}-${roomId}`;
+    if (!draggedAssignmentIdRef.current || draftLocked) {
+      return;
+    }
+    if (dragSourceKeyRef.current === targetKey) {
+      clearDragState();
+      return;
+    }
+    handleDrop(roomId, slotId);
+  }
+
   return (
-    <div className="draft-workspace">
+    <div className="draft-workspace" data-testid="schedule-draft-workspace">
       <div className="draft-rail">
         <div className="draft-create">
           <label>
@@ -1102,6 +1223,7 @@ function ScheduleDraftWorkspace({
             <button
               type="button"
               key={item.id}
+              data-testid={`draft-row-${item.id}`}
               className={draft?.draft.id === item.id ? "draft-row active" : "draft-row"}
               onClick={() => onLoadDraft(item.id)}
             >
@@ -1190,17 +1312,52 @@ function ScheduleDraftWorkspace({
                   <button
                     type="button"
                     key={`${slot.id}-${room.id}`}
+                    data-testid={`draft-cell-${slot.id}-${room.id}`}
+                    data-exam-task-id={assignment?.exam_task_id}
                     className={[
                       "matrix-cell",
                       assignment ? "filled" : "",
                       assignment?.exam_task_id === selectedAssignmentId ? "selected" : "",
                       assignment && assignmentHasConflict(assignment) ? "conflicted" : "",
+                      dragTargetKey === `${slot.id}-${room.id}` ? "drop-target" : "",
                     ].join(" ")}
-                    disabled={!assignment}
+                    draggable={Boolean(assignment && !draftLocked)}
+                    aria-label={assignment ? undefined : `${slot.date} ${slot.start_time}-${slot.end_time} ${room.name} 空考位`}
+                    onDragStart={(event) => {
+                      if (assignment && !draftLocked) {
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", assignment.exam_task_id);
+                        beginDrag(assignment.exam_task_id, `${slot.id}-${room.id}`);
+                      }
+                    }}
+                    onDragEnd={clearDragState}
+                    onDragOver={(event) => {
+                      if ((draggedAssignmentIdRef.current || draggedAssignmentId) && !draftLocked) {
+                        event.preventDefault();
+                        setDragTargetKey(`${slot.id}-${room.id}`);
+                      }
+                    }}
+                    onPointerDown={(event) => {
+                      if (event.button === 0 && assignment && !draftLocked) {
+                        beginDrag(assignment.exam_task_id, `${slot.id}-${room.id}`);
+                      }
+                    }}
+                    onPointerEnter={() => {
+                      if (draggedAssignmentIdRef.current && !draftLocked) {
+                        setDragTargetKey(`${slot.id}-${room.id}`);
+                      }
+                    }}
+                    onPointerUp={() => handlePointerDrop(room.id, slot.id)}
+                    onDragLeave={() => setDragTargetKey("")}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      handleDrop(room.id, slot.id, event.dataTransfer.getData("text/plain"));
+                    }}
                     onClick={() => assignment ? onSelectAssignment(assignment.exam_task_id) : undefined}
                   >
                     {assignment && task ? (
                       <>
+                        <Move size={14} aria-hidden="true" />
                         <strong>{course?.name ?? task.course_id}</strong>
                         <span>{task.student_group_ids.map((id) => lookups.groups.get(id)?.name ?? id).join("、")}</span>
                         <em>{assignment.teacher_ids.map((id) => lookups.teachers.get(id)?.name ?? id).join("、")}</em>
@@ -1275,6 +1432,46 @@ function ScheduleDraftWorkspace({
             </button>
           </>
         ) : <p className="muted">选择矩阵中的考试卡片后调整时间、考场和监考教师。</p>}
+
+        <div className="suggestion-panel" data-testid="draft-suggestion-panel">
+          <div className="suggestion-title">
+            <Lightbulb size={16} />
+            <strong>局部调整建议</strong>
+            <span>{suggestionState === "loading" ? "计算中" : `${suggestions?.suggestions.length ?? 0} 项`}</span>
+          </div>
+          {suggestions?.suggestions.slice(0, 4).map((suggestion) => {
+            const room = lookups.rooms.get(suggestion.assignment.room_id);
+            const slot = lookups.slots.get(suggestion.assignment.time_slot_id);
+            return (
+              <article key={[
+                suggestion.assignment.room_id,
+                suggestion.assignment.time_slot_id,
+                suggestion.assignment.teacher_ids.join("-"),
+              ].join("|")}>
+                <div>
+                  <strong>{room?.name ?? suggestion.assignment.room_id}</strong>
+                  <span>{slot ? `${slot.date} ${slot.start_time}-${slot.end_time}` : suggestion.assignment.time_slot_id}</span>
+                </div>
+                <p>{suggestion.reasons.join("；")}</p>
+                <footer>
+                  <span>{suggestion.hardConflictCount} 冲突 · {suggestion.score} 分</span>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    data-testid="draft-suggestion-apply"
+                    disabled={draftState === "loading" || draftLocked || suggestion.hardConflictCount > 0}
+                    onClick={() => onApplySuggestion(suggestion)}
+                  >
+                    应用
+                  </button>
+                </footer>
+              </article>
+            );
+          })}
+          {suggestionState !== "loading" && !suggestions?.suggestions.length ? (
+            <p className="muted">选择可编辑草稿中的考试后显示候选安排。</p>
+          ) : null}
+        </div>
 
         <div className="conflict-list draft-conflicts">
           {draft?.conflicts.slice(0, 6).map((conflict) => (

@@ -27,6 +27,7 @@ import {
   type ReferenceRecord,
   type ReferenceDataResponse,
   type ReferenceResource,
+  type ScheduleDraftAdjustmentSuggestionsResponse,
   type ScheduleDraftChangeEvent,
   type ScheduleDraftComparisonResponse,
   type ScheduleDraftDetailResponse,
@@ -46,6 +47,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import {
   buildDraftComparison,
+  buildDraftAdjustmentSuggestions,
   buildDraftScheduleResult,
   buildRunComparison,
   validateDraftAssignments,
@@ -767,6 +769,19 @@ export class PostgresPlatformRepository implements PlatformRepository {
     const source = current ? await this.getScheduleRun(current.draft.sourceRunId) : null;
     const published = await this.getPublishedSchedule();
     return current && source ? buildDraftComparison(current, source, published) : null;
+  }
+
+  async suggestScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftAdjustmentSuggestionsResponse | null> {
+    const [current, referenceData] = await Promise.all([
+      this.getScheduleDraft(id),
+      this.getReferenceData(),
+    ]);
+    return current
+      ? buildDraftAdjustmentSuggestions(referenceData.scheduleInput, current, examTaskId)
+      : null;
   }
 
   async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {

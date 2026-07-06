@@ -349,6 +349,19 @@ export interface ScheduleDraftDiscardResponse {
   draft: ScheduleDraftSummary;
 }
 
+export interface ScheduleDraftAdjustmentSuggestion {
+  assignment: ScheduledExam;
+  hardConflictCount: number;
+  score: number;
+  reasons: string[];
+}
+
+export interface ScheduleDraftAdjustmentSuggestionsResponse {
+  draft: ScheduleDraftSummary;
+  examTaskId: string;
+  suggestions: ScheduleDraftAdjustmentSuggestion[];
+}
+
 export interface PublishedScheduleAssignmentView {
   assignment: ScheduledExam;
   examTask: ExamTask | null;

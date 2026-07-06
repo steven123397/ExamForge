@@ -283,6 +283,7 @@ describe("ExamForge API", () => {
         ),
         validateScheduleDraft: (id) => repository.validateScheduleDraft(id),
         compareScheduleDraft: (id) => repository.compareScheduleDraft(id),
+        suggestScheduleDraftAssignment: (id, examTaskId) => repository.suggestScheduleDraftAssignment(id, examTaskId),
         publishScheduleDraft: (id) => repository.publishScheduleDraft(id),
         discardScheduleDraft: (id) => repository.discardScheduleDraft(id),
       },
@@ -599,6 +600,61 @@ describe("ExamForge API", () => {
     assert.ok(auditResponse.json().events.some((event: { action: string }) => (
       event.action === "schedule_draft.discarded"
     )));
+
+    await app.close();
+  });
+
+  it("suggests local draft adjustments and applies a conflict-free candidate", async () => {
+    const app = createApp({ scheduler: new DraftWorkflowScheduler() });
+
+    const runResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+    });
+    const run = runResponse.json();
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${run.run.id}/drafts`,
+    });
+    const draft = draftResponse.json();
+
+    await app.inject({
+      method: "PATCH",
+      url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database`,
+      payload: {
+        room_id: "r-101",
+        time_slot_id: "s-001",
+        teacher_ids: ["t-zhang"],
+      },
+    });
+
+    const suggestionsResponse = await app.inject({
+      method: "GET",
+      url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database/suggestions`,
+    });
+
+    assert.equal(suggestionsResponse.statusCode, 200);
+    const suggestions = suggestionsResponse.json();
+    assert.equal(suggestions.examTaskId, "e-database");
+    assert.ok(suggestions.suggestions.length > 0);
+    assert.equal(suggestions.suggestions[0].hardConflictCount, 0);
+    assert.equal(suggestions.suggestions[0].assignment.exam_task_id, "e-database");
+    assert.ok(suggestions.suggestions[0].reasons.length > 0);
+
+    const appliedSuggestion = suggestions.suggestions[0].assignment;
+    const fixedResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database`,
+      payload: {
+        room_id: appliedSuggestion.room_id,
+        time_slot_id: appliedSuggestion.time_slot_id,
+        teacher_ids: appliedSuggestion.teacher_ids,
+      },
+    });
+
+    assert.equal(fixedResponse.statusCode, 200);
+    assert.equal(fixedResponse.json().draft.status, "validated");
+    assert.equal(fixedResponse.json().conflicts.length, 0);
 
     await app.close();
   });

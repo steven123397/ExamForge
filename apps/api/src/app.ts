@@ -264,6 +264,23 @@ export function createApp(options: AppOptions = {}) {
     return comparison;
   });
 
+  app.get<{ Params: { id: string; examTaskId: string } }>(
+    "/api/schedule-drafts/:id/assignments/:examTaskId/suggestions",
+    async (request, reply) => {
+      const suggestions = await repository.suggestScheduleDraftAssignment(
+        request.params.id,
+        request.params.examTaskId,
+      );
+      if (!suggestions) {
+        return reply.code(404).send({
+          error: "schedule_draft_assignment_not_found",
+          message: "Schedule draft or assignment does not exist.",
+        });
+      }
+      return suggestions;
+    },
+  );
+
   app.post<{ Params: { id: string } }>(
     "/api/schedule-drafts/:id/publish",
     async (request, reply) => {

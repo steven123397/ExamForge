@@ -12,6 +12,7 @@ import {
   type ReferenceResource,
   type ConflictRecord,
   type ScheduleDraftChangeEvent,
+  type ScheduleDraftAdjustmentSuggestionsResponse,
   type ScheduleDraftComparisonResponse,
   type ScheduleDraftDetailResponse,
   type ScheduleDraftDiscardResponse,
@@ -62,6 +63,10 @@ export interface PlatformRepository {
   ): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
   validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null>;
   compareScheduleDraft(id: string): Promise<ScheduleDraftComparisonResponse | null>;
+  suggestScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftAdjustmentSuggestionsResponse | null>;
   publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null>;
   discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null>;
   close?(): Promise<void>;
@@ -376,6 +381,17 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return buildDraftComparison(current, source, published);
   }
 
+  async suggestScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftAdjustmentSuggestionsResponse | null> {
+    const current = this.drafts.get(id);
+    if (!current) {
+      return null;
+    }
+    return buildDraftAdjustmentSuggestions(this.scheduleInput, current, examTaskId);
+  }
+
   async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {
     const existing = this.drafts.get(id);
     if (!existing) {
@@ -619,6 +635,107 @@ function buildDraftAssignmentChanges(
     unchanged,
     changed,
   };
+}
+
+export function buildDraftAdjustmentSuggestions(
+  scheduleInput: ReferenceDataResponse["scheduleInput"],
+  detail: ScheduleDraftDetailResponse,
+  examTaskId: string,
+): ScheduleDraftAdjustmentSuggestionsResponse | null {
+  const task = scheduleInput.exam_tasks.find((item) => item.id === examTaskId);
+  const currentIndex = detail.assignments.findIndex((assignment) => (
+    assignment.exam_task_id === examTaskId
+  ));
+  if (!task || currentIndex === -1) {
+    return null;
+  }
+
+  const slots = task.allowed_slot_ids.length > 0
+    ? scheduleInput.time_slots.filter((slot) => task.allowed_slot_ids.includes(slot.id))
+    : scheduleInput.time_slots;
+  const teacherGroups = buildTeacherGroups(
+    scheduleInput.teachers.map((teacher) => teacher.id),
+    task.invigilator_count,
+  );
+  const suggestions: ScheduleDraftAdjustmentSuggestionsResponse["suggestions"] = [];
+  const seen = new Set<string>();
+
+  for (const room of scheduleInput.rooms) {
+    for (const slot of slots) {
+      for (const teacherIds of teacherGroups) {
+        const assignment = {
+          exam_task_id: examTaskId,
+          room_id: room.id,
+          time_slot_id: slot.id,
+          teacher_ids: teacherIds,
+        };
+        const key = assignmentKey(assignment);
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+
+        const assignments = [...detail.assignments];
+        assignments[currentIndex] = assignment;
+        const conflicts = validateDraftAssignments(scheduleInput, assignments);
+        const hardConflictCount = conflicts.filter((conflict) => conflict.severity === "error").length;
+        suggestions.push({
+          assignment,
+          hardConflictCount,
+          score: scoreDraft(conflicts),
+          reasons: buildSuggestionReasons(conflicts, room.name, slot.id),
+        });
+      }
+    }
+  }
+
+  suggestions.sort((left, right) => (
+    left.hardConflictCount - right.hardConflictCount
+    || right.score - left.score
+    || left.assignment.time_slot_id.localeCompare(right.assignment.time_slot_id)
+    || left.assignment.room_id.localeCompare(right.assignment.room_id)
+  ));
+
+  return {
+    draft: detail.draft,
+    examTaskId,
+    suggestions: suggestions.slice(0, 8),
+  };
+}
+
+function buildTeacherGroups(teacherIds: string[], requiredCount: number): string[][] {
+  if (requiredCount <= 1) {
+    return teacherIds.map((teacherId) => [teacherId]);
+  }
+  const groups: string[][] = [];
+  const visit = (start: number, selected: string[]) => {
+    if (selected.length === requiredCount) {
+      groups.push([...selected]);
+      return;
+    }
+    for (let index = start; index < teacherIds.length; index += 1) {
+      selected.push(teacherIds[index]);
+      visit(index + 1, selected);
+      selected.pop();
+    }
+  };
+  visit(0, []);
+  return groups;
+}
+
+function buildSuggestionReasons(
+  conflicts: ConflictRecord[],
+  roomName: string,
+  slotId: string,
+): string[] {
+  const hardConflicts = conflicts.filter((conflict) => conflict.severity === "error");
+  if (hardConflicts.length === 0) {
+    return [
+      `${roomName} 在 ${slotId} 可承接该考试。`,
+      "候选安排通过当前硬约束校验。",
+    ];
+  }
+  return hardConflicts.slice(0, 3).map((conflict) => conflict.message);
 }
 
 export function validateDraftAssignments(
