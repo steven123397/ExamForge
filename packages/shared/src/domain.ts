@@ -262,3 +262,24 @@ export interface ScheduleRollbackResponse {
   batch: ExamBatchSummary;
   previousRun: ScheduleRunSummary | null;
 }
+
+export interface PublishedScheduleAssignmentView {
+  assignment: ScheduledExam;
+  examTask: ExamTask | null;
+  course: Course | null;
+  studentGroups: StudentGroup[];
+  room: Room | null;
+  timeSlot: TimeSlot | null;
+  teachers: Teacher[];
+}
+
+export interface PublishedScheduleAudienceResponse {
+  batch: ExamBatchSummary;
+  run: ScheduleRunSummary;
+  viewer: {
+    type: "teacher" | "student_group";
+    id: string;
+    name: string;
+  };
+  assignments: PublishedScheduleAssignmentView[];
+}

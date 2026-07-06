@@ -170,6 +170,47 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("queries published schedules by teacher and student group", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+    const referenceResponse = await app.inject({
+      method: "GET",
+      url: "/api/reference-data",
+    });
+    const referenceData = referenceResponse.json();
+    const teacher = referenceData.scheduleInput.teachers[0];
+    const studentGroup = referenceData.scheduleInput.student_groups[0];
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+    });
+    const created = createResponse.json();
+    await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${created.run.id}/publish`,
+    });
+
+    const teacherResponse = await app.inject({
+      method: "GET",
+      url: `/api/published-schedule/teachers/${teacher.id}`,
+    });
+    assert.equal(teacherResponse.statusCode, 200);
+    assert.equal(teacherResponse.json().viewer.id, teacher.id);
+    assert.equal(teacherResponse.json().assignments.length, 1);
+    assert.equal(teacherResponse.json().assignments[0].teachers[0].id, teacher.id);
+
+    const studentResponse = await app.inject({
+      method: "GET",
+      url: `/api/published-schedule/student-groups/${studentGroup.id}`,
+    });
+    assert.equal(studentResponse.statusCode, 200);
+    assert.equal(studentResponse.json().viewer.id, studentGroup.id);
+    assert.equal(studentResponse.json().assignments.length, 1);
+    assert.equal(studentResponse.json().assignments[0].studentGroups[0].id, studentGroup.id);
+
+    await app.close();
+  });
+
   it("uses reference data from the configured repository when creating a schedule run", async () => {
     const scheduler = new FakeScheduler();
     const repository = new InMemoryPlatformRepository();

@@ -675,6 +675,128 @@ th {
   overflow-wrap: anywhere;
 }
 
+.published-query {
+  display: grid;
+  gap: 16px;
+}
+
+.query-controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.query-controls label {
+  display: grid;
+  gap: 6px;
+}
+
+.query-controls label span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.query-controls select {
+  min-width: 0;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffaf0;
+  color: var(--ink);
+  padding: 0 9px;
+}
+
+.published-results {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.schedule-audience {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.42);
+  padding: 14px;
+}
+
+.audience-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.audience-title span {
+  color: var(--copper);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.audience-title strong {
+  overflow-wrap: anywhere;
+}
+
+.schedule-card-list {
+  display: grid;
+  gap: 10px;
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.schedule-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffaf0;
+  padding: 12px;
+}
+
+.schedule-card strong {
+  display: block;
+  color: var(--teal);
+  font-size: 14px;
+}
+
+.schedule-card span {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.schedule-card dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.schedule-card dl div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.56);
+  padding: 8px;
+}
+
+.schedule-card dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.schedule-card dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .audit-list article {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
@@ -717,8 +839,11 @@ th {
   .reference-layout,
   .form-grid,
   .compare-controls,
+  .query-controls,
+  .published-results,
   .comparison-grid,
-  .history-list article {
+  .history-list article,
+  .schedule-card dl {
     grid-template-columns: 1fr;
   }
 

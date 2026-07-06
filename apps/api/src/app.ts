@@ -4,6 +4,9 @@ import {
   referenceRecordCreateSchemas,
   referenceRecordUpdateSchemas,
   referenceResourceSchema,
+  type PublishedScheduleAudienceResponse,
+  type PublishedScheduleResponse,
+  type ReferenceDataResponse,
   type ReferenceRecord,
   type ReferenceResource,
 } from "@examforge/shared";
@@ -170,6 +173,68 @@ export function createApp(options: AppOptions = {}) {
     return published;
   });
 
+  app.get<{ Params: { teacherId: string } }>(
+    "/api/published-schedule/teachers/:teacherId",
+    async (request, reply) => {
+      const [referenceData, published] = await Promise.all([
+        repository.getReferenceData(),
+        repository.getPublishedSchedule(),
+      ]);
+      if (!published) {
+        return reply.code(404).send({
+          error: "published_schedule_not_found",
+          message: "No schedule has been published.",
+        });
+      }
+
+      const response = buildPublishedScheduleAudience(
+        referenceData,
+        published,
+        "teacher",
+        request.params.teacherId,
+      );
+      if (!response) {
+        return reply.code(404).send({
+          error: "published_schedule_viewer_not_found",
+          message: `Teacher ${request.params.teacherId} does not exist.`,
+        });
+      }
+
+      return response;
+    },
+  );
+
+  app.get<{ Params: { studentGroupId: string } }>(
+    "/api/published-schedule/student-groups/:studentGroupId",
+    async (request, reply) => {
+      const [referenceData, published] = await Promise.all([
+        repository.getReferenceData(),
+        repository.getPublishedSchedule(),
+      ]);
+      if (!published) {
+        return reply.code(404).send({
+          error: "published_schedule_not_found",
+          message: "No schedule has been published.",
+        });
+      }
+
+      const response = buildPublishedScheduleAudience(
+        referenceData,
+        published,
+        "student_group",
+        request.params.studentGroupId,
+      );
+      if (!response) {
+        return reply.code(404).send({
+          error: "published_schedule_viewer_not_found",
+          message: `Student group ${request.params.studentGroupId} does not exist.`,
+        });
+      }
+
+      return response;
+    },
+  );
+
   app.post("/api/published-schedule/rollback", async () => (
     repository.rollbackPublishedSchedule()
   ));
@@ -191,4 +256,59 @@ export function createApp(options: AppOptions = {}) {
 function parseReferenceResource(value: string): ReferenceResource | null {
   const parsed = referenceResourceSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
+}
+
+function buildPublishedScheduleAudience(
+  referenceData: ReferenceDataResponse,
+  published: PublishedScheduleResponse,
+  viewerType: "teacher" | "student_group",
+  viewerId: string,
+): PublishedScheduleAudienceResponse | null {
+  const { scheduleInput } = referenceData;
+  const teachers = new Map(scheduleInput.teachers.map((teacher) => [teacher.id, teacher]));
+  const groups = new Map(scheduleInput.student_groups.map((group) => [group.id, group]));
+  const courses = new Map(scheduleInput.courses.map((course) => [course.id, course]));
+  const rooms = new Map(scheduleInput.rooms.map((room) => [room.id, room]));
+  const slots = new Map(scheduleInput.time_slots.map((slot) => [slot.id, slot]));
+  const tasks = new Map(scheduleInput.exam_tasks.map((task) => [task.id, task]));
+
+  const viewer = viewerType === "teacher"
+    ? teachers.get(viewerId)
+    : groups.get(viewerId);
+  if (!viewer) {
+    return null;
+  }
+
+  const assignments = published.result.assignments
+    .filter((assignment) => {
+      const task = tasks.get(assignment.exam_task_id);
+      return viewerType === "teacher"
+        ? assignment.teacher_ids.includes(viewerId)
+        : task?.student_group_ids.includes(viewerId);
+    })
+    .map((assignment) => {
+      const task = tasks.get(assignment.exam_task_id) ?? null;
+      return {
+        assignment,
+        examTask: task,
+        course: task ? courses.get(task.course_id) ?? null : null,
+        studentGroups: task
+          ? task.student_group_ids.map((id) => groups.get(id)).filter((item) => item !== undefined)
+          : [],
+        room: rooms.get(assignment.room_id) ?? null,
+        timeSlot: slots.get(assignment.time_slot_id) ?? null,
+        teachers: assignment.teacher_ids.map((id) => teachers.get(id)).filter((item) => item !== undefined),
+      };
+    });
+
+  return {
+    batch: published.batch,
+    run: published.run,
+    viewer: {
+      type: viewerType,
+      id: viewer.id,
+      name: viewer.name,
+    },
+    assignments,
+  };
 }

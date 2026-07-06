@@ -22,6 +22,7 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   DashboardResponse,
   AuditEventSummary,
+  PublishedScheduleAudienceResponse,
   PublishedScheduleResponse,
   ReferenceDataResponse,
   ScheduleRunComparisonResponse,
@@ -98,10 +99,13 @@ export function OperationsConsole() {
   const [auditEvents, setAuditEvents] = useState<AuditEventSummary[]>([]);
   const [comparison, setComparison] = useState<ScheduleRunComparisonResponse | null>(null);
   const [publishedSchedule, setPublishedSchedule] = useState<PublishedScheduleResponse | null>(null);
+  const [teacherSchedule, setTeacherSchedule] = useState<PublishedScheduleAudienceResponse | null>(null);
+  const [studentSchedule, setStudentSchedule] = useState<PublishedScheduleAudienceResponse | null>(null);
   const [state, setState] = useState<LoadState>("idle");
   const [runState, setRunState] = useState<LoadState>("idle");
   const [compareState, setCompareState] = useState<LoadState>("idle");
   const [publishState, setPublishState] = useState<LoadState>("idle");
+  const [queryState, setQueryState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -176,6 +180,8 @@ export function OperationsConsole() {
       setPublishedSchedule((await publishedResponse.json()) as PublishedScheduleResponse);
     } else if (publishedResponse.status === 404) {
       setPublishedSchedule(null);
+      setTeacherSchedule(null);
+      setStudentSchedule(null);
     }
   }
 
@@ -241,6 +247,43 @@ export function OperationsConsole() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "方案回滚失败");
       setPublishState("error");
+    }
+  }
+
+  async function queryTeacherSchedule(teacherId: string) {
+    await queryPublishedSchedule(
+      `/api/published-schedule/teachers/${encodeURIComponent(teacherId)}`,
+      setTeacherSchedule,
+      "教师安排查询失败",
+    );
+  }
+
+  async function queryStudentSchedule(studentGroupId: string) {
+    await queryPublishedSchedule(
+      `/api/published-schedule/student-groups/${encodeURIComponent(studentGroupId)}`,
+      setStudentSchedule,
+      "学生安排查询失败",
+    );
+  }
+
+  async function queryPublishedSchedule(
+    path: string,
+    setter: (payload: PublishedScheduleAudienceResponse | null) => void,
+    message: string,
+  ) {
+    setQueryState("loading");
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}${path}`, { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(response.status === 404 ? "暂无已发布方案" : message);
+      }
+      setter((await response.json()) as PublishedScheduleAudienceResponse);
+      setQueryState("ready");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : message);
+      setter(null);
+      setQueryState("error");
     }
   }
 
@@ -432,6 +475,17 @@ export function OperationsConsole() {
           </Panel>
         </section>
 
+        <Panel title="已发布查询" eyebrow="Published Portal">
+          <PublishedScheduleLookup
+            referenceData={referenceData}
+            teacherSchedule={teacherSchedule}
+            studentSchedule={studentSchedule}
+            queryState={queryState}
+            onTeacherQuery={queryTeacherSchedule}
+            onStudentQuery={queryStudentSchedule}
+          />
+        </Panel>
+
         <section className="split">
           <Panel title="基础数据快照" eyebrow="Reference Data">
             <div className="snapshot-grid">
@@ -459,6 +513,114 @@ export function OperationsConsole() {
         </footer>
       </section>
     </main>
+  );
+}
+
+function PublishedScheduleLookup({
+  referenceData,
+  teacherSchedule,
+  studentSchedule,
+  queryState,
+  onTeacherQuery,
+  onStudentQuery,
+}: {
+  referenceData: ReferenceDataResponse | null;
+  teacherSchedule: PublishedScheduleAudienceResponse | null;
+  studentSchedule: PublishedScheduleAudienceResponse | null;
+  queryState: LoadState;
+  onTeacherQuery(id: string): Promise<void>;
+  onStudentQuery(id: string): Promise<void>;
+}) {
+  const teachers = referenceData?.scheduleInput.teachers ?? [];
+  const studentGroups = referenceData?.scheduleInput.student_groups ?? [];
+  const [teacherId, setTeacherId] = useState("");
+  const [studentGroupId, setStudentGroupId] = useState("");
+
+  useEffect(() => {
+    setTeacherId((current) => current || teachers[0]?.id || "");
+    setStudentGroupId((current) => current || studentGroups[0]?.id || "");
+  }, [teachers, studentGroups]);
+
+  return (
+    <div className="published-query">
+      <div className="query-controls">
+        <label>
+          <span>教师</span>
+          <select value={teacherId} onChange={(event) => setTeacherId(event.target.value)}>
+            {teachers.map((teacher) => (
+              <option value={teacher.id} key={teacher.id}>{teacher.name}</option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={!teacherId || queryState === "loading"}
+          onClick={() => onTeacherQuery(teacherId)}
+        >
+          <Users size={16} />
+          查询教师安排
+        </button>
+        <label>
+          <span>学生群体</span>
+          <select value={studentGroupId} onChange={(event) => setStudentGroupId(event.target.value)}>
+            {studentGroups.map((group) => (
+              <option value={group.id} key={group.id}>{group.name}</option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={!studentGroupId || queryState === "loading"}
+          onClick={() => onStudentQuery(studentGroupId)}
+        >
+          <BookOpen size={16} />
+          查询学生安排
+        </button>
+      </div>
+
+      <div className="published-results">
+        <ScheduleAudienceCards title="教师视图" schedule={teacherSchedule} />
+        <ScheduleAudienceCards title="学生视图" schedule={studentSchedule} />
+      </div>
+    </div>
+  );
+}
+
+function ScheduleAudienceCards({
+  title,
+  schedule,
+}: {
+  title: string;
+  schedule: PublishedScheduleAudienceResponse | null;
+}) {
+  return (
+    <div className="schedule-audience">
+      <div className="audience-title">
+        <span>{title}</span>
+        <strong>{schedule?.viewer.name ?? "未查询"}</strong>
+      </div>
+      <div className="schedule-card-list">
+        {schedule?.assignments.map((item) => (
+          <article className="schedule-card" key={`${schedule.viewer.id}-${item.assignment.exam_task_id}`}>
+            <div>
+              <strong>{item.course?.name ?? item.assignment.exam_task_id}</strong>
+              <span>{formatSlot(item.timeSlot)}</span>
+            </div>
+            <dl>
+              <div><dt>考场</dt><dd>{item.room?.name ?? item.assignment.room_id}</dd></div>
+              <div><dt>学生</dt><dd>{formatNames(item.studentGroups)}</dd></div>
+              <div><dt>监考</dt><dd>{formatNames(item.teachers)}</dd></div>
+            </dl>
+          </article>
+        ))}
+        {schedule && schedule.assignments.length === 0 ? (
+          <p className="muted">当前发布方案中没有匹配安排。</p>
+        ) : null}
+        {!schedule ? <p className="muted">选择对象后查询已发布安排。</p> : null}
+      </div>
+    </div>
   );
 }
 
@@ -803,6 +965,14 @@ function omitId<T extends { id: string }>(value: T): Omit<T, "id"> {
 
 function formatDelta(value: number) {
   return value > 0 ? `+${value}` : String(value);
+}
+
+function formatSlot(slot: PublishedScheduleAudienceResponse["assignments"][number]["timeSlot"]) {
+  return slot ? `${slot.date} ${slot.start_time}-${slot.end_time}` : "时间待确认";
+}
+
+function formatNames(items: Array<{ name: string }>) {
+  return items.map((item) => item.name).join("、") || "未分配";
 }
 
 function Metric({
