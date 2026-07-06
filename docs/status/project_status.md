@@ -17,7 +17,9 @@
 - 变更：已创建 npm workspace、`packages/shared`、`packages/db`、`apps/api` 和 `apps/web`，形成 Web/API/数据层/调度器的第一条企业级闭环。
 - 变更：`apps/scheduler` 已新增 JSON CLI，Fastify API 可以通过 stdin/stdout 调用 Python 调度器。
 - 变更：Next.js 运营台已提供批次概览、排考运行、结果列表、冲突解释、资源利用率和教师工作量视图。
-- 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `2 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
+- 变更：API 已新增仓储工厂，存在 `DATABASE_URL` 时切换到 PostgreSQL 持久化仓储，未配置时继续使用内置演示仓储。
+- 变更：PostgreSQL 仓储已覆盖批次/基础数据读取、排考运行写入、排考结果读取、冲突记录和审计事件写入；`packages/db` seed 已从 JSON 摘要升级为真实入库脚本。
+- 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `4 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
 
 ## 当前风险
 
@@ -27,8 +29,12 @@
 - 风险：`npm audit` 仍报告 Next 15.5.20 依赖链中的 2 个 moderate 级 PostCSS 相关公告，npm 给出的自动修复方案会降级到不适合本项目的旧 Next 版本。
 - 影响：当前不阻塞本地演示，但后续应跟踪 Next 官方依赖更新。
 - 处理建议：保留审计记录，后续升级 Next 或等待其依赖 PostCSS 修复版本。
+- 风险：当前机器未安装 `docker` 命令，无法在本机启动临时 PostgreSQL 容器完成真实数据库运行验证。
+- 影响：PostgreSQL 路径已经通过 TypeScript 类型检查、构建和 API 仓储工厂测试覆盖，但 seed/API 对真实 PostgreSQL 的运行验证仍需在具备 Docker 或 PostgreSQL 的环境执行。
+- 处理建议：安装 Docker 或提供可用 `DATABASE_URL` 后，按顺序执行 `packages/db/drizzle/*.sql`、`npm run seed --workspace @examforge/db` 和一次 API 排考运行验证。
+
 ## 下一步
 
-- [ ] 将 API 内置演示仓储替换为 PostgreSQL 持久化仓储。
+- [x] 将 API 内置演示仓储替换为 PostgreSQL 持久化仓储。
 - [ ] 增加基础数据管理页面的编辑能力。
 - [ ] 增加排考运行历史、版本对比和审计详情。

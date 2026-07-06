@@ -50,7 +50,23 @@ npm run dev
 docker compose up -d postgres
 ```
 
-当前 API 第一阶段使用内置演示仓储保证无数据库时也能演示排考闭环；PostgreSQL schema 和迁移文件位于 `packages/db/`，用于后续切换到持久化仓储。
+初始化 schema：
+
+```bash
+export DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge
+for migration in packages/db/drizzle/*.sql; do
+  psql "$DATABASE_URL" -f "$migration"
+done
+```
+
+写入演示批次和基础数据：
+
+```bash
+export DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge
+npm run seed --workspace @examforge/db
+```
+
+API 会在存在 `DATABASE_URL` 时使用 PostgreSQL 持久化仓储；未配置时回落到内置演示仓储，保证无数据库环境也能演示排考闭环。若已经应用过旧版 `0000_initial.sql`，只需要继续执行后续新增迁移。
 
 ## 核心演示链路
 

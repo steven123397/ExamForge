@@ -10,16 +10,17 @@ import {
 import { randomUUID } from "node:crypto";
 
 export interface PlatformRepository {
-  getDashboard(): DashboardResponse;
-  getReferenceData(): ReferenceDataResponse;
-  createScheduleRun(result: ScheduleResult): ScheduleRunResponse;
-  getScheduleRun(id: string): ScheduleRunResponse | null;
+  getDashboard(): Promise<DashboardResponse>;
+  getReferenceData(): Promise<ReferenceDataResponse>;
+  createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse>;
+  getScheduleRun(id: string): Promise<ScheduleRunResponse | null>;
+  close?(): Promise<void>;
 }
 
 export class InMemoryPlatformRepository implements PlatformRepository {
   private runs = new Map<string, ScheduleRunResponse>();
 
-  getDashboard(): DashboardResponse {
+  async getDashboard(): Promise<DashboardResponse> {
     const latestRun = Array.from(this.runs.values()).at(-1)?.run ?? null;
     return {
       batch: demoBatch,
@@ -35,14 +36,14 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     };
   }
 
-  getReferenceData(): ReferenceDataResponse {
+  async getReferenceData(): Promise<ReferenceDataResponse> {
     return {
       batch: demoBatch,
       scheduleInput: demoScheduleInput,
     };
   }
 
-  createScheduleRun(result: ScheduleResult): ScheduleRunResponse {
+  async createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse> {
     const id = `run-${randomUUID()}`;
     const run: ScheduleRunSummary = {
       id,
@@ -58,7 +59,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return response;
   }
 
-  getScheduleRun(id: string): ScheduleRunResponse | null {
+  async getScheduleRun(id: string): Promise<ScheduleRunResponse | null> {
     return this.runs.get(id) ?? null;
   }
 }

@@ -5,10 +5,14 @@ import {
   type ScheduleResult,
 } from "@examforge/shared";
 import { createApp } from "../src/app.js";
+import { InMemoryPlatformRepository } from "../src/repository.js";
 import type { SchedulerClient } from "../src/scheduler-client.js";
 
 class FakeScheduler implements SchedulerClient {
+  lastInput: ScheduleInput | null = null;
+
   async solve(input: ScheduleInput): Promise<ScheduleResult> {
+    this.lastInput = input;
     return {
       assignments: [
         {
@@ -77,6 +81,33 @@ describe("ExamForge API", () => {
 
     assert.equal(readResponse.statusCode, 200);
     assert.equal(readResponse.json().run.id, created.run.id);
+    await app.close();
+  });
+
+  it("uses reference data from the configured repository when creating a schedule run", async () => {
+    const scheduler = new FakeScheduler();
+    const repository = new InMemoryPlatformRepository();
+    const referenceData = structuredClone(await repository.getReferenceData());
+    referenceData.scheduleInput.exam_tasks = [referenceData.scheduleInput.exam_tasks[0]];
+
+    const app = createApp({
+      scheduler,
+      repository: {
+        ...repository,
+        getDashboard: () => repository.getDashboard(),
+        getReferenceData: async () => referenceData,
+        createScheduleRun: (result) => repository.createScheduleRun(result),
+        getScheduleRun: (id) => repository.getScheduleRun(id),
+      },
+    });
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+    });
+
+    assert.equal(createResponse.statusCode, 201);
+    assert.equal(scheduler.lastInput?.exam_tasks.length, 1);
     await app.close();
   });
 });

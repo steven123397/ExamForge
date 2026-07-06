@@ -6,6 +6,7 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
+import type { ScoreBreakdown } from "@examforge/shared";
 
 export const batchStatus = pgEnum("batch_status", [
   "draft",
@@ -100,6 +101,7 @@ export const scheduleRuns = pgTable("schedule_runs", {
   batchId: text("batch_id").notNull(),
   status: runStatus("status").notNull(),
   score: integer("score").notNull(),
+  scoreBreakdown: jsonb("score_breakdown").$type<ScoreBreakdown>().notNull(),
   conflictCount: integer("conflict_count").notNull(),
   assignmentCount: integer("assignment_count").notNull(),
   elapsedMs: integer("elapsed_ms").notNull(),

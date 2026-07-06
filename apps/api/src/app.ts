@@ -1,10 +1,7 @@
 import cors from "@fastify/cors";
 import Fastify from "fastify";
-import { demoScheduleInput } from "@examforge/shared";
-import {
-  InMemoryPlatformRepository,
-  type PlatformRepository,
-} from "./repository.js";
+import type { PlatformRepository } from "./repository.js";
+import { createPlatformRepository } from "./repository-factory.js";
 import {
   PythonSchedulerClient,
   type SchedulerClient,
@@ -21,7 +18,7 @@ export function createApp(options: AppOptions = {}) {
       level: process.env.LOG_LEVEL ?? "info",
     },
   });
-  const repository = options.repository ?? new InMemoryPlatformRepository();
+  const repository = options.repository ?? createPlatformRepository();
   const scheduler = options.scheduler ?? new PythonSchedulerClient();
 
   app.register(cors, {
@@ -33,18 +30,23 @@ export function createApp(options: AppOptions = {}) {
     service: "examforge-api",
   }));
 
+  app.addHook("onClose", async () => {
+    await repository.close?.();
+  });
+
   app.get("/api/dashboard", async () => repository.getDashboard());
 
   app.get("/api/reference-data", async () => repository.getReferenceData());
 
   app.post("/api/schedule-runs", async (_request, reply) => {
-    const result = await scheduler.solve(demoScheduleInput);
-    const response = repository.createScheduleRun(result);
+    const referenceData = await repository.getReferenceData();
+    const result = await scheduler.solve(referenceData.scheduleInput);
+    const response = await repository.createScheduleRun(result);
     return reply.code(201).send(response);
   });
 
   app.get<{ Params: { id: string } }>("/api/schedule-runs/:id", async (request, reply) => {
-    const response = repository.getScheduleRun(request.params.id);
+    const response = await repository.getScheduleRun(request.params.id);
     if (!response) {
       return reply.code(404).send({
         error: "schedule_run_not_found",
