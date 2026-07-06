@@ -15,7 +15,9 @@ import {
 import {
   type ConstraintProfile,
   type DashboardResponse,
+  type ReferenceRecord,
   type ReferenceDataResponse,
+  type ReferenceResource,
   type ScheduleResult,
   type ScheduleRunResponse,
   type ScheduleRunSummary,
@@ -26,6 +28,12 @@ import type { PlatformRepository } from "./repository.js";
 
 type BatchRow = typeof examBatches.$inferSelect;
 type RunRow = typeof scheduleRuns.$inferSelect;
+type StudentGroupRow = typeof studentGroups.$inferSelect;
+type TeacherRow = typeof teachers.$inferSelect;
+type CourseRow = typeof courses.$inferSelect;
+type RoomRow = typeof rooms.$inferSelect;
+type TimeSlotRow = typeof timeSlots.$inferSelect;
+type ExamTaskRow = typeof examTasks.$inferSelect;
 
 export class PostgresPlatformRepository implements PlatformRepository {
   constructor(private readonly client: ExamForgeDbClient) {}
@@ -116,6 +124,148 @@ export class PostgresPlatformRepository implements PlatformRepository {
         constraint_profile: batch.constraintProfile as ConstraintProfile,
       },
     };
+  }
+
+  async createReferenceRecord(
+    resource: ReferenceResource,
+    record: ReferenceRecord,
+  ): Promise<ReferenceRecord> {
+    const batch = await this.getActiveBatch();
+    const data = record as Record<string, unknown>;
+
+    switch (resource) {
+      case "student-groups": {
+        const [row] = await this.client.db.insert(studentGroups).values({
+          id: data.id as string,
+          name: data.name as string,
+          size: data.size as number,
+          departmentId: data.department_id as string,
+        }).returning();
+        return this.toStudentGroup(row);
+      }
+      case "teachers": {
+        const [row] = await this.client.db.insert(teachers).values({
+          id: data.id as string,
+          name: data.name as string,
+          departmentId: data.department_id as string,
+          unavailableSlotIds: data.unavailable_slot_ids as string[],
+        }).returning();
+        return this.toTeacher(row);
+      }
+      case "courses": {
+        const [row] = await this.client.db.insert(courses).values({
+          id: data.id as string,
+          name: data.name as string,
+          departmentId: data.department_id as string,
+          type: data.exam_type as "written" | "computer" | "oral",
+        }).returning();
+        return this.toCourse(row);
+      }
+      case "rooms": {
+        const [row] = await this.client.db.insert(rooms).values({
+          id: data.id as string,
+          name: data.name as string,
+          buildingId: data.building_id as string,
+          capacity: data.capacity as number,
+          type: data.room_type as "standard" | "computer_lab" | "language_lab",
+          equipmentTags: data.equipment_tags as string[],
+        }).returning();
+        return this.toRoom(row);
+      }
+      case "time-slots": {
+        const [row] = await this.client.db.insert(timeSlots).values({
+          id: data.id as string,
+          batchId: batch.id,
+          date: data.date as string,
+          startTime: data.start_time as string,
+          endTime: data.end_time as string,
+          periodIndex: data.period_index as number,
+        }).returning();
+        return this.toTimeSlot(row);
+      }
+      case "exam-tasks": {
+        const [row] = await this.client.db.insert(examTasks).values({
+          id: data.id as string,
+          batchId: batch.id,
+          courseId: data.course_id as string,
+          studentGroupIds: data.student_group_ids as string[],
+          expectedCount: data.expected_count as number,
+          durationMinutes: data.duration_minutes as number,
+          requiredRoomType: data.required_room_type as "standard" | "computer_lab" | "language_lab",
+          requiredEquipmentTags: data.required_equipment_tags as string[],
+          allowedSlotIds: data.allowed_slot_ids as string[],
+          invigilatorCount: data.invigilator_count as number,
+        }).returning();
+        return this.toExamTask(row);
+      }
+    }
+  }
+
+  async updateReferenceRecord(
+    resource: ReferenceResource,
+    id: string,
+    patch: Partial<ReferenceRecord>,
+  ): Promise<ReferenceRecord | null> {
+    const data = patch as Record<string, unknown>;
+
+    switch (resource) {
+      case "student-groups": {
+        const [row] = await this.client.db.update(studentGroups).set(stripUndefined({
+          name: data.name as string | undefined,
+          size: data.size as number | undefined,
+          departmentId: data.department_id as string | undefined,
+        })).where(eq(studentGroups.id, id)).returning();
+        return row ? this.toStudentGroup(row) : null;
+      }
+      case "teachers": {
+        const [row] = await this.client.db.update(teachers).set(stripUndefined({
+          name: data.name as string | undefined,
+          departmentId: data.department_id as string | undefined,
+          unavailableSlotIds: data.unavailable_slot_ids as string[] | undefined,
+        })).where(eq(teachers.id, id)).returning();
+        return row ? this.toTeacher(row) : null;
+      }
+      case "courses": {
+        const [row] = await this.client.db.update(courses).set(stripUndefined({
+          name: data.name as string | undefined,
+          departmentId: data.department_id as string | undefined,
+          type: data.exam_type as "written" | "computer" | "oral" | undefined,
+        })).where(eq(courses.id, id)).returning();
+        return row ? this.toCourse(row) : null;
+      }
+      case "rooms": {
+        const [row] = await this.client.db.update(rooms).set(stripUndefined({
+          name: data.name as string | undefined,
+          buildingId: data.building_id as string | undefined,
+          capacity: data.capacity as number | undefined,
+          type: data.room_type as "standard" | "computer_lab" | "language_lab" | undefined,
+          equipmentTags: data.equipment_tags as string[] | undefined,
+        })).where(eq(rooms.id, id)).returning();
+        return row ? this.toRoom(row) : null;
+      }
+      case "time-slots": {
+        const [row] = await this.client.db.update(timeSlots).set(stripUndefined({
+          date: data.date as string | undefined,
+          startTime: data.start_time as string | undefined,
+          endTime: data.end_time as string | undefined,
+          periodIndex: data.period_index as number | undefined,
+        })).where(eq(timeSlots.id, id)).returning();
+        return row ? this.toTimeSlot(row) : null;
+      }
+      case "exam-tasks": {
+        const [row] = await this.client.db.update(examTasks).set(stripUndefined({
+          courseId: data.course_id as string | undefined,
+          studentGroupIds: data.student_group_ids as string[] | undefined,
+          expectedCount: data.expected_count as number | undefined,
+          durationMinutes: data.duration_minutes as number | undefined,
+          requiredRoomType: data.required_room_type as "standard" | "computer_lab" | "language_lab" | undefined,
+          requiredEquipmentTags: data.required_equipment_tags as string[] | undefined,
+          allowedSlotIds: data.allowed_slot_ids as string[] | undefined,
+          invigilatorCount: data.invigilator_count as number | undefined,
+        })).where(eq(examTasks.id, id)).returning();
+        return row ? this.toExamTask(row) : null;
+      }
+    }
   }
 
   async createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse> {
@@ -277,6 +427,68 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
+  private toStudentGroup(group: StudentGroupRow): ReferenceDataResponse["scheduleInput"]["student_groups"][number] {
+    return {
+      id: group.id,
+      name: group.name,
+      size: group.size,
+      department_id: group.departmentId,
+    };
+  }
+
+  private toTeacher(teacher: TeacherRow): ReferenceDataResponse["scheduleInput"]["teachers"][number] {
+    return {
+      id: teacher.id,
+      name: teacher.name,
+      department_id: teacher.departmentId,
+      unavailable_slot_ids: teacher.unavailableSlotIds,
+    };
+  }
+
+  private toCourse(course: CourseRow): ReferenceDataResponse["scheduleInput"]["courses"][number] {
+    return {
+      id: course.id,
+      name: course.name,
+      department_id: course.departmentId,
+      exam_type: course.type,
+    };
+  }
+
+  private toRoom(room: RoomRow): ReferenceDataResponse["scheduleInput"]["rooms"][number] {
+    return {
+      id: room.id,
+      name: room.name,
+      building_id: room.buildingId,
+      capacity: room.capacity,
+      room_type: room.type,
+      equipment_tags: room.equipmentTags,
+    };
+  }
+
+  private toTimeSlot(slot: TimeSlotRow): ReferenceDataResponse["scheduleInput"]["time_slots"][number] {
+    return {
+      id: slot.id,
+      date: slot.date,
+      start_time: slot.startTime,
+      end_time: slot.endTime,
+      period_index: slot.periodIndex,
+    };
+  }
+
+  private toExamTask(task: ExamTaskRow): ReferenceDataResponse["scheduleInput"]["exam_tasks"][number] {
+    return {
+      id: task.id,
+      course_id: task.courseId,
+      student_group_ids: task.studentGroupIds,
+      expected_count: task.expectedCount,
+      duration_minutes: task.durationMinutes,
+      required_room_type: task.requiredRoomType,
+      required_equipment_tags: task.requiredEquipmentTags,
+      allowed_slot_ids: task.allowedSlotIds,
+      invigilator_count: task.invigilatorCount,
+    };
+  }
+
   private toRunSummary(run: RunRow): ScheduleRunSummary {
     return {
       id: run.id,
@@ -288,4 +500,10 @@ export class PostgresPlatformRepository implements PlatformRepository {
       assignmentCount: run.assignmentCount,
     };
   }
+}
+
+function stripUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  ) as Partial<T>;
 }

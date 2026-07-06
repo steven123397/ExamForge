@@ -2,7 +2,9 @@ import {
   demoBatch,
   demoScheduleInput,
   type DashboardResponse,
+  type ReferenceRecord,
   type ReferenceDataResponse,
+  type ReferenceResource,
   type ScheduleResult,
   type ScheduleRunResponse,
   type ScheduleRunSummary,
@@ -12,6 +14,12 @@ import { randomUUID } from "node:crypto";
 export interface PlatformRepository {
   getDashboard(): Promise<DashboardResponse>;
   getReferenceData(): Promise<ReferenceDataResponse>;
+  createReferenceRecord(resource: ReferenceResource, record: ReferenceRecord): Promise<ReferenceRecord>;
+  updateReferenceRecord(
+    resource: ReferenceResource,
+    id: string,
+    patch: Partial<ReferenceRecord>,
+  ): Promise<ReferenceRecord | null>;
   createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse>;
   getScheduleRun(id: string): Promise<ScheduleRunResponse | null>;
   close?(): Promise<void>;
@@ -19,16 +27,17 @@ export interface PlatformRepository {
 
 export class InMemoryPlatformRepository implements PlatformRepository {
   private runs = new Map<string, ScheduleRunResponse>();
+  private scheduleInput = structuredClone(demoScheduleInput);
 
   async getDashboard(): Promise<DashboardResponse> {
     const latestRun = Array.from(this.runs.values()).at(-1)?.run ?? null;
     return {
       batch: demoBatch,
       metrics: {
-        examTaskCount: demoScheduleInput.exam_tasks.length,
-        teacherCount: demoScheduleInput.teachers.length,
-        roomCount: demoScheduleInput.rooms.length,
-        timeSlotCount: demoScheduleInput.time_slots.length,
+        examTaskCount: this.scheduleInput.exam_tasks.length,
+        teacherCount: this.scheduleInput.teachers.length,
+        roomCount: this.scheduleInput.rooms.length,
+        timeSlotCount: this.scheduleInput.time_slots.length,
         conflictCount: latestRun?.conflictCount ?? 0,
         score: latestRun?.score ?? null,
       },
@@ -39,8 +48,35 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   async getReferenceData(): Promise<ReferenceDataResponse> {
     return {
       batch: demoBatch,
-      scheduleInput: demoScheduleInput,
+      scheduleInput: this.scheduleInput,
     };
+  }
+
+  async createReferenceRecord(
+    resource: ReferenceResource,
+    record: ReferenceRecord,
+  ): Promise<ReferenceRecord> {
+    const collection = this.getCollection(resource);
+    collection.push(record as never);
+    return record;
+  }
+
+  async updateReferenceRecord(
+    resource: ReferenceResource,
+    id: string,
+    patch: Partial<ReferenceRecord>,
+  ): Promise<ReferenceRecord | null> {
+    const collection = this.getCollection(resource);
+    const index = collection.findIndex((record) => record.id === id);
+    if (index === -1) {
+      return null;
+    }
+    collection[index] = {
+      ...collection[index],
+      ...patch,
+      id,
+    } as never;
+    return collection[index] as ReferenceRecord;
   }
 
   async createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse> {
@@ -61,5 +97,17 @@ export class InMemoryPlatformRepository implements PlatformRepository {
 
   async getScheduleRun(id: string): Promise<ScheduleRunResponse | null> {
     return this.runs.get(id) ?? null;
+  }
+
+  private getCollection(resource: ReferenceResource): Array<ReferenceRecord> {
+    const collections = {
+      "student-groups": this.scheduleInput.student_groups,
+      teachers: this.scheduleInput.teachers,
+      courses: this.scheduleInput.courses,
+      rooms: this.scheduleInput.rooms,
+      "time-slots": this.scheduleInput.time_slots,
+      "exam-tasks": this.scheduleInput.exam_tasks,
+    };
+    return collections[resource] as Array<ReferenceRecord>;
   }
 }

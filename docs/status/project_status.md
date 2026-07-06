@@ -20,8 +20,9 @@
 - 变更：API 已新增仓储工厂，存在 `DATABASE_URL` 时切换到 PostgreSQL 持久化仓储，未配置时继续使用内置演示仓储。
 - 变更：PostgreSQL 仓储已覆盖批次/基础数据读取、排考运行写入、排考结果读取、冲突记录和审计事件写入；`packages/db` seed 已从 JSON 摘要升级为真实入库脚本。
 - 变更：本机 WSL2 已启用 Docker daemon 和 Docker Compose，`examforge-postgres` 容器已启动并通过健康检查。
+- 变更：API 已新增基础数据创建和更新入口，覆盖学生群体、教师、课程、考场、时间段和考试任务；运营台已新增课程、教师、考场的基础数据编辑面板。
 - 验证：PostgreSQL 运行路径已完成真实验证，包括按顺序执行 `packages/db/drizzle/*.sql`、运行 `npm run seed --workspace @examforge/db`、API 带 `DATABASE_URL` 读取 dashboard、发起一次排考运行并写入 `schedule_runs`、`scheduled_exams` 和 `audit_events`。
-- 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `4 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
+- 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `6 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
 
 ## 当前风险
 
@@ -38,5 +39,5 @@
 ## 下一步
 
 - [x] 将 API 内置演示仓储替换为 PostgreSQL 持久化仓储。
-- [ ] 增加基础数据管理页面的编辑能力。
+- [ ] 扩展基础数据管理页面，补齐学生群体、时间段、考试任务编辑和删除/导入能力。
 - [ ] 增加排考运行历史、版本对比和审计详情。

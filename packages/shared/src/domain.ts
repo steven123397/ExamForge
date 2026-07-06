@@ -127,6 +127,33 @@ export const scheduleResultSchema = z.object({
   report: scheduleReportSchema.optional(),
 });
 
+export const referenceResourceSchema = z.enum([
+  "student-groups",
+  "teachers",
+  "courses",
+  "rooms",
+  "time-slots",
+  "exam-tasks",
+]);
+
+export const referenceRecordCreateSchemas = {
+  "student-groups": studentGroupSchema,
+  teachers: teacherSchema,
+  courses: courseSchema,
+  rooms: roomSchema,
+  "time-slots": timeSlotSchema,
+  "exam-tasks": examTaskSchema,
+} as const;
+
+export const referenceRecordUpdateSchemas = {
+  "student-groups": studentGroupSchema.omit({ id: true }).partial().strict(),
+  teachers: teacherSchema.omit({ id: true }).partial().strict(),
+  courses: courseSchema.omit({ id: true }).partial().strict(),
+  rooms: roomSchema.omit({ id: true }).partial().strict(),
+  "time-slots": timeSlotSchema.omit({ id: true }).partial().strict(),
+  "exam-tasks": examTaskSchema.omit({ id: true }).partial().strict(),
+} as const;
+
 export type StudentGroup = z.infer<typeof studentGroupSchema>;
 export type Teacher = z.infer<typeof teacherSchema>;
 export type Course = z.infer<typeof courseSchema>;
@@ -141,6 +168,14 @@ export type SoftPenaltyItem = z.infer<typeof softPenaltyItemSchema>;
 export type ScoreBreakdown = z.infer<typeof scoreBreakdownSchema>;
 export type SolverStatistics = z.infer<typeof solverStatisticsSchema>;
 export type ScheduleResult = z.infer<typeof scheduleResultSchema>;
+export type ReferenceResource = z.infer<typeof referenceResourceSchema>;
+export type ReferenceRecord =
+  | StudentGroup
+  | Teacher
+  | Course
+  | Room
+  | TimeSlot
+  | ExamTask;
 
 export interface ExamBatchSummary {
   id: string;

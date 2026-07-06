@@ -7,9 +7,12 @@ import {
   BookOpen,
   Building2,
   CalendarClock,
+  Check,
   Database,
   Gauge,
+  Plus,
   Play,
+  Save,
   ShieldCheck,
   Users,
 } from "lucide-react";
@@ -18,11 +21,68 @@ import type {
   DashboardResponse,
   ReferenceDataResponse,
   ScheduleRunResponse,
+  Course,
+  Room,
+  Teacher,
 } from "@examforge/shared";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
+type EditableResource = "courses" | "teachers" | "rooms";
+type FormState = Record<string, string>;
+
+const referenceForms = {
+  courses: {
+    label: "课程",
+    fields: [
+      ["id", "编号"],
+      ["name", "名称"],
+      ["department_id", "院系"],
+      ["exam_type", "考试类型"],
+    ],
+    defaults: {
+      id: "c-new",
+      name: "",
+      department_id: "cs",
+      exam_type: "written",
+    },
+  },
+  teachers: {
+    label: "教师",
+    fields: [
+      ["id", "编号"],
+      ["name", "姓名"],
+      ["department_id", "院系"],
+      ["unavailable_slot_ids", "不可用时段"],
+    ],
+    defaults: {
+      id: "t-new",
+      name: "",
+      department_id: "cs",
+      unavailable_slot_ids: "",
+    },
+  },
+  rooms: {
+    label: "考场",
+    fields: [
+      ["id", "编号"],
+      ["name", "名称"],
+      ["building_id", "楼栋"],
+      ["capacity", "容量"],
+      ["room_type", "类型"],
+      ["equipment_tags", "设备"],
+    ],
+    defaults: {
+      id: "r-new",
+      name: "",
+      building_id: "main",
+      capacity: "60",
+      room_type: "standard",
+      equipment_tags: "",
+    },
+  },
+} as const;
 
 export function OperationsConsole() {
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
@@ -244,6 +304,14 @@ export function OperationsConsole() {
           </Panel>
         </section>
 
+        <Panel title="基础数据管理" eyebrow="Master Data">
+          <ReferenceManager
+            referenceData={referenceData}
+            onRefresh={loadInitialData}
+            onError={setError}
+          />
+        </Panel>
+
         <section className="split">
           <Panel title="基础数据快照" eyebrow="Reference Data">
             <div className="snapshot-grid">
@@ -272,6 +340,218 @@ export function OperationsConsole() {
       </section>
     </main>
   );
+}
+
+function ReferenceManager({
+  referenceData,
+  onRefresh,
+  onError,
+}: {
+  referenceData: ReferenceDataResponse | null;
+  onRefresh(): Promise<void>;
+  onError(message: string | null): void;
+}) {
+  const [resource, setResource] = useState<EditableResource>("courses");
+  const [mode, setMode] = useState<"create" | "edit">("edit");
+  const [form, setForm] = useState<FormState>(referenceForms.courses.defaults);
+  const [saving, setSaving] = useState(false);
+  const config = referenceForms[resource];
+  const records = getEditableRecords(referenceData, resource);
+  const selectedId = form.id;
+
+  useEffect(() => {
+    const nextRecords = getEditableRecords(referenceData, resource);
+    const first = nextRecords[0];
+    setMode(first ? "edit" : "create");
+    setForm(first ? recordToForm(resource, first) : referenceForms[resource].defaults);
+  }, [referenceData, resource]);
+
+  function selectResource(nextResource: EditableResource) {
+    setResource(nextResource);
+  }
+
+  function selectRecord(record: Course | Teacher | Room) {
+    setMode("edit");
+    setForm(recordToForm(resource, record));
+  }
+
+  function createDraft() {
+    setMode("create");
+    setForm(referenceForms[resource].defaults);
+  }
+
+  async function saveRecord() {
+    setSaving(true);
+    onError(null);
+    try {
+      const payload = formToPayload(resource, form);
+      const endpoint = mode === "create"
+        ? `${apiBase}/api/reference-data/${resource}`
+        : `${apiBase}/api/reference-data/${resource}/${encodeURIComponent(form.id)}`;
+      const response = await fetch(endpoint, {
+        method: mode === "create" ? "POST" : "PATCH",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(mode === "create" ? payload : omitId(payload)),
+      });
+
+      if (!response.ok) {
+        throw new Error("基础数据保存失败");
+      }
+
+      const result = await response.json() as { record: Course | Teacher | Room };
+      setMode("edit");
+      setForm(recordToForm(resource, result.record));
+      await onRefresh();
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "基础数据保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="reference-manager">
+      <div className="resource-tabs">
+        {(Object.keys(referenceForms) as EditableResource[]).map((item) => (
+          <button
+            key={item}
+            type="button"
+            className={item === resource ? "active" : ""}
+            onClick={() => selectResource(item)}
+          >
+            {referenceForms[item].label}
+          </button>
+        ))}
+      </div>
+
+      <div className="reference-layout">
+        <div className="record-list">
+          <button type="button" className="record-create" onClick={createDraft}>
+            <Plus size={16} />
+            <span>新增{config.label}</span>
+          </button>
+          {records.map((record) => (
+            <button
+              key={record.id}
+              type="button"
+              className={mode === "edit" && selectedId === record.id ? "record-row active" : "record-row"}
+              onClick={() => selectRecord(record)}
+            >
+              <span>{record.name}</span>
+              <strong>{record.id}</strong>
+            </button>
+          ))}
+        </div>
+
+        <div className="record-editor">
+          <div className="editor-title">
+            <div>
+              <span>{mode === "create" ? "Create" : "Update"}</span>
+              <strong>{config.label}</strong>
+            </div>
+            <button type="button" className="secondary-button" onClick={saveRecord} disabled={saving}>
+              {saving ? <Check size={16} /> : <Save size={16} />}
+              {saving ? "保存中" : "保存"}
+            </button>
+          </div>
+
+          <div className="form-grid">
+            {config.fields.map(([key, label]) => (
+              <label key={key}>
+                <span>{label}</span>
+                <input
+                  value={form[key] ?? ""}
+                  disabled={mode === "edit" && key === "id"}
+                  onChange={(event) => setForm((current) => ({
+                    ...current,
+                    [key]: event.target.value,
+                  }))}
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getEditableRecords(
+  referenceData: ReferenceDataResponse | null,
+  resource: EditableResource,
+): Array<Course | Teacher | Room> {
+  if (!referenceData) {
+    return [];
+  }
+  return referenceData.scheduleInput[resource];
+}
+
+function recordToForm(resource: EditableResource, record: Course | Teacher | Room): FormState {
+  if (resource === "courses") {
+    const course = record as Course;
+    return {
+      id: course.id,
+      name: course.name,
+      department_id: course.department_id,
+      exam_type: course.exam_type,
+    };
+  }
+  if (resource === "teachers") {
+    const teacher = record as Teacher;
+    return {
+      id: teacher.id,
+      name: teacher.name,
+      department_id: teacher.department_id,
+      unavailable_slot_ids: teacher.unavailable_slot_ids.join(","),
+    };
+  }
+  const room = record as Room;
+  return {
+    id: room.id,
+    name: room.name,
+    building_id: room.building_id,
+    capacity: String(room.capacity),
+    room_type: room.room_type,
+    equipment_tags: room.equipment_tags.join(","),
+  };
+}
+
+function formToPayload(resource: EditableResource, form: FormState) {
+  if (resource === "courses") {
+    return {
+      id: form.id,
+      name: form.name,
+      department_id: form.department_id,
+      exam_type: form.exam_type,
+    };
+  }
+  if (resource === "teachers") {
+    return {
+      id: form.id,
+      name: form.name,
+      department_id: form.department_id,
+      unavailable_slot_ids: splitList(form.unavailable_slot_ids),
+    };
+  }
+  return {
+    id: form.id,
+    name: form.name,
+    building_id: form.building_id,
+    capacity: Number(form.capacity),
+    room_type: form.room_type,
+    equipment_tags: splitList(form.equipment_tags),
+  };
+}
+
+function splitList(value: string) {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function omitId<T extends { id: string }>(value: T): Omit<T, "id"> {
+  const { id: _id, ...rest } = value;
+  return rest;
 }
 
 function Metric({

@@ -96,6 +96,8 @@ describe("ExamForge API", () => {
         ...repository,
         getDashboard: () => repository.getDashboard(),
         getReferenceData: async () => referenceData,
+        createReferenceRecord: (resource, record) => repository.createReferenceRecord(resource, record),
+        updateReferenceRecord: (resource, id, patch) => repository.updateReferenceRecord(resource, id, patch),
         createScheduleRun: (result) => repository.createScheduleRun(result),
         getScheduleRun: (id) => repository.getScheduleRun(id),
       },
@@ -108,6 +110,70 @@ describe("ExamForge API", () => {
 
     assert.equal(createResponse.statusCode, 201);
     assert.equal(scheduler.lastInput?.exam_tasks.length, 1);
+    await app.close();
+  });
+
+  it("creates and updates reference data records", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/reference-data/courses",
+      payload: {
+        id: "c-linear-algebra",
+        name: "线性代数",
+        department_id: "math",
+        exam_type: "written",
+      },
+    });
+
+    assert.equal(createResponse.statusCode, 201);
+    assert.equal(createResponse.json().record.name, "线性代数");
+
+    const updateResponse = await app.inject({
+      method: "PATCH",
+      url: "/api/reference-data/courses/c-linear-algebra",
+      payload: {
+        name: "线性代数 A",
+        exam_type: "oral",
+      },
+    });
+
+    assert.equal(updateResponse.statusCode, 200);
+    assert.equal(updateResponse.json().record.name, "线性代数 A");
+    assert.equal(updateResponse.json().record.exam_type, "oral");
+
+    const referenceResponse = await app.inject({
+      method: "GET",
+      url: "/api/reference-data",
+    });
+    const courses = referenceResponse.json().scheduleInput.courses;
+    assert.ok(courses.some((course: { id: string; name: string }) => (
+      course.id === "c-linear-algebra" && course.name === "线性代数 A"
+    )));
+
+    await app.close();
+  });
+
+  it("rejects invalid reference data payloads", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/reference-data/rooms",
+      payload: {
+        id: "r-invalid",
+        name: "容量错误考场",
+        building_id: "test",
+        capacity: -1,
+        room_type: "standard",
+        equipment_tags: [],
+      },
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error, "invalid_reference_data");
+
     await app.close();
   });
 });
