@@ -65,6 +65,12 @@ type DraftAssignmentForm = Pick<ScheduledExam, "room_id" | "time_slot_id"> & {
 };
 type WorkspaceRole = "admin" | "operator" | "viewer";
 
+const workspaceTokens: Record<WorkspaceRole, string> = {
+  admin: process.env.NEXT_PUBLIC_EXAMFORGE_ADMIN_TOKEN ?? "examforge-admin-token",
+  operator: process.env.NEXT_PUBLIC_EXAMFORGE_OPERATOR_TOKEN ?? "examforge-operator-token",
+  viewer: process.env.NEXT_PUBLIC_EXAMFORGE_VIEWER_TOKEN ?? "examforge-viewer-token",
+};
+
 const referenceForms = {
   courses: {
     label: "课程",
@@ -769,7 +775,7 @@ export function OperationsConsole() {
   function roleHeaders(extra: Record<string, string> = {}) {
     return {
       ...extra,
-      "x-examforge-role": role,
+      authorization: `Bearer ${workspaceTokens[role]}`,
     };
   }
 
@@ -1957,7 +1963,7 @@ function ReferenceManager({
   function referenceRoleHeaders(extra: Record<string, string> = {}) {
     return {
       ...extra,
-      "x-examforge-role": role,
+      authorization: `Bearer ${workspaceTokens[role]}`,
     };
   }
 

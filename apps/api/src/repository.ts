@@ -19,6 +19,7 @@ import {
   type ScheduleDraftListResponse,
   type ScheduleDraftPublishResponse,
   type ScheduleDraftSummary,
+  type ScheduleJobSummary,
   type ScheduleRunComparisonResponse,
   type ScheduleRunListResponse,
   type ScheduleRollbackResponse,
@@ -72,13 +73,28 @@ export interface PlatformRepository {
   rebalanceScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
   publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null>;
   discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null>;
+  createScheduleJob(): Promise<ScheduleJobSummary>;
+  listScheduleJobs(): Promise<{ jobs: ScheduleJobSummary[] }>;
+  getScheduleJob(id: string): Promise<ScheduleJobSummary | null>;
+  updateScheduleJob(
+    id: string,
+    patch: Partial<Pick<ScheduleJobSummary, "status" | "progress" | "runId" | "error">>,
+  ): Promise<ScheduleJobSummary | null>;
   close?(): Promise<void>;
+}
+
+export class ReferenceIntegrityError extends Error {
+  constructor(readonly issues: string[]) {
+    super("Reference data integrity violation.");
+    this.name = "ReferenceIntegrityError";
+  }
 }
 
 export class InMemoryPlatformRepository implements PlatformRepository {
   private runs = new Map<string, ScheduleRunResponse>();
   private drafts = new Map<string, ScheduleDraftDetailResponse>();
   private draftLocks = new Map<string, Set<string>>();
+  private scheduleJobs = new Map<string, ScheduleJobSummary>();
   private auditEvents: AuditEventSummary[] = [];
   private batch = structuredClone(demoBatch);
   private publishedRunId: string | null = null;
@@ -111,6 +127,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     resource: ReferenceResource,
     record: ReferenceRecord,
   ): Promise<ReferenceRecord> {
+    validateReferenceRecord(resource, record, this.scheduleInput);
     const collection = this.getCollection(resource);
     collection.push(record as never);
     return record;
@@ -126,11 +143,13 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     if (index === -1) {
       return null;
     }
-    collection[index] = {
+    const nextRecord = {
       ...collection[index],
       ...patch,
       id,
     } as never;
+    validateReferenceRecord(resource, nextRecord as ReferenceRecord, this.scheduleInput);
+    collection[index] = nextRecord;
     return collection[index] as ReferenceRecord;
   }
 
@@ -140,6 +159,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   ): Promise<ReferenceImportResponse> {
     const collection = this.getCollection(resource);
     const imported = records.map((record) => {
+      validateReferenceRecord(resource, record, this.scheduleInput);
       const index = collection.findIndex((item) => item.id === record.id);
       if (index === -1) {
         collection.push(record as never);
@@ -155,6 +175,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     resource: ReferenceResource,
     id: string,
   ): Promise<ReferenceDeleteResponse | null> {
+    validateReferenceDelete(resource, id, this.scheduleInput);
     const collection = this.getCollection(resource);
     const index = collection.findIndex((record) => record.id === id);
     if (index === -1) {
@@ -560,6 +581,50 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return { draft };
   }
 
+  async createScheduleJob(): Promise<ScheduleJobSummary> {
+    const now = new Date().toISOString();
+    const job: ScheduleJobSummary = {
+      id: `job-${randomUUID()}`,
+      status: "queued",
+      progress: 0,
+      runId: null,
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.scheduleJobs.set(job.id, job);
+    return job;
+  }
+
+  async listScheduleJobs(): Promise<{ jobs: ScheduleJobSummary[] }> {
+    return {
+      jobs: [...this.scheduleJobs.values()].sort((left, right) => (
+        right.createdAt.localeCompare(left.createdAt)
+      )),
+    };
+  }
+
+  async getScheduleJob(id: string): Promise<ScheduleJobSummary | null> {
+    return this.scheduleJobs.get(id) ?? null;
+  }
+
+  async updateScheduleJob(
+    id: string,
+    patch: Partial<Pick<ScheduleJobSummary, "status" | "progress" | "runId" | "error">>,
+  ): Promise<ScheduleJobSummary | null> {
+    const current = this.scheduleJobs.get(id);
+    if (!current) {
+      return null;
+    }
+    const next = {
+      ...current,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
+    this.scheduleJobs.set(id, next);
+    return next;
+  }
+
   async getPublishedSchedule(): Promise<PublishedScheduleResponse | null> {
     if (!this.publishedRunId) {
       return null;
@@ -673,6 +738,83 @@ function assignmentKey(assignment: ScheduleResult["assignments"][number]) {
     assignment.time_slot_id,
     ...assignment.teacher_ids,
   ].join("|");
+}
+
+export function validateReferenceRecord(
+  resource: ReferenceResource,
+  record: ReferenceRecord,
+  scheduleInput: ReferenceDataResponse["scheduleInput"],
+) {
+  if (resource !== "exam-tasks") {
+    return;
+  }
+
+  const task = record as ReferenceDataResponse["scheduleInput"]["exam_tasks"][number];
+  const courseIds = new Set(scheduleInput.courses.map((course) => course.id));
+  const studentGroupIds = new Set(scheduleInput.student_groups.map((group) => group.id));
+  const timeSlotIds = new Set(scheduleInput.time_slots.map((slot) => slot.id));
+  const issues: string[] = [];
+
+  if (!courseIds.has(task.course_id)) {
+    issues.push(`Course ${task.course_id} does not exist.`);
+  }
+
+  for (const groupId of task.student_group_ids) {
+    if (!studentGroupIds.has(groupId)) {
+      issues.push(`Student group ${groupId} does not exist.`);
+    }
+  }
+
+  for (const slotId of task.allowed_slot_ids) {
+    if (!timeSlotIds.has(slotId)) {
+      issues.push(`Time slot ${slotId} does not exist.`);
+    }
+  }
+
+  if (issues.length > 0) {
+    throw new ReferenceIntegrityError(issues);
+  }
+}
+
+export function validateReferenceDelete(
+  resource: ReferenceResource,
+  id: string,
+  scheduleInput: ReferenceDataResponse["scheduleInput"],
+) {
+  const issues: string[] = [];
+
+  if (resource === "courses") {
+    for (const task of scheduleInput.exam_tasks) {
+      if (task.course_id === id) {
+        issues.push(`Course ${id} is referenced by exam task ${task.id}.`);
+      }
+    }
+  }
+
+  if (resource === "student-groups") {
+    for (const task of scheduleInput.exam_tasks) {
+      if (task.student_group_ids.includes(id)) {
+        issues.push(`Student group ${id} is referenced by exam task ${task.id}.`);
+      }
+    }
+  }
+
+  if (resource === "time-slots") {
+    for (const task of scheduleInput.exam_tasks) {
+      if (task.allowed_slot_ids.includes(id)) {
+        issues.push(`Time slot ${id} is referenced by exam task ${task.id}.`);
+      }
+    }
+    for (const teacher of scheduleInput.teachers) {
+      if (teacher.unavailable_slot_ids.includes(id)) {
+        issues.push(`Time slot ${id} is referenced by teacher ${teacher.id}.`);
+      }
+    }
+  }
+
+  if (issues.length > 0) {
+    throw new ReferenceIntegrityError(issues);
+  }
 }
 
 export function buildDraftComparison(

@@ -8,6 +8,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "migrate": "tsx src/migrations.ts",
     "seed": "tsx src/seed.ts"
   },
   "dependencies": {

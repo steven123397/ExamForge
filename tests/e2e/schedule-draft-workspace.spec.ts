@@ -1,8 +1,8 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 
 const apiBase = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:4000";
-const adminHeaders = { "x-examforge-role": "admin" };
-const operatorHeaders = { "x-examforge-role": "operator" };
+const adminHeaders = { authorization: "Bearer examforge-admin-token" };
+const operatorHeaders = { authorization: "Bearer examforge-operator-token" };
 
 test("方案工作台支持建议应用和矩阵拖拽调整", async ({ page, request }) => {
   const runResponse = await request.post(`${apiBase}/api/schedule-runs`, {

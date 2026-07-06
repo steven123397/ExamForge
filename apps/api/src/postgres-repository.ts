@@ -9,6 +9,7 @@ import {
   examTasks,
   rooms,
   scheduleDrafts,
+  scheduleJobs,
   scheduledExams,
   scheduleRuns,
   studentGroups,
@@ -35,6 +36,7 @@ import {
   type ScheduleDraftListResponse,
   type ScheduleDraftPublishResponse,
   type ScheduleDraftSummary,
+  type ScheduleJobSummary,
   type ScheduleRunComparisonResponse,
   type ScheduleRunListResponse,
   type ScheduleRollbackResponse,
@@ -51,6 +53,8 @@ import {
   buildDraftScheduleResult,
   buildRunComparison,
   validateDraftAssignments,
+  validateReferenceDelete,
+  validateReferenceRecord,
   type PlatformRepository,
 } from "./repository.js";
 
@@ -65,6 +69,7 @@ type TimeSlotRow = typeof timeSlots.$inferSelect;
 type ExamTaskRow = typeof examTasks.$inferSelect;
 type DraftRow = typeof scheduleDrafts.$inferSelect;
 type DraftChangeEventRow = typeof draftChangeEvents.$inferSelect;
+type ScheduleJobRow = typeof scheduleJobs.$inferSelect;
 
 export class PostgresPlatformRepository implements PlatformRepository {
   constructor(private readonly client: ExamForgeDbClient) {}
@@ -162,6 +167,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     record: ReferenceRecord,
   ): Promise<ReferenceRecord> {
     const batch = await this.getActiveBatch();
+    validateReferenceRecord(resource, record, (await this.getReferenceData()).scheduleInput);
     const data = record as Record<string, unknown>;
 
     switch (resource) {
@@ -237,6 +243,17 @@ export class PostgresPlatformRepository implements PlatformRepository {
     id: string,
     patch: Partial<ReferenceRecord>,
   ): Promise<ReferenceRecord | null> {
+    const referenceData = await this.getReferenceData();
+    const existing = this.findReferenceRecord(referenceData, resource, id);
+    if (!existing) {
+      return null;
+    }
+    validateReferenceRecord(resource, {
+      ...existing,
+      ...patch,
+      id,
+    } as ReferenceRecord, referenceData.scheduleInput);
+
     const data = patch as Record<string, unknown>;
 
     switch (resource) {
@@ -324,6 +341,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     if (!existing) {
       return null;
     }
+    validateReferenceDelete(resource, id, referenceData.scheduleInput);
 
     switch (resource) {
       case "student-groups":
@@ -1081,6 +1099,55 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
+  async createScheduleJob(): Promise<ScheduleJobSummary> {
+    const now = new Date();
+    const [row] = await this.client.db.insert(scheduleJobs).values({
+      id: `job-${randomUUID()}`,
+      status: "queued",
+      progress: 0,
+      runId: null,
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    }).returning();
+    return this.toScheduleJob(row);
+  }
+
+  async listScheduleJobs(): Promise<{ jobs: ScheduleJobSummary[] }> {
+    const rows = await this.client.db
+      .select()
+      .from(scheduleJobs)
+      .orderBy(desc(scheduleJobs.createdAt));
+    return { jobs: rows.map((row) => this.toScheduleJob(row)) };
+  }
+
+  async getScheduleJob(id: string): Promise<ScheduleJobSummary | null> {
+    const [row] = await this.client.db
+      .select()
+      .from(scheduleJobs)
+      .where(eq(scheduleJobs.id, id))
+      .limit(1);
+    return row ? this.toScheduleJob(row) : null;
+  }
+
+  async updateScheduleJob(
+    id: string,
+    patch: Partial<Pick<ScheduleJobSummary, "status" | "progress" | "runId" | "error">>,
+  ): Promise<ScheduleJobSummary | null> {
+    const [row] = await this.client.db
+      .update(scheduleJobs)
+      .set(stripUndefined({
+        status: patch.status,
+        progress: patch.progress,
+        runId: patch.runId,
+        error: patch.error,
+        updatedAt: new Date(),
+      }))
+      .where(eq(scheduleJobs.id, id))
+      .returning();
+    return row ? this.toScheduleJob(row) : null;
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }
@@ -1231,6 +1298,18 @@ export class PostgresPlatformRepository implements PlatformRepository {
       after: event.after as ScheduledExam,
       actor: event.actor,
       createdAt: event.createdAt.toISOString(),
+    };
+  }
+
+  private toScheduleJob(job: ScheduleJobRow): ScheduleJobSummary {
+    return {
+      id: job.id,
+      status: job.status,
+      progress: job.progress,
+      runId: job.runId,
+      error: job.error,
+      createdAt: job.createdAt.toISOString(),
+      updatedAt: job.updatedAt.toISOString(),
     };
   }
 

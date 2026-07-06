@@ -1,6 +1,5 @@
 import cors from "@fastify/cors";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
-import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   referenceRecordCreateSchemas,
@@ -13,9 +12,11 @@ import {
   type ReferenceDataResponse,
   type ReferenceRecord,
   type ReferenceResource,
-  type ScheduleJobSummary,
 } from "@examforge/shared";
-import type { PlatformRepository } from "./repository.js";
+import {
+  ReferenceIntegrityError,
+  type PlatformRepository,
+} from "./repository.js";
 import { createPlatformRepository } from "./repository-factory.js";
 import {
   PythonSchedulerClient,
@@ -35,7 +36,6 @@ export function createApp(options: AppOptions = {}) {
   });
   const repository = options.repository ?? createPlatformRepository();
   const scheduler = options.scheduler ?? new PythonSchedulerClient();
-  const scheduleJobs = new Map<string, ScheduleJobSummary>();
 
   app.register(cors, {
     origin: true,
@@ -45,6 +45,47 @@ export function createApp(options: AppOptions = {}) {
     ok: true,
     service: "examforge-api",
   }));
+
+  app.post("/api/auth/login", async (request, reply) => {
+    const parsed = z.object({
+      username: z.string().min(1),
+      password: z.string().min(1),
+    }).safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_login_payload",
+        message: "Login payload is invalid.",
+        issues: parsed.error.issues,
+      });
+    }
+
+    const user = getAuthUsers().find((candidate) => (
+      candidate.username === parsed.data.username
+      && candidate.password === parsed.data.password
+    ));
+    if (!user) {
+      return reply.code(401).send({
+        error: "invalid_credentials",
+        message: "Username or password is invalid.",
+      });
+    }
+
+    return {
+      token: user.token,
+      user: publicAuthUser(user),
+    };
+  });
+
+  app.get("/api/auth/me", async (request, reply) => {
+    const user = getRequestUser(request);
+    if (!user) {
+      return reply.code(401).send({
+        error: "not_authenticated",
+        message: "A valid bearer token is required.",
+      });
+    }
+    return { user: publicAuthUser(user) };
+  });
 
   app.addHook("onClose", async () => {
     await repository.close?.();
@@ -79,10 +120,17 @@ export function createApp(options: AppOptions = {}) {
         });
       }
 
-      return repository.importReferenceRecords(
-        resource,
-        parsed.data.records as ReferenceRecord[],
-      );
+      try {
+        return await repository.importReferenceRecords(
+          resource,
+          parsed.data.records as ReferenceRecord[],
+        );
+      } catch (error) {
+        if (sendReferenceIntegrityError(reply, error)) {
+          return reply;
+        }
+        throw error;
+      }
     },
   );
 
@@ -109,11 +157,18 @@ export function createApp(options: AppOptions = {}) {
         });
       }
 
-      const record = await repository.createReferenceRecord(
-        resource,
-        parsed.data as ReferenceRecord,
-      );
-      return reply.code(201).send({ resource, record });
+      try {
+        const record = await repository.createReferenceRecord(
+          resource,
+          parsed.data as ReferenceRecord,
+        );
+        return reply.code(201).send({ resource, record });
+      } catch (error) {
+        if (sendReferenceIntegrityError(reply, error)) {
+          return reply;
+        }
+        throw error;
+      }
     },
   );
 
@@ -140,11 +195,19 @@ export function createApp(options: AppOptions = {}) {
         });
       }
 
-      const record = await repository.updateReferenceRecord(
-        resource,
-        request.params.id,
-        parsed.data as Partial<ReferenceRecord>,
-      );
+      let record: ReferenceRecord | null;
+      try {
+        record = await repository.updateReferenceRecord(
+          resource,
+          request.params.id,
+          parsed.data as Partial<ReferenceRecord>,
+        );
+      } catch (error) {
+        if (sendReferenceIntegrityError(reply, error)) {
+          return reply;
+        }
+        throw error;
+      }
       if (!record) {
         return reply.code(404).send({
           error: "reference_record_not_found",
@@ -170,7 +233,15 @@ export function createApp(options: AppOptions = {}) {
         });
       }
 
-      const response = await repository.deleteReferenceRecord(resource, request.params.id);
+      let response;
+      try {
+        response = await repository.deleteReferenceRecord(resource, request.params.id);
+      } catch (error) {
+        if (sendReferenceIntegrityError(reply, error)) {
+          return reply;
+        }
+        throw error;
+      }
       if (!response) {
         return reply.code(404).send({
           error: "reference_record_not_found",
@@ -225,29 +296,17 @@ export function createApp(options: AppOptions = {}) {
     if (!requireRole(request, reply, ["admin", "operator"])) {
       return reply;
     }
-    const now = new Date().toISOString();
-    const job: ScheduleJobSummary = {
-      id: `job-${randomUUID()}`,
-      status: "queued",
-      progress: 0,
-      runId: null,
-      error: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    scheduleJobs.set(job.id, job);
+    const job = await repository.createScheduleJob();
     setTimeout(() => {
       void runScheduleJob(job.id);
     }, 0);
     return reply.code(202).send({ job });
   });
 
-  app.get("/api/schedule-jobs", async () => ({
-    jobs: [...scheduleJobs.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
-  }));
+  app.get("/api/schedule-jobs", async () => repository.listScheduleJobs());
 
   app.get<{ Params: { id: string } }>("/api/schedule-jobs/:id", async (request, reply) => {
-    const job = scheduleJobs.get(request.params.id);
+    const job = await repository.getScheduleJob(request.params.id);
     if (!job) {
       return reply.code(404).send({
         error: "schedule_job_not_found",
@@ -657,34 +716,28 @@ export function createApp(options: AppOptions = {}) {
   return app;
 
   async function runScheduleJob(id: string) {
-    const current = scheduleJobs.get(id);
+    const current = await repository.getScheduleJob(id);
     if (!current) {
       return;
     }
-    scheduleJobs.set(id, {
-      ...current,
+    await repository.updateScheduleJob(id, {
       status: "running",
       progress: 35,
-      updatedAt: new Date().toISOString(),
     });
     try {
       const referenceData = await repository.getReferenceData();
       const result = await scheduler.solve(referenceData.scheduleInput);
       const response = await repository.createScheduleRun(result);
-      scheduleJobs.set(id, {
-        ...scheduleJobs.get(id)!,
+      await repository.updateScheduleJob(id, {
         status: "completed",
         progress: 100,
         runId: response.run.id,
-        updatedAt: new Date().toISOString(),
       });
     } catch (error) {
-      scheduleJobs.set(id, {
-        ...scheduleJobs.get(id)!,
+      await repository.updateScheduleJob(id, {
         status: "failed",
         progress: 100,
         error: error instanceof Error ? error.message : "Schedule job failed.",
-        updatedAt: new Date().toISOString(),
       });
     }
   }
@@ -692,10 +745,62 @@ export function createApp(options: AppOptions = {}) {
 
 type ExamForgeRole = "admin" | "operator" | "viewer";
 
-function getRequestRole(request: FastifyRequest): ExamForgeRole | null {
-  const raw = request.headers["x-examforge-role"];
-  const role = Array.isArray(raw) ? raw[0] : raw;
-  return role === "admin" || role === "operator" || role === "viewer" ? role : null;
+interface AuthUser {
+  id: string;
+  username: string;
+  password: string;
+  displayName: string;
+  role: ExamForgeRole;
+  token: string;
+}
+
+function getAuthUsers(): AuthUser[] {
+  return [
+    {
+      id: "user-admin",
+      username: "admin",
+      password: process.env.EXAMFORGE_ADMIN_PASSWORD ?? "admin",
+      displayName: "系统管理员",
+      role: "admin",
+      token: process.env.EXAMFORGE_ADMIN_TOKEN ?? "examforge-admin-token",
+    },
+    {
+      id: "user-operator",
+      username: "operator",
+      password: process.env.EXAMFORGE_OPERATOR_PASSWORD ?? "operator",
+      displayName: "排考教务员",
+      role: "operator",
+      token: process.env.EXAMFORGE_OPERATOR_TOKEN ?? "examforge-operator-token",
+    },
+    {
+      id: "user-viewer",
+      username: "viewer",
+      password: process.env.EXAMFORGE_VIEWER_PASSWORD ?? "viewer",
+      displayName: "只读观察员",
+      role: "viewer",
+      token: process.env.EXAMFORGE_VIEWER_TOKEN ?? "examforge-viewer-token",
+    },
+  ];
+}
+
+function publicAuthUser(user: AuthUser) {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    role: user.role,
+  };
+}
+
+function getRequestUser(request: FastifyRequest): AuthUser | null {
+  const raw = request.headers.authorization;
+  const header = Array.isArray(raw) ? raw[0] : raw;
+  const match = header?.match(/^Bearer\s+(.+)$/i);
+  if (!match) {
+    return null;
+  }
+  const token = match[1];
+  return getAuthUsers().find((user) => user.token === token) ?? null;
 }
 
 function requireRole(
@@ -703,17 +808,29 @@ function requireRole(
   reply: FastifyReply,
   allowed: ExamForgeRole[],
 ) {
-  const role = getRequestRole(request);
-  if (role && allowed.includes(role)) {
+  const user = getRequestUser(request);
+  if (user && allowed.includes(user.role)) {
     return true;
   }
   reply.code(403).send({
     error: "permission_denied",
-    message: role
-      ? `Role ${role} is not allowed to perform this operation.`
-      : "A valid x-examforge-role header is required to perform this operation.",
+    message: user
+      ? `Role ${user.role} is not allowed to perform this operation.`
+      : "A valid bearer token is required to perform this operation.",
   });
   return false;
+}
+
+function sendReferenceIntegrityError(reply: FastifyReply, error: unknown) {
+  if (!(error instanceof ReferenceIntegrityError)) {
+    return false;
+  }
+  reply.code(409).send({
+    error: "reference_integrity_violation",
+    message: "Reference data violates cross-resource integrity rules.",
+    issues: error.issues,
+  });
+  return true;
 }
 
 function parseReferenceResource(value: string): ReferenceResource | null {

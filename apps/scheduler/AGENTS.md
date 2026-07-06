@@ -31,13 +31,13 @@ Python 代码统一使用 `snake_case`。后续 Web/API 层如需 `camelCase`，
 
 ## 4. 验证命令
 
-在 `apps/scheduler/` 下运行：
+优先在仓库根目录运行：
 
 ```bash
-python -m pytest -q
+npm run test:scheduler
 ```
 
-项目配置要求 Python 版本满足 `pyproject.toml`。如果本机默认 `python` 不存在，或只有不满足要求的 `python3`，需要明确报告环境阻塞。
+该脚本会进入 `apps/scheduler/` 并通过 `uv run --python 3.12 --extra dev python -m pytest -q` 固定 Python 3.12 运行测试，避免依赖系统默认 `python`。如果绕过脚本直接运行 Python，必须确认解释器满足 `pyproject.toml` 的版本要求。
 
 文档或配置变更仍需在仓库根目录运行：
 

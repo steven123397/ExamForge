@@ -11,6 +11,8 @@
     "dev": "npm run build --workspace @examforge/shared && (npm run dev --workspace @examforge/api & npm run dev --workspace @examforge/web)",
     "build": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run build --workspace @examforge/api && npm run build --workspace @examforge/web",
     "test": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm test --workspace @examforge/api",
+    "db:migrate": "npm run migrate --workspace @examforge/db",
+    "test:scheduler": "cd apps/scheduler && uv run --python 3.12 --extra dev python -m pytest -q",
     "test:e2e": "playwright test",
     "typecheck": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run typecheck --workspace @examforge/db && npm run typecheck --workspace @examforge/api && npm run typecheck --workspace @examforge/web"
   },

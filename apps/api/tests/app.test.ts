@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { draftScheduledExams } from "@examforge/db";
+import {
+  draftScheduledExams,
+  loadMigrationFiles,
+  migrationStateTableName,
+  scheduleJobs,
+} from "@examforge/db";
 import {
   type ScheduleInput,
   type ScheduleResult,
@@ -9,8 +14,9 @@ import { createApp } from "../src/app.js";
 import { InMemoryPlatformRepository } from "../src/repository.js";
 import type { SchedulerClient } from "../src/scheduler-client.js";
 
-const adminHeaders = { "x-examforge-role": "admin" };
-const operatorHeaders = { "x-examforge-role": "operator" };
+const adminHeaders = { authorization: "Bearer examforge-admin-token" };
+const operatorHeaders = { authorization: "Bearer examforge-operator-token" };
+const viewerHeaders = { authorization: "Bearer examforge-viewer-token" };
 
 class FakeScheduler implements SchedulerClient {
   lastInput: ScheduleInput | null = null;
@@ -131,8 +137,29 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
-  it("rejects missing or invalid role headers on mutation routes", async () => {
+  it("authenticates users with bearer tokens instead of trusting role headers", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
+
+    const loginResponse = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: {
+        username: "operator",
+        password: "operator",
+      },
+    });
+    assert.equal(loginResponse.statusCode, 200);
+    assert.equal(loginResponse.json().user.role, "operator");
+    assert.ok(loginResponse.json().token);
+
+    const authenticatedResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: {
+        authorization: `Bearer ${loginResponse.json().token}`,
+      },
+    });
+    assert.equal(authenticatedResponse.statusCode, 201);
 
     const missingRoleResponse = await app.inject({
       method: "POST",
@@ -145,11 +172,21 @@ describe("ExamForge API", () => {
       method: "POST",
       url: "/api/schedule-runs",
       headers: {
-        "x-examforge-role": "super-admin",
+        authorization: "Bearer invalid-token",
       },
     });
     assert.equal(invalidRoleResponse.statusCode, 403);
     assert.equal(invalidRoleResponse.json().error, "permission_denied");
+
+    const forgedRoleHeaderResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: {
+        "x-examforge-role": "admin",
+      },
+    });
+    assert.equal(forgedRoleHeaderResponse.statusCode, 403);
+    assert.equal(forgedRoleHeaderResponse.json().error, "permission_denied");
 
     await app.close();
   });
@@ -324,6 +361,10 @@ describe("ExamForge API", () => {
         rebalanceScheduleDraft: (id) => repository.rebalanceScheduleDraft(id),
         publishScheduleDraft: (id) => repository.publishScheduleDraft(id),
         discardScheduleDraft: (id) => repository.discardScheduleDraft(id),
+        createScheduleJob: () => repository.createScheduleJob(),
+        listScheduleJobs: () => repository.listScheduleJobs(),
+        getScheduleJob: (id) => repository.getScheduleJob(id),
+        updateScheduleJob: (id, patch) => repository.updateScheduleJob(id, patch),
       },
     });
 
@@ -470,6 +511,50 @@ describe("ExamForge API", () => {
 
     assert.equal(response.statusCode, 400);
     assert.equal(response.json().error, "invalid_reference_data");
+
+    await app.close();
+  });
+
+  it("rejects reference records that point at missing resources", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/reference-data/exam-tasks",
+      headers: operatorHeaders,
+      payload: {
+        id: "e-missing-course",
+        course_id: "c-missing",
+        student_group_ids: ["g-cs-2301"],
+        expected_count: 42,
+        duration_minutes: 120,
+        required_room_type: "standard",
+        required_equipment_tags: [],
+        allowed_slot_ids: ["s-001"],
+        invigilator_count: 1,
+      },
+    });
+    assert.equal(createResponse.statusCode, 409);
+    assert.equal(createResponse.json().error, "reference_integrity_violation");
+
+    const updateResponse = await app.inject({
+      method: "PATCH",
+      url: "/api/reference-data/exam-tasks/e-data-structures",
+      headers: operatorHeaders,
+      payload: {
+        student_group_ids: ["g-missing"],
+      },
+    });
+    assert.equal(updateResponse.statusCode, 409);
+    assert.equal(updateResponse.json().error, "reference_integrity_violation");
+
+    const deleteResponse = await app.inject({
+      method: "DELETE",
+      url: "/api/reference-data/courses/c-data-structures",
+      headers: adminHeaders,
+    });
+    assert.equal(deleteResponse.statusCode, 409);
+    assert.equal(deleteResponse.json().error, "reference_integrity_violation");
 
     await app.close();
   });
@@ -801,6 +886,39 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("persists asynchronous schedule jobs through app recreation", async () => {
+    const repository = new InMemoryPlatformRepository();
+    const firstApp = createApp({ scheduler: new FakeScheduler(), repository });
+
+    const createResponse = await firstApp.inject({
+      method: "POST",
+      url: "/api/schedule-jobs",
+      headers: operatorHeaders,
+    });
+    assert.equal(createResponse.statusCode, 202);
+    const created = createResponse.json();
+
+    await waitFor(async () => {
+      const response = await firstApp.inject({
+        method: "GET",
+        url: `/api/schedule-jobs/${created.job.id}`,
+      });
+      return response.json().job.status === "completed";
+    });
+    await firstApp.close();
+
+    const secondApp = createApp({ scheduler: new FakeScheduler(), repository });
+    const restoredResponse = await secondApp.inject({
+      method: "GET",
+      url: `/api/schedule-jobs/${created.job.id}`,
+    });
+    assert.equal(restoredResponse.statusCode, 200);
+    assert.equal(restoredResponse.json().job.status, "completed");
+    assert.ok(restoredResponse.json().job.runId);
+
+    await secondApp.close();
+  });
+
   it("locks draft assignments and rebalances only unlocked conflicted exams", async () => {
     const app = createApp({ scheduler: new DraftWorkflowScheduler() });
 
@@ -868,15 +986,26 @@ describe("ExamForge API", () => {
     assert.ok("locked" in draftScheduledExams);
   });
 
+  it("exposes migration state, job persistence, and integrity constraints", async () => {
+    assert.equal(migrationStateTableName, "schema_migrations");
+    assert.ok("status" in scheduleJobs);
+
+    const migrations = await loadMigrationFiles();
+    const sql = migrations.map((migration) => migration.sql).join("\n");
+    assert.ok(migrations.some((migration) => migration.id === "0005_auth_jobs_constraints"));
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS schedule_jobs/);
+    assert.match(sql, /FOREIGN KEY \(batch_id\) REFERENCES exam_batches\(id\)/);
+    assert.match(sql, /UNIQUE \(run_id, room_id, time_slot_id\)/);
+    assert.match(sql, /UNIQUE \(draft_id, room_id, time_slot_id\)/);
+  });
+
   it("enforces roles, updates teacher unavailable slots, previews notifications, and exports CSV", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
 
     const forbiddenResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
-      headers: {
-        "x-examforge-role": "viewer",
-      },
+      headers: viewerHeaders,
     });
     assert.equal(forbiddenResponse.statusCode, 403);
     assert.equal(forbiddenResponse.json().error, "permission_denied");
@@ -884,9 +1013,7 @@ describe("ExamForge API", () => {
     const unavailableResponse = await app.inject({
       method: "PATCH",
       url: "/api/teachers/t-zhang/unavailable-slots",
-      headers: {
-        "x-examforge-role": "operator",
-      },
+      headers: operatorHeaders,
       payload: {
         unavailable_slot_ids: ["s-002", "s-004"],
       },
@@ -897,9 +1024,7 @@ describe("ExamForge API", () => {
     const createResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
-      headers: {
-        "x-examforge-role": "operator",
-      },
+      headers: operatorHeaders,
     });
     const created = createResponse.json();
     await app.inject({
