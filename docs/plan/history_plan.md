@@ -55,3 +55,12 @@
 - 验证结果：`apps/scheduler` 全量测试通过，结果为 `32 passed`；`npm test` 的 API 测试通过，结果为 `2 passed`；`npm run typecheck` 通过；`npm run build` 通过；`git diff --check` 通过。
 - 集成验证：启动 API 后调用 `POST /api/schedule-runs`，返回 `status=feasible`、`assignments=6`、`conflicts=0`、`score=60`；启动 Web 后 `http://127.0.0.1:3000` 返回 `200 OK`。
 - 当前风险：`npm audit` 仍报告 Next 15.5.20 依赖链中的 2 个 moderate 级 PostCSS 相关公告，npm 给出的自动修复方案会降级到不适合本项目的旧 Next 版本。
+
+## 2026-07-06 第二版方案草稿工作台第一阶段
+
+- 原计划：`docs/plan/第二版方案草稿工作台第一阶段计划.md`
+- 完成提交：`4154b61 feat(第二版): 添加方案草稿工作台闭环`
+- 完成内容：新增 `docs/design/第二版实现内容设计.md`，实现排考草稿领域合同、草稿 API、内存仓储、PostgreSQL 仓储、草稿表迁移、人工调整硬约束校验和 Web 方案工作台。
+- 范围边界：未实现复杂拖拽、局部重排、登录权限、消息通知、队列、WebSocket、生产级多租户和课程报告终稿。
+- 验证结果：`npm test` 通过，API 测试结果为 `11 passed`；`npm run typecheck` 通过；`npm run build` 通过；`apps/scheduler` 全量测试结果为 `32 passed`；`git diff --check` 通过。
+- 后续影响：第二阶段应优先补真实 PostgreSQL 草稿路径验证、废弃草稿、草稿对比与发布确认面板，让方案治理流程更接近真实教务运营。
