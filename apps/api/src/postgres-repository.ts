@@ -18,6 +18,8 @@ import {
   type AuditEventSummary,
   type DashboardResponse,
   type PublishedScheduleResponse,
+  type ReferenceDeleteResponse,
+  type ReferenceImportResponse,
   type ReferenceRecord,
   type ReferenceDataResponse,
   type ReferenceResource,
@@ -273,6 +275,59 @@ export class PostgresPlatformRepository implements PlatformRepository {
         return row ? this.toExamTask(row) : null;
       }
     }
+  }
+
+  async importReferenceRecords(
+    resource: ReferenceResource,
+    records: ReferenceRecord[],
+  ): Promise<ReferenceImportResponse> {
+    const imported: ReferenceRecord[] = [];
+    for (const record of records) {
+      const updated = await this.updateReferenceRecord(
+        resource,
+        record.id,
+        omitReferenceId(record),
+      );
+      imported.push(updated ?? await this.createReferenceRecord(resource, record));
+    }
+    return { resource, records: imported };
+  }
+
+  async deleteReferenceRecord(
+    resource: ReferenceResource,
+    id: string,
+  ): Promise<ReferenceDeleteResponse | null> {
+    const referenceData = await this.getReferenceData();
+    const existing = this.findReferenceRecord(referenceData, resource, id);
+    if (!existing) {
+      return null;
+    }
+
+    switch (resource) {
+      case "student-groups":
+        await this.client.db.delete(studentGroups).where(eq(studentGroups.id, id));
+        break;
+      case "teachers":
+        await this.client.db.delete(teachers).where(eq(teachers.id, id));
+        break;
+      case "courses":
+        await this.client.db.delete(courses).where(eq(courses.id, id));
+        break;
+      case "rooms":
+        await this.client.db.delete(rooms).where(eq(rooms.id, id));
+        break;
+      case "time-slots":
+        await this.client.db.delete(timeSlots).where(eq(timeSlots.id, id));
+        break;
+      case "exam-tasks":
+        await this.client.db.delete(examTasks).where(eq(examTasks.id, id));
+        break;
+    }
+
+    return {
+      resource,
+      deleted: existing,
+    };
   }
 
   async createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse> {
@@ -621,6 +676,22 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
+  private findReferenceRecord(
+    referenceData: ReferenceDataResponse,
+    resource: ReferenceResource,
+    id: string,
+  ): ReferenceRecord | null {
+    const collections = {
+      "student-groups": referenceData.scheduleInput.student_groups,
+      teachers: referenceData.scheduleInput.teachers,
+      courses: referenceData.scheduleInput.courses,
+      rooms: referenceData.scheduleInput.rooms,
+      "time-slots": referenceData.scheduleInput.time_slots,
+      "exam-tasks": referenceData.scheduleInput.exam_tasks,
+    };
+    return collections[resource].find((record) => record.id === id) ?? null;
+  }
+
   private async recordAuditEvent(
     action: string,
     entityType: string,
@@ -636,6 +707,11 @@ export class PostgresPlatformRepository implements PlatformRepository {
       payload,
     });
   }
+}
+
+function omitReferenceId(record: ReferenceRecord): Partial<ReferenceRecord> {
+  const { id: _id, ...rest } = record;
+  return rest as Partial<ReferenceRecord>;
 }
 
 function stripUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {

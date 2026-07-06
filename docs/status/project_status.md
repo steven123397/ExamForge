@@ -21,13 +21,15 @@
 - 变更：PostgreSQL 仓储已覆盖批次/基础数据读取、排考运行写入、排考结果读取、冲突记录和审计事件写入；`packages/db` seed 已从 JSON 摘要升级为真实入库脚本。
 - 变更：本机 WSL2 已启用 Docker daemon 和 Docker Compose，`examforge-postgres` 容器已启动并通过健康检查。
 - 变更：API 已新增基础数据创建和更新入口，覆盖学生群体、教师、课程、考场、时间段和考试任务；运营台已新增课程、教师、考场的基础数据编辑面板。
+- 变更：API 已新增基础数据删除和批量导入入口；运营台基础数据管理已扩展到学生群体、教师、课程、考场、时间段和考试任务，并支持单条删除和 JSON 批量导入覆盖。
 - 变更：API 已新增排考运行历史、审计事件列表和排考运行版本对比接口；运营台已新增运行历史、版本对比摘要和审计详情面板。
 - 变更：API 已新增排考方案发布、当前发布方案查询和发布回滚接口；PostgreSQL `exam_batches` 已增加 `published_run_id` 字段，运营台运行历史已支持发布标记和回滚操作。
 - 变更：API 已新增教师和学生群体维度的已发布排考查询接口；运营台已新增“已发布查询”面板，可按教师或学生群体查看课程、时间、考场和监考教师。
 - 验证：PostgreSQL 运行路径已完成真实验证，包括按顺序执行 `packages/db/drizzle/*.sql`、运行 `npm run seed --workspace @examforge/db`、API 带 `DATABASE_URL` 读取 dashboard、发起一次排考运行并写入 `schedule_runs`、`scheduled_exams` 和 `audit_events`。
-- 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `9 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
+- 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `10 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
 - 验证：真实 PostgreSQL API 路径已验证 `POST /api/schedule-runs`、`POST /api/schedule-runs/:id/publish`、`GET /api/published-schedule`、`POST /api/published-schedule/rollback` 和回滚后的 `404` 查询结果；数据库已写入对应 `schedule_run.created`、`schedule_run.published` 和 `schedule_run.rollback` 审计事件。
 - 验证：真实 PostgreSQL API 路径已验证 `GET /api/published-schedule/teachers/:teacherId` 和 `GET /api/published-schedule/student-groups/:studentGroupId`，本地已发布版本 `run-362133c8-ab13-4993-b7e1-fed5f1b3d71f` 可返回教师 `t-zhang` 的 4 条安排和学生群体 `g-cs-2301` 的 3 条安排。
+- 验证：真实 PostgreSQL API 路径已验证 `POST /api/reference-data/time-slots/import`、同 `id` 覆盖导入、`DELETE /api/reference-data/time-slots/:id` 和删除后的基础数据查询结果。
 
 ## 当前风险
 
@@ -44,7 +46,7 @@
 ## 下一步
 
 - [x] 将 API 内置演示仓储替换为 PostgreSQL 持久化仓储。
-- [ ] 扩展基础数据管理页面，补齐学生群体、时间段、考试任务编辑和删除/导入能力。
+- [x] 扩展基础数据管理页面，补齐学生群体、时间段、考试任务编辑和删除/导入能力。
 - [x] 增加排考运行历史、版本对比和审计详情。
 - [x] 增加方案发布和回滚。
 - [x] 增加教师/学生查询已发布安排。

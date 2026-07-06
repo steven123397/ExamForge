@@ -5,6 +5,8 @@ import {
   type AuditEventSummary,
   type DashboardResponse,
   type PublishedScheduleResponse,
+  type ReferenceDeleteResponse,
+  type ReferenceImportResponse,
   type ReferenceRecord,
   type ReferenceDataResponse,
   type ReferenceResource,
@@ -26,6 +28,11 @@ export interface PlatformRepository {
     id: string,
     patch: Partial<ReferenceRecord>,
   ): Promise<ReferenceRecord | null>;
+  importReferenceRecords(
+    resource: ReferenceResource,
+    records: ReferenceRecord[],
+  ): Promise<ReferenceImportResponse>;
+  deleteReferenceRecord(resource: ReferenceResource, id: string): Promise<ReferenceDeleteResponse | null>;
   createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse>;
   listScheduleRuns(): Promise<ScheduleRunListResponse>;
   getScheduleRun(id: string): Promise<ScheduleRunResponse | null>;
@@ -95,6 +102,39 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       id,
     } as never;
     return collection[index] as ReferenceRecord;
+  }
+
+  async importReferenceRecords(
+    resource: ReferenceResource,
+    records: ReferenceRecord[],
+  ): Promise<ReferenceImportResponse> {
+    const collection = this.getCollection(resource);
+    const imported = records.map((record) => {
+      const index = collection.findIndex((item) => item.id === record.id);
+      if (index === -1) {
+        collection.push(record as never);
+        return record;
+      }
+      collection[index] = record as never;
+      return collection[index] as ReferenceRecord;
+    });
+    return { resource, records: imported };
+  }
+
+  async deleteReferenceRecord(
+    resource: ReferenceResource,
+    id: string,
+  ): Promise<ReferenceDeleteResponse | null> {
+    const collection = this.getCollection(resource);
+    const index = collection.findIndex((record) => record.id === id);
+    if (index === -1) {
+      return null;
+    }
+    const [deleted] = collection.splice(index, 1);
+    return {
+      resource,
+      deleted: deleted as ReferenceRecord,
+    };
   }
 
   async createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse> {

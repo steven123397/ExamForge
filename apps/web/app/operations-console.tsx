@@ -25,18 +25,23 @@ import type {
   PublishedScheduleAudienceResponse,
   PublishedScheduleResponse,
   ReferenceDataResponse,
+  ReferenceRecord,
+  ReferenceResource,
   ScheduleRunComparisonResponse,
   ScheduleRunResponse,
   ScheduleRunSummary,
   Course,
+  ExamTask,
   Room,
+  StudentGroup,
   Teacher,
+  TimeSlot,
 } from "@examforge/shared";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
-type EditableResource = "courses" | "teachers" | "rooms";
+type EditableResource = ReferenceResource;
 type FormState = Record<string, string>;
 
 const referenceForms = {
@@ -53,6 +58,21 @@ const referenceForms = {
       name: "",
       department_id: "cs",
       exam_type: "written",
+    },
+  },
+  "student-groups": {
+    label: "学生群体",
+    fields: [
+      ["id", "编号"],
+      ["name", "名称"],
+      ["size", "人数"],
+      ["department_id", "院系"],
+    ],
+    defaults: {
+      id: "g-new",
+      name: "",
+      size: "60",
+      department_id: "cs",
     },
   },
   teachers: {
@@ -87,6 +107,48 @@ const referenceForms = {
       capacity: "60",
       room_type: "standard",
       equipment_tags: "",
+    },
+  },
+  "time-slots": {
+    label: "时间段",
+    fields: [
+      ["id", "编号"],
+      ["date", "日期"],
+      ["start_time", "开始"],
+      ["end_time", "结束"],
+      ["period_index", "序号"],
+    ],
+    defaults: {
+      id: "slot-new",
+      date: "2026-06-21",
+      start_time: "09:00",
+      end_time: "11:00",
+      period_index: "20",
+    },
+  },
+  "exam-tasks": {
+    label: "考试任务",
+    fields: [
+      ["id", "编号"],
+      ["course_id", "课程"],
+      ["student_group_ids", "学生群体"],
+      ["expected_count", "人数"],
+      ["duration_minutes", "时长"],
+      ["required_room_type", "考场类型"],
+      ["required_equipment_tags", "设备"],
+      ["allowed_slot_ids", "允许时段"],
+      ["invigilator_count", "监考数"],
+    ],
+    defaults: {
+      id: "task-new",
+      course_id: "c-data-structures",
+      student_group_ids: "g-cs-2301",
+      expected_count: "60",
+      duration_minutes: "120",
+      required_room_type: "standard",
+      required_equipment_tags: "",
+      allowed_slot_ids: "",
+      invigilator_count: "2",
     },
   },
 } as const;
@@ -763,6 +825,7 @@ function ReferenceManager({
   const [resource, setResource] = useState<EditableResource>("courses");
   const [mode, setMode] = useState<"create" | "edit">("edit");
   const [form, setForm] = useState<FormState>(referenceForms.courses.defaults);
+  const [importText, setImportText] = useState(() => sampleImportText("courses"));
   const [saving, setSaving] = useState(false);
   const config = referenceForms[resource];
   const records = getEditableRecords(referenceData, resource);
@@ -773,13 +836,14 @@ function ReferenceManager({
     const first = nextRecords[0];
     setMode(first ? "edit" : "create");
     setForm(first ? recordToForm(resource, first) : referenceForms[resource].defaults);
+    setImportText(sampleImportText(resource));
   }, [referenceData, resource]);
 
   function selectResource(nextResource: EditableResource) {
     setResource(nextResource);
   }
 
-  function selectRecord(record: Course | Teacher | Room) {
+  function selectRecord(record: ReferenceRecord) {
     setMode("edit");
     setForm(recordToForm(resource, record));
   }
@@ -809,12 +873,60 @@ function ReferenceManager({
         throw new Error("基础数据保存失败");
       }
 
-      const result = await response.json() as { record: Course | Teacher | Room };
+      const result = await response.json() as { record: ReferenceRecord };
       setMode("edit");
       setForm(recordToForm(resource, result.record));
       await onRefresh();
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : "基础数据保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteRecord() {
+    if (mode !== "edit" || !form.id) {
+      return;
+    }
+    setSaving(true);
+    onError(null);
+    try {
+      const response = await fetch(
+        `${apiBase}/api/reference-data/${resource}/${encodeURIComponent(form.id)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) {
+        throw new Error("基础数据删除失败");
+      }
+      await onRefresh();
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "基础数据删除失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function importRecords() {
+    setSaving(true);
+    onError(null);
+    try {
+      const parsed = JSON.parse(importText) as unknown;
+      if (!Array.isArray(parsed)) {
+        throw new Error("导入内容必须是 JSON 数组");
+      }
+      const response = await fetch(`${apiBase}/api/reference-data/${resource}/import`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ records: parsed }),
+      });
+      if (!response.ok) {
+        throw new Error("基础数据导入失败");
+      }
+      await onRefresh();
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "基础数据导入失败");
     } finally {
       setSaving(false);
     }
@@ -848,7 +960,7 @@ function ReferenceManager({
               className={mode === "edit" && selectedId === record.id ? "record-row active" : "record-row"}
               onClick={() => selectRecord(record)}
             >
-              <span>{record.name}</span>
+              <span>{recordTitle(resource, record)}</span>
               <strong>{record.id}</strong>
             </button>
           ))}
@@ -863,6 +975,14 @@ function ReferenceManager({
             <button type="button" className="secondary-button" onClick={saveRecord} disabled={saving}>
               {saving ? <Check size={16} /> : <Save size={16} />}
               {saving ? "保存中" : "保存"}
+            </button>
+            <button
+              type="button"
+              className="danger-button"
+              onClick={deleteRecord}
+              disabled={saving || mode !== "edit"}
+            >
+              删除
             </button>
           </div>
 
@@ -883,6 +1003,23 @@ function ReferenceManager({
           </div>
         </div>
       </div>
+
+      <div className="import-panel">
+        <div className="import-title">
+          <div>
+            <span>Bulk Import</span>
+            <strong>{config.label} JSON 导入</strong>
+          </div>
+          <button type="button" className="secondary-button" onClick={importRecords} disabled={saving}>
+            导入覆盖
+          </button>
+        </div>
+        <textarea
+          value={importText}
+          onChange={(event) => setImportText(event.target.value)}
+          spellCheck={false}
+        />
+      </div>
     </div>
   );
 }
@@ -890,14 +1027,31 @@ function ReferenceManager({
 function getEditableRecords(
   referenceData: ReferenceDataResponse | null,
   resource: EditableResource,
-): Array<Course | Teacher | Room> {
+): ReferenceRecord[] {
   if (!referenceData) {
     return [];
   }
-  return referenceData.scheduleInput[resource];
+  const collections = {
+    "student-groups": referenceData.scheduleInput.student_groups,
+    teachers: referenceData.scheduleInput.teachers,
+    courses: referenceData.scheduleInput.courses,
+    rooms: referenceData.scheduleInput.rooms,
+    "time-slots": referenceData.scheduleInput.time_slots,
+    "exam-tasks": referenceData.scheduleInput.exam_tasks,
+  };
+  return collections[resource];
 }
 
-function recordToForm(resource: EditableResource, record: Course | Teacher | Room): FormState {
+function recordToForm(resource: EditableResource, record: ReferenceRecord): FormState {
+  if (resource === "student-groups") {
+    const group = record as StudentGroup;
+    return {
+      id: group.id,
+      name: group.name,
+      size: String(group.size),
+      department_id: group.department_id,
+    };
+  }
   if (resource === "courses") {
     const course = record as Course;
     return {
@@ -916,24 +1070,56 @@ function recordToForm(resource: EditableResource, record: Course | Teacher | Roo
       unavailable_slot_ids: teacher.unavailable_slot_ids.join(","),
     };
   }
-  const room = record as Room;
+  if (resource === "rooms") {
+    const room = record as Room;
+    return {
+      id: room.id,
+      name: room.name,
+      building_id: room.building_id,
+      capacity: String(room.capacity),
+      room_type: room.room_type,
+      equipment_tags: room.equipment_tags.join(","),
+    };
+  }
+  if (resource === "time-slots") {
+    const slot = record as TimeSlot;
+    return {
+      id: slot.id,
+      date: slot.date,
+      start_time: slot.start_time,
+      end_time: slot.end_time,
+      period_index: String(slot.period_index),
+    };
+  }
+  const task = record as ExamTask;
   return {
-    id: room.id,
-    name: room.name,
-    building_id: room.building_id,
-    capacity: String(room.capacity),
-    room_type: room.room_type,
-    equipment_tags: room.equipment_tags.join(","),
+    id: task.id,
+    course_id: task.course_id,
+    student_group_ids: task.student_group_ids.join(","),
+    expected_count: String(task.expected_count),
+    duration_minutes: String(task.duration_minutes),
+    required_room_type: task.required_room_type,
+    required_equipment_tags: task.required_equipment_tags.join(","),
+    allowed_slot_ids: task.allowed_slot_ids.join(","),
+    invigilator_count: String(task.invigilator_count),
   };
 }
 
-function formToPayload(resource: EditableResource, form: FormState) {
+function formToPayload(resource: EditableResource, form: FormState): ReferenceRecord {
+  if (resource === "student-groups") {
+    return {
+      id: form.id,
+      name: form.name,
+      size: Number(form.size),
+      department_id: form.department_id,
+    };
+  }
   if (resource === "courses") {
     return {
       id: form.id,
       name: form.name,
       department_id: form.department_id,
-      exam_type: form.exam_type,
+      exam_type: form.exam_type as Course["exam_type"],
     };
   }
   if (resource === "teachers") {
@@ -944,18 +1130,102 @@ function formToPayload(resource: EditableResource, form: FormState) {
       unavailable_slot_ids: splitList(form.unavailable_slot_ids),
     };
   }
+  if (resource === "rooms") {
+    return {
+      id: form.id,
+      name: form.name,
+      building_id: form.building_id,
+      capacity: Number(form.capacity),
+      room_type: form.room_type as Room["room_type"],
+      equipment_tags: splitList(form.equipment_tags),
+    };
+  }
+  if (resource === "time-slots") {
+    return {
+      id: form.id,
+      date: form.date,
+      start_time: form.start_time,
+      end_time: form.end_time,
+      period_index: Number(form.period_index),
+    };
+  }
   return {
     id: form.id,
-    name: form.name,
-    building_id: form.building_id,
-    capacity: Number(form.capacity),
-    room_type: form.room_type,
-    equipment_tags: splitList(form.equipment_tags),
+    course_id: form.course_id,
+    student_group_ids: splitList(form.student_group_ids),
+    expected_count: Number(form.expected_count),
+    duration_minutes: Number(form.duration_minutes),
+    required_room_type: form.required_room_type as ExamTask["required_room_type"],
+    required_equipment_tags: splitList(form.required_equipment_tags),
+    allowed_slot_ids: splitList(form.allowed_slot_ids),
+    invigilator_count: Number(form.invigilator_count),
   };
 }
 
 function splitList(value: string) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function recordTitle(resource: EditableResource, record: ReferenceRecord) {
+  if ("name" in record) {
+    return record.name;
+  }
+  if (resource === "time-slots") {
+    const slot = record as TimeSlot;
+    return `${slot.date} ${slot.start_time}-${slot.end_time}`;
+  }
+  const task = record as ExamTask;
+  return `${task.course_id} · ${task.expected_count} 人`;
+}
+
+function sampleImportText(resource: EditableResource) {
+  const samples: Record<EditableResource, ReferenceRecord[]> = {
+    courses: [{
+      id: "c-import",
+      name: "导入课程",
+      department_id: "cs",
+      exam_type: "written",
+    }],
+    teachers: [{
+      id: "t-import",
+      name: "导入教师",
+      department_id: "cs",
+      unavailable_slot_ids: [],
+    }],
+    rooms: [{
+      id: "r-import",
+      name: "导入考场",
+      building_id: "main",
+      capacity: 80,
+      room_type: "standard",
+      equipment_tags: [],
+    }],
+    "student-groups": [{
+      id: "g-import",
+      name: "导入学生群体",
+      size: 60,
+      department_id: "cs",
+    }],
+    "time-slots": [{
+      id: "slot-import",
+      date: "2026-06-21",
+      start_time: "09:00",
+      end_time: "11:00",
+      period_index: 20,
+    }],
+    "exam-tasks": [{
+      id: "task-import",
+      course_id: "c-data-structures",
+      student_group_ids: ["g-cs-2301"],
+      expected_count: 60,
+      duration_minutes: 120,
+      required_room_type: "standard",
+      required_equipment_tags: [],
+      allowed_slot_ids: [],
+      invigilator_count: 2,
+    }],
+  };
+  return JSON.stringify(samples[resource], null, 2);
 }
 
 function omitId<T extends { id: string }>(value: T): Omit<T, "id"> {

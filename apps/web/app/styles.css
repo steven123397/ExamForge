@@ -357,6 +357,7 @@ th {
 
 .resource-tabs button,
 .secondary-button,
+.danger-button,
 .record-create,
 .record-row {
   border: 0;
@@ -479,6 +480,20 @@ th {
   cursor: wait;
 }
 
+.danger-button {
+  height: 38px;
+  padding: 0 14px;
+  background: rgba(190, 18, 60, 0.1);
+  color: var(--rose);
+  font-weight: 900;
+  border: 1px solid rgba(190, 18, 60, 0.28);
+}
+
+.danger-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -509,6 +524,48 @@ th {
 .form-grid input:disabled {
   color: var(--muted);
   background: #eee5d7;
+}
+
+.import-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.42);
+  padding: 16px;
+}
+
+.import-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.import-title span {
+  display: block;
+  color: var(--copper);
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.import-title strong {
+  display: block;
+  margin-top: 4px;
+}
+
+.import-panel textarea {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffaf0;
+  color: var(--ink);
+  padding: 12px;
+  font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .history-panel {
@@ -845,6 +902,12 @@ th {
   .history-list article,
   .schedule-card dl {
     grid-template-columns: 1fr;
+  }
+
+  .editor-title,
+  .import-title {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .publish-box {

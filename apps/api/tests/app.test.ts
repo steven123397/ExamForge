@@ -225,6 +225,8 @@ describe("ExamForge API", () => {
         getReferenceData: async () => referenceData,
         createReferenceRecord: (resource, record) => repository.createReferenceRecord(resource, record),
         updateReferenceRecord: (resource, id, patch) => repository.updateReferenceRecord(resource, id, patch),
+        importReferenceRecords: (resource, records) => repository.importReferenceRecords(resource, records),
+        deleteReferenceRecord: (resource, id) => repository.deleteReferenceRecord(resource, id),
         createScheduleRun: (result) => repository.createScheduleRun(result),
         listScheduleRuns: () => repository.listScheduleRuns(),
         getScheduleRun: (id) => repository.getScheduleRun(id),
@@ -284,6 +286,72 @@ describe("ExamForge API", () => {
     assert.ok(courses.some((course: { id: string; name: string }) => (
       course.id === "c-linear-algebra" && course.name === "线性代数 A"
     )));
+
+    await app.close();
+  });
+
+  it("imports and deletes reference data records", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const importResponse = await app.inject({
+      method: "POST",
+      url: "/api/reference-data/time-slots/import",
+      payload: {
+        records: [
+          {
+            id: "slot-import-a",
+            date: "2026-06-21",
+            start_time: "08:30",
+            end_time: "10:30",
+            period_index: 20,
+          },
+          {
+            id: "slot-import-b",
+            date: "2026-06-21",
+            start_time: "14:00",
+            end_time: "16:00",
+            period_index: 21,
+          },
+        ],
+      },
+    });
+    assert.equal(importResponse.statusCode, 200);
+    assert.equal(importResponse.json().records.length, 2);
+
+    const upsertResponse = await app.inject({
+      method: "POST",
+      url: "/api/reference-data/time-slots/import",
+      payload: {
+        records: [
+          {
+            id: "slot-import-a",
+            date: "2026-06-22",
+            start_time: "09:00",
+            end_time: "11:00",
+            period_index: 22,
+          },
+        ],
+      },
+    });
+    assert.equal(upsertResponse.statusCode, 200);
+    assert.equal(upsertResponse.json().records[0].date, "2026-06-22");
+
+    const deleteResponse = await app.inject({
+      method: "DELETE",
+      url: "/api/reference-data/time-slots/slot-import-b",
+    });
+    assert.equal(deleteResponse.statusCode, 200);
+    assert.equal(deleteResponse.json().deleted.id, "slot-import-b");
+
+    const referenceResponse = await app.inject({
+      method: "GET",
+      url: "/api/reference-data",
+    });
+    const slots = referenceResponse.json().scheduleInput.time_slots;
+    assert.ok(slots.some((slot: { id: string; date: string }) => (
+      slot.id === "slot-import-a" && slot.date === "2026-06-22"
+    )));
+    assert.ok(!slots.some((slot: { id: string }) => slot.id === "slot-import-b"));
 
     await app.close();
   });

@@ -1,5 +1,6 @@
 import cors from "@fastify/cors";
 import Fastify from "fastify";
+import { z } from "zod";
 import {
   referenceRecordCreateSchemas,
   referenceRecordUpdateSchemas,
@@ -47,6 +48,35 @@ export function createApp(options: AppOptions = {}) {
   app.get("/api/dashboard", async () => repository.getDashboard());
 
   app.get("/api/reference-data", async () => repository.getReferenceData());
+
+  app.post<{ Params: { resource: string } }>(
+    "/api/reference-data/:resource/import",
+    async (request, reply) => {
+      const resource = parseReferenceResource(request.params.resource);
+      if (!resource) {
+        return reply.code(404).send({
+          error: "reference_resource_not_found",
+          message: `Reference resource ${request.params.resource} does not exist.`,
+        });
+      }
+
+      const parsed = z.object({
+        records: z.array(referenceRecordCreateSchemas[resource]).min(1).max(500),
+      }).safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: "invalid_reference_import",
+          message: "Reference import payload is invalid.",
+          issues: parsed.error.issues,
+        });
+      }
+
+      return repository.importReferenceRecords(
+        resource,
+        parsed.data.records as ReferenceRecord[],
+      );
+    },
+  );
 
   app.post<{ Params: { resource: string } }>(
     "/api/reference-data/:resource",
@@ -109,6 +139,29 @@ export function createApp(options: AppOptions = {}) {
       }
 
       return { resource, record };
+    },
+  );
+
+  app.delete<{ Params: { resource: string; id: string } }>(
+    "/api/reference-data/:resource/:id",
+    async (request, reply) => {
+      const resource = parseReferenceResource(request.params.resource);
+      if (!resource) {
+        return reply.code(404).send({
+          error: "reference_resource_not_found",
+          message: `Reference resource ${request.params.resource} does not exist.`,
+        });
+      }
+
+      const response = await repository.deleteReferenceRecord(resource, request.params.id);
+      if (!response) {
+        return reply.code(404).send({
+          error: "reference_record_not_found",
+          message: `Reference record ${request.params.id} does not exist.`,
+        });
+      }
+
+      return response;
     },
   );
 

@@ -213,6 +213,16 @@ export interface ReferenceDataResponse {
   scheduleInput: ScheduleInput;
 }
 
+export interface ReferenceImportResponse {
+  resource: ReferenceResource;
+  records: ReferenceRecord[];
+}
+
+export interface ReferenceDeleteResponse {
+  resource: ReferenceResource;
+  deleted: ReferenceRecord;
+}
+
 export interface ScheduleRunResponse {
   run: ScheduleRunSummary;
   result: ScheduleResult;
