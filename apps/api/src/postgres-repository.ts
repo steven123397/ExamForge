@@ -14,20 +14,25 @@ import {
 } from "@examforge/db";
 import {
   type ConstraintProfile,
+  type AuditEventListResponse,
+  type AuditEventSummary,
   type DashboardResponse,
   type ReferenceRecord,
   type ReferenceDataResponse,
   type ReferenceResource,
+  type ScheduleRunComparisonResponse,
+  type ScheduleRunListResponse,
   type ScheduleResult,
   type ScheduleRunResponse,
   type ScheduleRunSummary,
 } from "@examforge/shared";
 import { desc, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import type { PlatformRepository } from "./repository.js";
+import { buildRunComparison, type PlatformRepository } from "./repository.js";
 
 type BatchRow = typeof examBatches.$inferSelect;
 type RunRow = typeof scheduleRuns.$inferSelect;
+type AuditEventRow = typeof auditEvents.$inferSelect;
 type StudentGroupRow = typeof studentGroups.$inferSelect;
 type TeacherRow = typeof teachers.$inferSelect;
 type CourseRow = typeof courses.$inferSelect;
@@ -388,6 +393,42 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
+  async listScheduleRuns(): Promise<ScheduleRunListResponse> {
+    const rows = await this.client.db
+      .select()
+      .from(scheduleRuns)
+      .orderBy(desc(scheduleRuns.createdAt))
+      .limit(30);
+
+    return {
+      runs: rows.map((run) => this.toRunSummary(run)),
+    };
+  }
+
+  async compareScheduleRuns(
+    baseId: string,
+    targetId: string,
+  ): Promise<ScheduleRunComparisonResponse | null> {
+    const [base, target] = await Promise.all([
+      this.getScheduleRun(baseId),
+      this.getScheduleRun(targetId),
+    ]);
+
+    return base && target ? buildRunComparison(base, target) : null;
+  }
+
+  async listAuditEvents(): Promise<AuditEventListResponse> {
+    const rows = await this.client.db
+      .select()
+      .from(auditEvents)
+      .orderBy(desc(auditEvents.createdAt))
+      .limit(50);
+
+    return {
+      events: rows.map((event) => this.toAuditEvent(event)),
+    };
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }
@@ -498,6 +539,18 @@ export class PostgresPlatformRepository implements PlatformRepository {
       score: run.score,
       conflictCount: run.conflictCount,
       assignmentCount: run.assignmentCount,
+    };
+  }
+
+  private toAuditEvent(event: AuditEventRow): AuditEventSummary {
+    return {
+      id: event.id,
+      actor: event.actor,
+      action: event.action,
+      entityType: event.entityType,
+      entityId: event.entityId,
+      payload: event.payload as Record<string, unknown>,
+      createdAt: event.createdAt.toISOString(),
     };
   }
 }

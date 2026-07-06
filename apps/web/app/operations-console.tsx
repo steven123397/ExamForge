@@ -8,8 +8,10 @@ import {
   Building2,
   CalendarClock,
   Check,
+  GitCompareArrows,
   Database,
   Gauge,
+  History,
   Plus,
   Play,
   Save,
@@ -19,8 +21,11 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import type {
   DashboardResponse,
+  AuditEventSummary,
   ReferenceDataResponse,
+  ScheduleRunComparisonResponse,
   ScheduleRunResponse,
+  ScheduleRunSummary,
   Course,
   Room,
   Teacher,
@@ -88,8 +93,12 @@ export function OperationsConsole() {
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [referenceData, setReferenceData] = useState<ReferenceDataResponse | null>(null);
   const [latestRun, setLatestRun] = useState<ScheduleRunResponse | null>(null);
+  const [runHistory, setRunHistory] = useState<ScheduleRunSummary[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AuditEventSummary[]>([]);
+  const [comparison, setComparison] = useState<ScheduleRunComparisonResponse | null>(null);
   const [state, setState] = useState<LoadState>("idle");
   const [runState, setRunState] = useState<LoadState>("idle");
+  const [compareState, setCompareState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -111,6 +120,7 @@ export function OperationsConsole() {
       const referencePayload = (await referenceResponse.json()) as ReferenceDataResponse;
       setDashboard(dashboardPayload);
       setReferenceData(referencePayload);
+      await loadOperationalHistory();
       setState("ready");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法连接 API");
@@ -136,10 +146,46 @@ export function OperationsConsole() {
       if (dashboardResponse.ok) {
         setDashboard((await dashboardResponse.json()) as DashboardResponse);
       }
+      await loadOperationalHistory();
       setRunState("ready");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "排考运行失败");
       setRunState("error");
+    }
+  }
+
+  async function loadOperationalHistory() {
+    const [runsResponse, auditResponse] = await Promise.all([
+      fetch(`${apiBase}/api/schedule-runs`, { cache: "no-store" }),
+      fetch(`${apiBase}/api/audit-events`, { cache: "no-store" }),
+    ]);
+
+    if (runsResponse.ok) {
+      const payload = (await runsResponse.json()) as { runs: ScheduleRunSummary[] };
+      setRunHistory(payload.runs);
+    }
+    if (auditResponse.ok) {
+      const payload = (await auditResponse.json()) as { events: AuditEventSummary[] };
+      setAuditEvents(payload.events);
+    }
+  }
+
+  async function compareRuns(baseId: string, targetId: string) {
+    setCompareState("loading");
+    setError(null);
+    try {
+      const response = await fetch(
+        `${apiBase}/api/schedule-runs/compare?baseId=${encodeURIComponent(baseId)}&targetId=${encodeURIComponent(targetId)}`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) {
+        throw new Error("版本对比失败");
+      }
+      setComparison((await response.json()) as ScheduleRunComparisonResponse);
+      setCompareState("ready");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "版本对比失败");
+      setCompareState("error");
     }
   }
 
@@ -313,6 +359,21 @@ export function OperationsConsole() {
         </Panel>
 
         <section className="split">
+          <Panel title="排考运行历史" eyebrow="Run History">
+            <RunHistory
+              runs={runHistory}
+              comparison={comparison}
+              compareState={compareState}
+              onCompare={compareRuns}
+            />
+          </Panel>
+
+          <Panel title="审计详情" eyebrow="Audit Trail">
+            <AuditTrail events={auditEvents} />
+          </Panel>
+        </section>
+
+        <section className="split">
           <Panel title="基础数据快照" eyebrow="Reference Data">
             <div className="snapshot-grid">
               <span>课程 {scheduleInput?.courses.length ?? "--"}</span>
@@ -339,6 +400,101 @@ export function OperationsConsole() {
         </footer>
       </section>
     </main>
+  );
+}
+
+function RunHistory({
+  runs,
+  comparison,
+  compareState,
+  onCompare,
+}: {
+  runs: ScheduleRunSummary[];
+  comparison: ScheduleRunComparisonResponse | null;
+  compareState: LoadState;
+  onCompare(baseId: string, targetId: string): Promise<void>;
+}) {
+  const [baseId, setBaseId] = useState("");
+  const [targetId, setTargetId] = useState("");
+
+  useEffect(() => {
+    if (runs.length >= 2) {
+      setTargetId(runs[0].id);
+      setBaseId(runs[1].id);
+    } else if (runs.length === 1) {
+      setTargetId(runs[0].id);
+      setBaseId("");
+    }
+  }, [runs]);
+
+  return (
+    <div className="history-panel">
+      <div className="history-list">
+        {runs.slice(0, 6).map((run) => (
+          <article key={run.id}>
+            <div>
+              <strong>{run.status}</strong>
+              <span>{new Date(run.createdAt).toLocaleString()}</span>
+            </div>
+            <dl>
+              <div><dt>评分</dt><dd>{run.score}</dd></div>
+              <div><dt>安排</dt><dd>{run.assignmentCount}</dd></div>
+              <div><dt>冲突</dt><dd>{run.conflictCount}</dd></div>
+            </dl>
+          </article>
+        ))}
+        {!runs.length ? <p className="muted">运行排考后展示历史版本。</p> : null}
+      </div>
+
+      <div className="compare-box">
+        <div className="compare-controls">
+          <select value={baseId} onChange={(event) => setBaseId(event.target.value)}>
+            <option value="">基准版本</option>
+            {runs.map((run) => <option value={run.id} key={run.id}>{run.id}</option>)}
+          </select>
+          <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
+            <option value="">目标版本</option>
+            {runs.map((run) => <option value={run.id} key={run.id}>{run.id}</option>)}
+          </select>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!baseId || !targetId || compareState === "loading"}
+            onClick={() => onCompare(baseId, targetId)}
+          >
+            <GitCompareArrows size={16} />
+            对比
+          </button>
+        </div>
+
+        {comparison ? (
+          <div className="comparison-grid">
+            <div><span>评分变化</span><strong>{formatDelta(comparison.deltas.score)}</strong></div>
+            <div><span>安排变化</span><strong>{formatDelta(comparison.deltas.assignments)}</strong></div>
+            <div><span>冲突变化</span><strong>{formatDelta(comparison.deltas.conflicts)}</strong></div>
+            <div><span>新增安排</span><strong>{comparison.assignmentChanges.added.length}</strong></div>
+          </div>
+        ) : <p className="muted">选择两个运行版本后查看差异。</p>}
+      </div>
+    </div>
+  );
+}
+
+function AuditTrail({ events }: { events: AuditEventSummary[] }) {
+  return (
+    <div className="audit-list">
+      {events.slice(0, 8).map((event) => (
+        <article key={event.id}>
+          <History size={16} />
+          <div>
+            <strong>{event.action}</strong>
+            <span>{event.entityType} · {event.entityId}</span>
+            <p>{new Date(event.createdAt).toLocaleString()} · {event.actor}</p>
+          </div>
+        </article>
+      ))}
+      {!events.length ? <p className="muted">暂无审计事件。</p> : null}
+    </div>
   );
 }
 
@@ -552,6 +708,10 @@ function splitList(value: string) {
 function omitId<T extends { id: string }>(value: T): Omit<T, "id"> {
   const { id: _id, ...rest } = value;
   return rest;
+}
+
+function formatDelta(value: number) {
+  return value > 0 ? `+${value}` : String(value);
 }
 
 function Metric({

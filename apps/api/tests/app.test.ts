@@ -10,9 +10,11 @@ import type { SchedulerClient } from "../src/scheduler-client.js";
 
 class FakeScheduler implements SchedulerClient {
   lastInput: ScheduleInput | null = null;
+  calls = 0;
 
   async solve(input: ScheduleInput): Promise<ScheduleResult> {
     this.lastInput = input;
+    this.calls += 1;
     return {
       assignments: [
         {
@@ -24,7 +26,7 @@ class FakeScheduler implements SchedulerClient {
       ],
       conflicts: [],
       score: {
-        total_score: 96,
+        total_score: 90 + this.calls,
         hard_violation_count: 0,
         soft_penalty_items: [],
       },
@@ -72,7 +74,7 @@ describe("ExamForge API", () => {
     assert.equal(createResponse.statusCode, 201);
     const created = createResponse.json();
     assert.equal(created.run.status, "feasible");
-    assert.equal(created.result.score.total_score, 96);
+    assert.equal(created.result.score.total_score, 91);
 
     const readResponse = await app.inject({
       method: "GET",
@@ -81,6 +83,50 @@ describe("ExamForge API", () => {
 
     assert.equal(readResponse.statusCode, 200);
     assert.equal(readResponse.json().run.id, created.run.id);
+    await app.close();
+  });
+
+  it("lists schedule runs, audit events, and compares two runs", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const firstResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+    });
+    const secondResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+    });
+    const first = firstResponse.json();
+    const second = secondResponse.json();
+
+    const listResponse = await app.inject({
+      method: "GET",
+      url: "/api/schedule-runs",
+    });
+    assert.equal(listResponse.statusCode, 200);
+    assert.deepEqual(
+      listResponse.json().runs.map((run: { id: string }) => run.id),
+      [second.run.id, first.run.id],
+    );
+
+    const auditResponse = await app.inject({
+      method: "GET",
+      url: "/api/audit-events",
+    });
+    assert.equal(auditResponse.statusCode, 200);
+    assert.equal(auditResponse.json().events.length, 2);
+    assert.equal(auditResponse.json().events[0].action, "schedule_run.created");
+
+    const compareResponse = await app.inject({
+      method: "GET",
+      url: `/api/schedule-runs/compare?baseId=${first.run.id}&targetId=${second.run.id}`,
+    });
+    assert.equal(compareResponse.statusCode, 200);
+    assert.equal(compareResponse.json().baseRun.id, first.run.id);
+    assert.equal(compareResponse.json().targetRun.id, second.run.id);
+    assert.equal(compareResponse.json().deltas.score, 1);
+
     await app.close();
   });
 
@@ -99,7 +145,10 @@ describe("ExamForge API", () => {
         createReferenceRecord: (resource, record) => repository.createReferenceRecord(resource, record),
         updateReferenceRecord: (resource, id, patch) => repository.updateReferenceRecord(resource, id, patch),
         createScheduleRun: (result) => repository.createScheduleRun(result),
+        listScheduleRuns: () => repository.listScheduleRuns(),
         getScheduleRun: (id) => repository.getScheduleRun(id),
+        compareScheduleRuns: (baseId, targetId) => repository.compareScheduleRuns(baseId, targetId),
+        listAuditEvents: () => repository.listAuditEvents(),
       },
     });
 

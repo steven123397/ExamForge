@@ -116,6 +116,35 @@ export function createApp(options: AppOptions = {}) {
     return reply.code(201).send(response);
   });
 
+  app.get("/api/schedule-runs", async () => repository.listScheduleRuns());
+
+  app.get<{
+    Querystring: {
+      baseId?: string;
+      targetId?: string;
+    };
+  }>("/api/schedule-runs/compare", async (request, reply) => {
+    const { baseId, targetId } = request.query;
+    if (!baseId || !targetId) {
+      return reply.code(400).send({
+        error: "invalid_schedule_run_comparison",
+        message: "baseId and targetId query parameters are required.",
+      });
+    }
+
+    const comparison = await repository.compareScheduleRuns(baseId, targetId);
+    if (!comparison) {
+      return reply.code(404).send({
+        error: "schedule_run_not_found",
+        message: "One or both schedule runs do not exist.",
+      });
+    }
+
+    return comparison;
+  });
+
+  app.get("/api/audit-events", async () => repository.listAuditEvents());
+
   app.get<{ Params: { id: string } }>("/api/schedule-runs/:id", async (request, reply) => {
     const response = await repository.getScheduleRun(request.params.id);
     if (!response) {

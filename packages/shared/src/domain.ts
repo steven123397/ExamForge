@@ -217,3 +217,37 @@ export interface ScheduleRunResponse {
   run: ScheduleRunSummary;
   result: ScheduleResult;
 }
+
+export interface ScheduleRunListResponse {
+  runs: ScheduleRunSummary[];
+}
+
+export interface AuditEventSummary {
+  id: string;
+  actor: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface AuditEventListResponse {
+  events: AuditEventSummary[];
+}
+
+export interface ScheduleRunComparisonResponse {
+  baseRun: ScheduleRunSummary;
+  targetRun: ScheduleRunSummary;
+  deltas: {
+    score: number;
+    assignments: number;
+    conflicts: number;
+    elapsedMs: number;
+  };
+  assignmentChanges: {
+    unchanged: number;
+    added: ScheduledExam[];
+    removed: ScheduledExam[];
+  };
+}
