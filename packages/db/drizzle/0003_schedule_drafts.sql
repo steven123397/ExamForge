@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS draft_scheduled_exams (
   room_id text NOT NULL,
   time_slot_id text NOT NULL,
   teacher_ids jsonb NOT NULL,
+  locked boolean NOT NULL DEFAULT false,
   updated_at timestamp with time zone NOT NULL DEFAULT now()
 );
 

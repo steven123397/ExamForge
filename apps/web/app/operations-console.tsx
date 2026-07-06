@@ -276,6 +276,7 @@ export function OperationsConsole() {
     try {
       const response = await fetch(`${apiBase}/api/schedule-runs`, {
         method: "POST",
+        headers: roleHeaders(),
       });
       if (!response.ok) {
         throw new Error("排考运行失败");
@@ -394,6 +395,7 @@ export function OperationsConsole() {
     try {
       const response = await fetch(`${apiBase}/api/schedule-runs/${encodeURIComponent(id)}/publish`, {
         method: "POST",
+        headers: roleHeaders(),
       });
       if (!response.ok) {
         throw new Error("方案发布失败");
@@ -417,6 +419,7 @@ export function OperationsConsole() {
     try {
       const response = await fetch(`${apiBase}/api/schedule-runs/${encodeURIComponent(id)}/drafts`, {
         method: "POST",
+        headers: roleHeaders(),
       });
       if (!response.ok) {
         throw new Error("草稿创建失败");
@@ -502,9 +505,7 @@ export function OperationsConsole() {
         `${apiBase}/api/schedule-drafts/${encodeURIComponent(currentDraft.draft.id)}/assignments/${encodeURIComponent(examTaskId)}`,
         {
           method: "PATCH",
-          headers: {
-            "content-type": "application/json",
-          },
+          headers: roleHeaders({ "content-type": "application/json" }),
           body: JSON.stringify(patch),
         },
       );
@@ -604,7 +605,7 @@ export function OperationsConsole() {
     try {
       const response = await fetch(
         `${apiBase}/api/schedule-drafts/${encodeURIComponent(currentDraft.draft.id)}/publish`,
-        { method: "POST" },
+        { method: "POST", headers: roleHeaders() },
       );
       if (!response.ok) {
         throw new Error(response.status === 409 ? "草稿仍有硬冲突，不能发布" : "草稿发布失败");
@@ -633,7 +634,7 @@ export function OperationsConsole() {
     try {
       const response = await fetch(
         `${apiBase}/api/schedule-drafts/${encodeURIComponent(currentDraft.draft.id)}/discard`,
-        { method: "POST" },
+        { method: "POST", headers: roleHeaders() },
       );
       if (!response.ok) {
         throw new Error("草稿废弃失败");
@@ -669,6 +670,7 @@ export function OperationsConsole() {
     try {
       const response = await fetch(`${apiBase}/api/published-schedule/rollback`, {
         method: "POST",
+        headers: roleHeaders(),
       });
       if (!response.ok) {
         throw new Error("方案回滚失败");
@@ -950,6 +952,7 @@ export function OperationsConsole() {
         <Panel title="基础数据管理" eyebrow="Master Data">
           <ReferenceManager
             referenceData={referenceData}
+            role={role}
             onRefresh={loadInitialData}
             onError={setError}
           />
@@ -1911,10 +1914,12 @@ function AuditTrail({ events }: { events: AuditEventSummary[] }) {
 
 function ReferenceManager({
   referenceData,
+  role,
   onRefresh,
   onError,
 }: {
   referenceData: ReferenceDataResponse | null;
+  role: WorkspaceRole;
   onRefresh(): Promise<void>;
   onError(message: string | null): void;
 }) {
@@ -1949,6 +1954,13 @@ function ReferenceManager({
     setForm(referenceForms[resource].defaults);
   }
 
+  function referenceRoleHeaders(extra: Record<string, string> = {}) {
+    return {
+      ...extra,
+      "x-examforge-role": role,
+    };
+  }
+
   async function saveRecord() {
     setSaving(true);
     onError(null);
@@ -1959,9 +1971,7 @@ function ReferenceManager({
         : `${apiBase}/api/reference-data/${resource}/${encodeURIComponent(form.id)}`;
       const response = await fetch(endpoint, {
         method: mode === "create" ? "POST" : "PATCH",
-        headers: {
-          "content-type": "application/json",
-        },
+        headers: referenceRoleHeaders({ "content-type": "application/json" }),
         body: JSON.stringify(mode === "create" ? payload : omitId(payload)),
       });
 
@@ -1989,7 +1999,7 @@ function ReferenceManager({
     try {
       const response = await fetch(
         `${apiBase}/api/reference-data/${resource}/${encodeURIComponent(form.id)}`,
-        { method: "DELETE" },
+        { method: "DELETE", headers: referenceRoleHeaders() },
       );
       if (!response.ok) {
         throw new Error("基础数据删除失败");
@@ -2012,9 +2022,7 @@ function ReferenceManager({
       }
       const response = await fetch(`${apiBase}/api/reference-data/${resource}/import`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
+        headers: referenceRoleHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ records: parsed }),
       });
       if (!response.ok) {

@@ -1,13 +1,19 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 
 const apiBase = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:4000";
+const adminHeaders = { "x-examforge-role": "admin" };
+const operatorHeaders = { "x-examforge-role": "operator" };
 
 test("方案工作台支持建议应用和矩阵拖拽调整", async ({ page, request }) => {
-  const runResponse = await request.post(`${apiBase}/api/schedule-runs`);
+  const runResponse = await request.post(`${apiBase}/api/schedule-runs`, {
+    headers: operatorHeaders,
+  });
   expect(runResponse.ok()).toBeTruthy();
   const run = await runResponse.json() as { run: { id: string } };
 
-  const draftResponse = await request.post(`${apiBase}/api/schedule-runs/${run.run.id}/drafts`);
+  const draftResponse = await request.post(`${apiBase}/api/schedule-runs/${run.run.id}/drafts`, {
+    headers: operatorHeaders,
+  });
   expect(draftResponse.ok()).toBeTruthy();
   const createdDraft = await draftResponse.json() as {
     draft: { id: string };
@@ -75,7 +81,9 @@ test("运营台支持异步排考作业和发布通知预览", async ({ page, re
 
   const completedRunId = await waitForCompletedJob(request);
 
-  const publishResponse = await request.post(`${apiBase}/api/schedule-runs/${completedRunId}/publish`);
+  const publishResponse = await request.post(`${apiBase}/api/schedule-runs/${completedRunId}/publish`, {
+    headers: adminHeaders,
+  });
   expect(publishResponse.ok()).toBeTruthy();
 
   await page.reload();

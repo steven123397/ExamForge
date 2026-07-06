@@ -692,10 +692,10 @@ export function createApp(options: AppOptions = {}) {
 
 type ExamForgeRole = "admin" | "operator" | "viewer";
 
-function getRequestRole(request: FastifyRequest): ExamForgeRole {
+function getRequestRole(request: FastifyRequest): ExamForgeRole | null {
   const raw = request.headers["x-examforge-role"];
   const role = Array.isArray(raw) ? raw[0] : raw;
-  return role === "operator" || role === "viewer" ? role : "admin";
+  return role === "admin" || role === "operator" || role === "viewer" ? role : null;
 }
 
 function requireRole(
@@ -704,12 +704,14 @@ function requireRole(
   allowed: ExamForgeRole[],
 ) {
   const role = getRequestRole(request);
-  if (allowed.includes(role)) {
+  if (role && allowed.includes(role)) {
     return true;
   }
   reply.code(403).send({
     error: "permission_denied",
-    message: `Role ${role} is not allowed to perform this operation.`,
+    message: role
+      ? `Role ${role} is not allowed to perform this operation.`
+      : "A valid x-examforge-role header is required to perform this operation.",
   });
   return false;
 }

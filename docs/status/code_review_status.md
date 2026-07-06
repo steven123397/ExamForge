@@ -146,7 +146,7 @@
 
 ### CR-010：Web 角色切换没有覆盖多数变更请求，缺失请求头会被 API 当作管理员
 
-- 状态：待解决
+- 状态：已解决
 - 严重级别：P1 高优先级
 - 所属模块：`apps/api`、`apps/web`
 - 发现来源：2026-07-06 全量代码审查
@@ -155,11 +155,11 @@
 - 影响：运营台选择“只读”后，多数变更操作仍会以缺失请求头访问 API，并被服务端默认识别为管理员。这会绕过第二版角色演示边界，也掩盖后续真实认证接入前的授权测试缺口。
 - 建议处理：服务端缺失或非法角色头应默认拒绝或默认 `viewer`；前端所有变更请求统一通过 API client 注入当前角色；API 测试补充“无头请求不得拥有管理员权限”和 Web/E2E 角色切换用例。
 - 验证方式：新增 API 测试覆盖无 `x-examforge-role`、非法角色、`viewer` 访问所有变更接口均返回 `403`；新增 E2E 测试切到“只读”后点击排考、发布、基础数据保存等按钮应被阻止或返回权限提示。
-- 解决记录：未解决。
+- 解决记录：本轮修复提交已完成。API 缺失或非法 `x-examforge-role` 不再默认管理员；Web 所有变更请求补齐当前角色头；API、E2E 测试补充权限头与无头/非法角色拒绝场景。验证：`npm run typecheck` 通过，`npm test` 为 API `19` 个测试通过，`npm run build` 通过，`npm run test:e2e` 为 `2 passed`。
 
 ### CR-011：草稿校验错误处理空 `allowed_slot_ids`，会阻断合法的不限时段考试
 
-- 状态：待解决
+- 状态：已解决
 - 严重级别：P1 高优先级
 - 所属模块：`apps/api`、`packages/shared`、`apps/scheduler`
 - 发现来源：2026-07-06 全量代码审查
@@ -168,11 +168,11 @@
 - 影响：通过 Web 表单或 JSON 导入创建“无时间段限制”的考试任务后，自动排考可以正常产生安排，但从运行创建草稿、校验或发布草稿时会出现错误硬冲突，导致合法草稿无法发布。
 - 建议处理：将 `validateDraftAssignments()` 的 allowed-slot 判断改为“仅当 `allowed_slot_ids.length > 0` 时校验包含关系”；补充 API 单元测试覆盖空 `allowed_slot_ids` 的草稿创建、调整、校验和发布路径。
 - 验证方式：构造 `allowed_slot_ids: []` 的考试任务，运行自动排考后创建草稿并发布；期望草稿不产生 `allowed_slot` 冲突，`npm test` 和调度器 pytest 均通过。
-- 解决记录：未解决。
+- 解决记录：本轮修复提交已完成。`validateDraftAssignments()` 仅在 `allowed_slot_ids.length > 0` 时校验时间段包含关系，保持与共享合同、调度器 solver/precheck 和建议生成一致；API 测试新增空 `allowed_slot_ids` 草稿创建与发布路径。验证：`npm run typecheck` 通过，`npm test` 为 API `19` 个测试通过，`npm run build` 通过，`npm run test:e2e` 为 `2 passed`。
 
 ### CR-012：PostgreSQL 草稿锁定状态只保存在进程内，重启后会丢失
 
-- 状态：待解决
+- 状态：已解决
 - 严重级别：P1 高优先级
 - 所属模块：`apps/api`、`packages/db`
 - 发现来源：2026-07-06 全量代码审查
@@ -181,7 +181,7 @@
 - 影响：API 进程重启、多实例部署或仓储实例重建后，已锁定考试会显示为未锁定，`updateScheduleDraftAssignment()` 和局部再平衡会重新允许修改这些考试，破坏“锁定后禁止人工调整、再平衡跳过锁定考试”的第二版承诺。
 - 建议处理：在数据库中持久化锁定状态，例如为 `draft_scheduled_exams` 增加 `locked_at` / `locked_by` 字段，或新增 `draft_assignment_locks` 表；PostgreSQL 仓储读写锁定状态必须来自数据库，内存仓储可继续用 `Map` 支撑演示。
 - 验证方式：新增 PostgreSQL 仓储集成测试：锁定草稿考试后重建 repository 实例，再读取草稿、PATCH 该考试和执行 rebalance，期望锁仍存在且修改被拒绝。
-- 解决记录：未解决。
+- 解决记录：本轮修复提交已完成。`draft_scheduled_exams` 新增持久化 `locked` 字段和 `0004_draft_assignment_locks.sql` 幂等迁移；PostgreSQL 仓储锁定、解锁、读取、PATCH 防护和局部再平衡均改为读取数据库锁状态。验证：`npm run typecheck` 通过，`npm test` 为 API `19` 个测试通过，`npm run build` 通过，`npm run test:e2e` 为 `2 passed`。
 
 ### CR-013：数据库 schema 缺少外键和关键唯一约束，持久化数据一致性主要依赖应用自律
 
@@ -198,9 +198,10 @@
 
 ## 4. 已解决问题
 
-当前暂无已解决的审查问题记录。后续问题修复后，在原问题记录中将状态更新为 `已解决`，并补充解决提交、验证命令和结果；不删除原问题记录。
+已解决问题保留在原问题记录位置，并将状态更新为 `已解决`。当前已解决：CR-010、CR-011、CR-012。
 
 ## 5. 审查记录
 
 - 2026-07-06：创建本文档，迁入 `docs/status/project_status.md` 中既有存留风险，并补充第二版第四阶段已明确的轻量实现边界问题。
 - 2026-07-06：执行当前 `main` 全量代码审查；复核 CR-001 至 CR-009 均仍成立，新增 CR-010 至 CR-013。新鲜验证包括：默认 `python -m pytest -q` 因 `python` 缺失失败，`cd apps/scheduler && uv run --python 3.12 --extra dev python -m pytest -q` 为 `32 passed`，`npm test` 为 API `16` 个测试通过，`npm run typecheck` 通过，`npm run build` 通过，顺序运行 `npm run test:e2e` 为 `2 passed`，`npm audit --audit-level=moderate` 仍报告 2 个 moderate 公告。
+- 2026-07-07：修复 CR-010、CR-011、CR-012。先新增 API 红灯测试，确认无角色默认管理员、空 `allowed_slot_ids` 草稿误阻断和 DB schema 缺少锁字段三个问题可复现；随后完成修复并验证 `npm run typecheck`、`npm test`、`npm run build`、`npm run test:e2e` 均通过。

@@ -1,4 +1,5 @@
 import {
+  boolean,
   integer,
   jsonb,
   pgEnum,
@@ -158,6 +159,7 @@ export const draftScheduledExams = pgTable("draft_scheduled_exams", {
   roomId: text("room_id").notNull(),
   timeSlotId: text("time_slot_id").notNull(),
   teacherIds: jsonb("teacher_ids").$type<string[]>().notNull(),
+  locked: boolean("locked").notNull().default(false),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -860,7 +860,7 @@ export function validateDraftAssignments(
       return;
     }
 
-    if (!task.allowed_slot_ids.includes(assignment.time_slot_id)) {
+    if (task.allowed_slot_ids.length > 0 && !task.allowed_slot_ids.includes(assignment.time_slot_id)) {
       conflicts.push(buildConflict(
         "allowed_slot",
         [task.id, assignment.time_slot_id],

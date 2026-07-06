@@ -67,8 +67,6 @@ type DraftRow = typeof scheduleDrafts.$inferSelect;
 type DraftChangeEventRow = typeof draftChangeEvents.$inferSelect;
 
 export class PostgresPlatformRepository implements PlatformRepository {
-  private draftLocks = new Map<string, Set<string>>();
-
   constructor(private readonly client: ExamForgeDbClient) {}
 
   async getDashboard(): Promise<DashboardResponse> {
@@ -545,6 +543,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
           roomId: assignment.room_id,
           timeSlotId: assignment.time_slot_id,
           teacherIds: assignment.teacher_ids,
+          locked: false,
           updatedAt: now,
         })));
       }
@@ -629,7 +628,10 @@ export class PostgresPlatformRepository implements PlatformRepository {
         suggestion: conflict.suggestion,
       })),
       changeEvents: changeRows.map((event) => this.toDraftChangeEvent(event)),
-      lockedExamTaskIds: this.getLockedExamTaskIds(id),
+      lockedExamTaskIds: assignmentRows
+        .filter((assignment) => assignment.locked)
+        .map((assignment) => assignment.examTaskId)
+        .sort(),
     };
   }
 
@@ -645,7 +647,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     if (current.draft.status === "published" || current.draft.status === "discarded") {
       return "not_editable";
     }
-    if (this.draftLocks.get(id)?.has(examTaskId)) {
+    if ((current.lockedExamTaskIds ?? []).includes(examTaskId)) {
       return "assignment_locked";
     }
     const index = current.assignments.findIndex((assignment) => (
@@ -787,7 +789,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       this.getReferenceData(),
     ]);
     return current
-      ? this.draftLocks.get(id)?.has(examTaskId)
+      ? (current.lockedExamTaskIds ?? []).includes(examTaskId)
         ? { draft: current.draft, examTaskId, suggestions: [] }
         : buildDraftAdjustmentSuggestions(referenceData.scheduleInput, current, examTaskId)
       : null;
@@ -798,11 +800,18 @@ export class PostgresPlatformRepository implements PlatformRepository {
     if (!current || !current.assignments.some((assignment) => assignment.exam_task_id === examTaskId)) {
       return null;
     }
-    const locks = this.draftLocks.get(id) ?? new Set<string>();
-    locks.add(examTaskId);
-    this.draftLocks.set(id, locks);
+    const [updated] = await this.client.db.update(draftScheduledExams)
+      .set({ locked: true, updatedAt: new Date() })
+      .where(and(
+        eq(draftScheduledExams.draftId, id),
+        eq(draftScheduledExams.examTaskId, examTaskId),
+      ))
+      .returning();
+    if (!updated) {
+      return null;
+    }
     await this.recordAuditEvent("schedule_draft.assignment_locked", "schedule_draft", id, { examTaskId });
-    return this.withLocks(current);
+    return this.getScheduleDraft(id);
   }
 
   async unlockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null> {
@@ -810,11 +819,18 @@ export class PostgresPlatformRepository implements PlatformRepository {
     if (!current || !current.assignments.some((assignment) => assignment.exam_task_id === examTaskId)) {
       return null;
     }
-    const locks = this.draftLocks.get(id) ?? new Set<string>();
-    locks.delete(examTaskId);
-    this.draftLocks.set(id, locks);
+    const [updated] = await this.client.db.update(draftScheduledExams)
+      .set({ locked: false, updatedAt: new Date() })
+      .where(and(
+        eq(draftScheduledExams.draftId, id),
+        eq(draftScheduledExams.examTaskId, examTaskId),
+      ))
+      .returning();
+    if (!updated) {
+      return null;
+    }
     await this.recordAuditEvent("schedule_draft.assignment_unlocked", "schedule_draft", id, { examTaskId });
-    return this.withLocks(current);
+    return this.getScheduleDraft(id);
   }
 
   async rebalanceScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
@@ -827,7 +843,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     }
 
     const referenceData = await this.getReferenceData();
-    const locked = this.draftLocks.get(id) ?? new Set<string>();
+    const locked = new Set(current.lockedExamTaskIds ?? []);
     let detail = current;
     const conflictedExamIds = new Set(detail.conflicts.flatMap((conflict) => conflict.affected_ids));
     for (const assignment of [...detail.assignments]) {
@@ -836,7 +852,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       }
       const candidate = buildDraftAdjustmentSuggestions(
         referenceData.scheduleInput,
-        this.withLocks(detail),
+        detail,
         assignment.exam_task_id,
       )?.suggestions.find((suggestion) => suggestion.hardConflictCount === 0);
       if (!candidate) {
@@ -855,7 +871,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       lockedExamTaskIds: [...locked],
       conflictCount: detail.conflicts.length,
     });
-    return this.withLocks(detail);
+    return detail;
   }
 
   async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {
@@ -1250,16 +1266,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
     });
   }
 
-  private getLockedExamTaskIds(id: string) {
-    return [...(this.draftLocks.get(id) ?? new Set<string>())].sort();
-  }
-
-  private withLocks(detail: ScheduleDraftDetailResponse): ScheduleDraftDetailResponse {
-    return {
-      ...detail,
-      lockedExamTaskIds: this.getLockedExamTaskIds(detail.draft.id),
-    };
-  }
 }
 
 function omitReferenceId(record: ReferenceRecord): Partial<ReferenceRecord> {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { draftScheduledExams } from "@examforge/db";
 import {
   type ScheduleInput,
   type ScheduleResult,
@@ -7,6 +8,9 @@ import {
 import { createApp } from "../src/app.js";
 import { InMemoryPlatformRepository } from "../src/repository.js";
 import type { SchedulerClient } from "../src/scheduler-client.js";
+
+const adminHeaders = { "x-examforge-role": "admin" };
+const operatorHeaders = { "x-examforge-role": "operator" };
 
 class FakeScheduler implements SchedulerClient {
   lastInput: ScheduleInput | null = null;
@@ -109,6 +113,7 @@ describe("ExamForge API", () => {
     const createResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: operatorHeaders,
     });
 
     assert.equal(createResponse.statusCode, 201);
@@ -126,16 +131,41 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("rejects missing or invalid role headers on mutation routes", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const missingRoleResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+    });
+    assert.equal(missingRoleResponse.statusCode, 403);
+    assert.equal(missingRoleResponse.json().error, "permission_denied");
+
+    const invalidRoleResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: {
+        "x-examforge-role": "super-admin",
+      },
+    });
+    assert.equal(invalidRoleResponse.statusCode, 403);
+    assert.equal(invalidRoleResponse.json().error, "permission_denied");
+
+    await app.close();
+  });
+
   it("lists schedule runs, audit events, and compares two runs", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
 
     const firstResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: operatorHeaders,
     });
     const secondResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: operatorHeaders,
     });
     const first = firstResponse.json();
     const second = secondResponse.json();
@@ -176,12 +206,14 @@ describe("ExamForge API", () => {
     const createResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: operatorHeaders,
     });
     const created = createResponse.json();
 
     const publishResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-runs/${created.run.id}/publish`,
+      headers: adminHeaders,
     });
     assert.equal(publishResponse.statusCode, 200);
     assert.equal(publishResponse.json().batch.status, "published");
@@ -197,6 +229,7 @@ describe("ExamForge API", () => {
     const rollbackResponse = await app.inject({
       method: "POST",
       url: "/api/published-schedule/rollback",
+      headers: adminHeaders,
     });
     assert.equal(rollbackResponse.statusCode, 200);
     assert.equal(rollbackResponse.json().batch.status, "ready");
@@ -223,11 +256,13 @@ describe("ExamForge API", () => {
     const createResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: operatorHeaders,
     });
     const created = createResponse.json();
     await app.inject({
       method: "POST",
       url: `/api/schedule-runs/${created.run.id}/publish`,
+      headers: adminHeaders,
     });
 
     const teacherResponse = await app.inject({
@@ -295,6 +330,7 @@ describe("ExamForge API", () => {
     const createResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: operatorHeaders,
     });
 
     assert.equal(createResponse.statusCode, 201);
@@ -308,6 +344,7 @@ describe("ExamForge API", () => {
     const createResponse = await app.inject({
       method: "POST",
       url: "/api/reference-data/courses",
+      headers: operatorHeaders,
       payload: {
         id: "c-linear-algebra",
         name: "线性代数",
@@ -322,6 +359,7 @@ describe("ExamForge API", () => {
     const updateResponse = await app.inject({
       method: "PATCH",
       url: "/api/reference-data/courses/c-linear-algebra",
+      headers: operatorHeaders,
       payload: {
         name: "线性代数 A",
         exam_type: "oral",
@@ -350,6 +388,7 @@ describe("ExamForge API", () => {
     const importResponse = await app.inject({
       method: "POST",
       url: "/api/reference-data/time-slots/import",
+      headers: operatorHeaders,
       payload: {
         records: [
           {
@@ -375,6 +414,7 @@ describe("ExamForge API", () => {
     const upsertResponse = await app.inject({
       method: "POST",
       url: "/api/reference-data/time-slots/import",
+      headers: operatorHeaders,
       payload: {
         records: [
           {
@@ -393,6 +433,7 @@ describe("ExamForge API", () => {
     const deleteResponse = await app.inject({
       method: "DELETE",
       url: "/api/reference-data/time-slots/slot-import-b",
+      headers: adminHeaders,
     });
     assert.equal(deleteResponse.statusCode, 200);
     assert.equal(deleteResponse.json().deleted.id, "slot-import-b");
@@ -416,6 +457,7 @@ describe("ExamForge API", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/reference-data/rooms",
+      headers: operatorHeaders,
       payload: {
         id: "r-invalid",
         name: "容量错误考场",
@@ -438,6 +480,7 @@ describe("ExamForge API", () => {
     const runResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: operatorHeaders,
     });
     assert.equal(runResponse.statusCode, 201);
     const run = runResponse.json();
@@ -445,6 +488,7 @@ describe("ExamForge API", () => {
     const draftResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-runs/${run.run.id}/drafts`,
+      headers: operatorHeaders,
     });
     assert.equal(draftResponse.statusCode, 201);
     const createdDraft = draftResponse.json();
@@ -466,6 +510,7 @@ describe("ExamForge API", () => {
     const conflictingAdjustment = await app.inject({
       method: "PATCH",
       url: `/api/schedule-drafts/${createdDraft.draft.id}/assignments/e-database`,
+      headers: operatorHeaders,
       payload: {
         room_id: "r-101",
         time_slot_id: "s-001",
@@ -486,6 +531,7 @@ describe("ExamForge API", () => {
     const blockedPublish = await app.inject({
       method: "POST",
       url: `/api/schedule-drafts/${createdDraft.draft.id}/publish`,
+      headers: adminHeaders,
     });
     assert.equal(blockedPublish.statusCode, 409);
     assert.equal(blockedPublish.json().error, "schedule_draft_has_conflicts");
@@ -493,6 +539,7 @@ describe("ExamForge API", () => {
     const fixedAdjustment = await app.inject({
       method: "PATCH",
       url: `/api/schedule-drafts/${createdDraft.draft.id}/assignments/e-database`,
+      headers: operatorHeaders,
       payload: {
         room_id: "r-lab-2",
         time_slot_id: "s-005",
@@ -508,6 +555,7 @@ describe("ExamForge API", () => {
     const publishResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-drafts/${createdDraft.draft.id}/publish`,
+      headers: adminHeaders,
     });
     assert.equal(publishResponse.statusCode, 200);
     assert.equal(publishResponse.json().batch.status, "published");
@@ -524,33 +572,78 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("treats empty allowed slot lists as unrestricted during draft validation", async () => {
+    const repository = new InMemoryPlatformRepository();
+    const referenceData = structuredClone(await repository.getReferenceData());
+    referenceData.scheduleInput.exam_tasks = referenceData.scheduleInput.exam_tasks.map((task) => (
+      task.id === "e-data-structures"
+        ? { ...task, allowed_slot_ids: [] }
+        : task
+    ));
+    (repository as unknown as { scheduleInput: ScheduleInput }).scheduleInput = referenceData.scheduleInput;
+    const app = createApp({ scheduler: new DraftWorkflowScheduler(), repository });
+
+    const runResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+    });
+    assert.equal(runResponse.statusCode, 201);
+    const run = runResponse.json();
+
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${run.run.id}/drafts`,
+      headers: operatorHeaders,
+    });
+    assert.equal(draftResponse.statusCode, 201);
+    const draft = draftResponse.json();
+    assert.equal(draft.draft.status, "validated");
+    assert.ok(!draft.conflicts.some((conflict: { type: string }) => conflict.type === "allowed_slot"));
+
+    const publishResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/publish`,
+      headers: adminHeaders,
+    });
+    assert.equal(publishResponse.statusCode, 200);
+    assert.equal(publishResponse.json().batch.status, "published");
+
+    await app.close();
+  });
+
   it("compares a draft against source and published versions, then discards it", async () => {
     const app = createApp({ scheduler: new DraftWorkflowScheduler() });
 
     const baselineRunResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: operatorHeaders,
     });
     const baselineRun = baselineRunResponse.json();
     await app.inject({
       method: "POST",
       url: `/api/schedule-runs/${baselineRun.run.id}/publish`,
+      headers: adminHeaders,
     });
 
     const sourceRunResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: operatorHeaders,
     });
     const sourceRun = sourceRunResponse.json();
     const draftResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-runs/${sourceRun.run.id}/drafts`,
+      headers: operatorHeaders,
     });
     const draft = draftResponse.json();
 
     await app.inject({
       method: "PATCH",
       url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database`,
+      headers: operatorHeaders,
       payload: {
         room_id: "r-lab-2",
         time_slot_id: "s-005",
@@ -574,6 +667,7 @@ describe("ExamForge API", () => {
     const discardResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-drafts/${draft.draft.id}/discard`,
+      headers: operatorHeaders,
     });
     assert.equal(discardResponse.statusCode, 200);
     assert.equal(discardResponse.json().draft.status, "discarded");
@@ -581,6 +675,7 @@ describe("ExamForge API", () => {
     const updateAfterDiscard = await app.inject({
       method: "PATCH",
       url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database`,
+      headers: operatorHeaders,
       payload: {
         room_id: "r-lab-1",
       },
@@ -591,6 +686,7 @@ describe("ExamForge API", () => {
     const publishAfterDiscard = await app.inject({
       method: "POST",
       url: `/api/schedule-drafts/${draft.draft.id}/publish`,
+      headers: adminHeaders,
     });
     assert.equal(publishAfterDiscard.statusCode, 409);
     assert.equal(publishAfterDiscard.json().error, "schedule_draft_not_publishable");
@@ -613,17 +709,20 @@ describe("ExamForge API", () => {
     const runResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: operatorHeaders,
     });
     const run = runResponse.json();
     const draftResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-runs/${run.run.id}/drafts`,
+      headers: operatorHeaders,
     });
     const draft = draftResponse.json();
 
     await app.inject({
       method: "PATCH",
       url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database`,
+      headers: operatorHeaders,
       payload: {
         room_id: "r-101",
         time_slot_id: "s-001",
@@ -648,6 +747,7 @@ describe("ExamForge API", () => {
     const fixedResponse = await app.inject({
       method: "PATCH",
       url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database`,
+      headers: operatorHeaders,
       payload: {
         room_id: appliedSuggestion.room_id,
         time_slot_id: appliedSuggestion.time_slot_id,
@@ -668,6 +768,7 @@ describe("ExamForge API", () => {
     const createResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-jobs",
+      headers: operatorHeaders,
     });
     assert.equal(createResponse.statusCode, 202);
     const created = createResponse.json();
@@ -703,17 +804,19 @@ describe("ExamForge API", () => {
   it("locks draft assignments and rebalances only unlocked conflicted exams", async () => {
     const app = createApp({ scheduler: new DraftWorkflowScheduler() });
 
-    const runResponse = await app.inject({ method: "POST", url: "/api/schedule-runs" });
+    const runResponse = await app.inject({ method: "POST", url: "/api/schedule-runs", headers: operatorHeaders });
     const run = runResponse.json();
     const draftResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-runs/${run.run.id}/drafts`,
+      headers: operatorHeaders,
     });
     const draft = draftResponse.json();
 
     const lockResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-data-structures/lock`,
+      headers: operatorHeaders,
     });
     assert.equal(lockResponse.statusCode, 200);
     assert.deepEqual(lockResponse.json().lockedExamTaskIds, ["e-data-structures"]);
@@ -721,6 +824,7 @@ describe("ExamForge API", () => {
     const lockedUpdateResponse = await app.inject({
       method: "PATCH",
       url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-data-structures`,
+      headers: operatorHeaders,
       payload: {
         room_id: "r-lab-1",
       },
@@ -731,6 +835,7 @@ describe("ExamForge API", () => {
     await app.inject({
       method: "PATCH",
       url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database`,
+      headers: operatorHeaders,
       payload: {
         room_id: "r-101",
         time_slot_id: "s-001",
@@ -741,6 +846,7 @@ describe("ExamForge API", () => {
     const rebalanceResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-drafts/${draft.draft.id}/rebalance`,
+      headers: operatorHeaders,
     });
     assert.equal(rebalanceResponse.statusCode, 200);
     assert.equal(rebalanceResponse.json().draft.status, "validated");
@@ -750,11 +856,16 @@ describe("ExamForge API", () => {
     const unlockResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-data-structures/unlock`,
+      headers: operatorHeaders,
     });
     assert.equal(unlockResponse.statusCode, 200);
     assert.deepEqual(unlockResponse.json().lockedExamTaskIds, []);
 
     await app.close();
+  });
+
+  it("exposes persistent draft assignment locks in the database schema", () => {
+    assert.ok("locked" in draftScheduledExams);
   });
 
   it("enforces roles, updates teacher unavailable slots, previews notifications, and exports CSV", async () => {
@@ -794,6 +905,7 @@ describe("ExamForge API", () => {
     await app.inject({
       method: "POST",
       url: `/api/schedule-runs/${created.run.id}/publish`,
+      headers: adminHeaders,
     });
 
     const notificationsResponse = await app.inject({
