@@ -315,19 +315,37 @@ export interface ScheduleDraftListResponse {
   drafts: ScheduleDraftSummary[];
 }
 
+export interface ScheduleDraftAssignmentChanges {
+  unchanged: number;
+  changed: Array<{
+    before: ScheduledExam;
+    after: ScheduledExam;
+  }>;
+}
+
 export interface ScheduleDraftComparisonResponse {
   draft: ScheduleDraftSummary;
-  sourceRun: ScheduleRunSummary;
-  assignmentChanges: {
-    unchanged: number;
-    changed: Array<{
-      before: ScheduledExam;
-      after: ScheduledExam;
-    }>;
+  source: {
+    run: ScheduleRunSummary;
+    assignmentChanges: ScheduleDraftAssignmentChanges;
+  };
+  published: {
+    run: ScheduleRunSummary;
+    assignmentChanges: ScheduleDraftAssignmentChanges;
+  } | null;
+  summary: {
+    changedFromSource: number;
+    changedFromPublished: number | null;
+    hardConflictCount: number;
+    score: number;
   };
 }
 
 export interface ScheduleDraftPublishResponse extends PublishedScheduleResponse {
+  draft: ScheduleDraftSummary;
+}
+
+export interface ScheduleDraftDiscardResponse {
   draft: ScheduleDraftSummary;
 }
 

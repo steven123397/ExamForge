@@ -223,6 +223,12 @@ export function createApp(options: AppOptions = {}) {
         request.params.examTaskId,
         parsed.data,
       );
+      if (draft === "not_editable") {
+        return reply.code(409).send({
+          error: "schedule_draft_not_editable",
+          message: "Schedule draft is already published or discarded.",
+        });
+      }
       if (!draft) {
         return reply.code(404).send({
           error: "schedule_draft_assignment_not_found",
@@ -274,7 +280,33 @@ export function createApp(options: AppOptions = {}) {
           message: "Schedule draft has hard conflicts and cannot be published.",
         });
       }
+      if (published === "not_publishable") {
+        return reply.code(409).send({
+          error: "schedule_draft_not_publishable",
+          message: "Schedule draft is already published or discarded.",
+        });
+      }
       return published;
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/schedule-drafts/:id/discard",
+    async (request, reply) => {
+      const discarded = await repository.discardScheduleDraft(request.params.id);
+      if (!discarded) {
+        return reply.code(404).send({
+          error: "schedule_draft_not_found",
+          message: `Schedule draft ${request.params.id} does not exist.`,
+        });
+      }
+      if (discarded === "not_discardable") {
+        return reply.code(409).send({
+          error: "schedule_draft_not_discardable",
+          message: "Schedule draft is already published or discarded.",
+        });
+      }
+      return discarded;
     },
   );
 

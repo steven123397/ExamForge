@@ -284,6 +284,7 @@ describe("ExamForge API", () => {
         validateScheduleDraft: (id) => repository.validateScheduleDraft(id),
         compareScheduleDraft: (id) => repository.compareScheduleDraft(id),
         publishScheduleDraft: (id) => repository.publishScheduleDraft(id),
+        discardScheduleDraft: (id) => repository.discardScheduleDraft(id),
       },
     });
 
@@ -515,6 +516,89 @@ describe("ExamForge API", () => {
     });
     assert.equal(publishedResponse.statusCode, 200);
     assert.equal(publishedResponse.json().run.id, publishResponse.json().run.id);
+
+    await app.close();
+  });
+
+  it("compares a draft against source and published versions, then discards it", async () => {
+    const app = createApp({ scheduler: new DraftWorkflowScheduler() });
+
+    const baselineRunResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+    });
+    const baselineRun = baselineRunResponse.json();
+    await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${baselineRun.run.id}/publish`,
+    });
+
+    const sourceRunResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+    });
+    const sourceRun = sourceRunResponse.json();
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${sourceRun.run.id}/drafts`,
+    });
+    const draft = draftResponse.json();
+
+    await app.inject({
+      method: "PATCH",
+      url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database`,
+      payload: {
+        room_id: "r-lab-2",
+        time_slot_id: "s-005",
+        teacher_ids: ["t-li"],
+      },
+    });
+
+    const compareResponse = await app.inject({
+      method: "GET",
+      url: `/api/schedule-drafts/${draft.draft.id}/compare`,
+    });
+    assert.equal(compareResponse.statusCode, 200);
+    const comparison = compareResponse.json();
+    assert.equal(comparison.source.run.id, sourceRun.run.id);
+    assert.equal(comparison.source.assignmentChanges.changed.length, 1);
+    assert.equal(comparison.published.run.id, baselineRun.run.id);
+    assert.equal(comparison.published.assignmentChanges.changed.length, 1);
+    assert.equal(comparison.summary.changedFromSource, 1);
+    assert.equal(comparison.summary.changedFromPublished, 1);
+
+    const discardResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/discard`,
+    });
+    assert.equal(discardResponse.statusCode, 200);
+    assert.equal(discardResponse.json().draft.status, "discarded");
+
+    const updateAfterDiscard = await app.inject({
+      method: "PATCH",
+      url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database`,
+      payload: {
+        room_id: "r-lab-1",
+      },
+    });
+    assert.equal(updateAfterDiscard.statusCode, 409);
+    assert.equal(updateAfterDiscard.json().error, "schedule_draft_not_editable");
+
+    const publishAfterDiscard = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/publish`,
+    });
+    assert.equal(publishAfterDiscard.statusCode, 409);
+    assert.equal(publishAfterDiscard.json().error, "schedule_draft_not_publishable");
+
+    const auditResponse = await app.inject({
+      method: "GET",
+      url: "/api/audit-events",
+    });
+    assert.equal(auditResponse.statusCode, 200);
+    assert.ok(auditResponse.json().events.some((event: { action: string }) => (
+      event.action === "schedule_draft.discarded"
+    )));
 
     await app.close();
   });

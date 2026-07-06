@@ -30,6 +30,7 @@ import {
   type ScheduleDraftChangeEvent,
   type ScheduleDraftComparisonResponse,
   type ScheduleDraftDetailResponse,
+  type ScheduleDraftDiscardResponse,
   type ScheduleDraftListResponse,
   type ScheduleDraftPublishResponse,
   type ScheduleDraftSummary,
@@ -630,10 +631,13 @@ export class PostgresPlatformRepository implements PlatformRepository {
     id: string,
     examTaskId: string,
     patch: Partial<ScheduledExam>,
-  ): Promise<ScheduleDraftDetailResponse | null> {
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
     const current = await this.getScheduleDraft(id);
-    if (!current || current.draft.status === "published" || current.draft.status === "discarded") {
+    if (!current) {
       return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_editable";
     }
     const index = current.assignments.findIndex((assignment) => (
       assignment.exam_task_id === examTaskId
@@ -761,10 +765,18 @@ export class PostgresPlatformRepository implements PlatformRepository {
   async compareScheduleDraft(id: string): Promise<ScheduleDraftComparisonResponse | null> {
     const current = await this.getScheduleDraft(id);
     const source = current ? await this.getScheduleRun(current.draft.sourceRunId) : null;
-    return current && source ? buildDraftComparison(current.draft, source, current.assignments) : null;
+    const published = await this.getPublishedSchedule();
+    return current && source ? buildDraftComparison(current, source, published) : null;
   }
 
-  async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | null> {
+  async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {
+    const existing = await this.getScheduleDraft(id);
+    if (!existing) {
+      return null;
+    }
+    if (existing.draft.status === "published" || existing.draft.status === "discarded") {
+      return "not_publishable";
+    }
     const current = await this.validateScheduleDraft(id);
     if (!current) {
       return null;
@@ -851,6 +863,40 @@ export class PostgresPlatformRepository implements PlatformRepository {
       run,
       result,
     };
+  }
+
+  async discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null> {
+    const current = await this.getScheduleDraft(id);
+    if (!current) {
+      return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_discardable";
+    }
+    const updatedAt = new Date();
+    const [updated] = await this.client.db.transaction(async (tx) => {
+      const [draft] = await tx.update(scheduleDrafts)
+        .set({
+          status: "discarded",
+          updatedAt,
+        })
+        .where(eq(scheduleDrafts.id, id))
+        .returning();
+      await tx.insert(auditEvents).values({
+        id: `audit-${randomUUID()}`,
+        actor: "system",
+        action: "schedule_draft.discarded",
+        entityType: "schedule_draft",
+        entityId: id,
+        payload: {
+          sourceRunId: current.draft.sourceRunId,
+          conflictCount: current.draft.conflictCount,
+          assignmentCount: current.draft.assignmentCount,
+        },
+      });
+      return [draft];
+    });
+    return updated ? { draft: this.toDraftSummary(updated) } : null;
   }
 
   async listAuditEvents(): Promise<AuditEventListResponse> {

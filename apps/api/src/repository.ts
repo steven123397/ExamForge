@@ -14,6 +14,7 @@ import {
   type ScheduleDraftChangeEvent,
   type ScheduleDraftComparisonResponse,
   type ScheduleDraftDetailResponse,
+  type ScheduleDraftDiscardResponse,
   type ScheduleDraftListResponse,
   type ScheduleDraftPublishResponse,
   type ScheduleDraftSummary,
@@ -58,10 +59,11 @@ export interface PlatformRepository {
     id: string,
     examTaskId: string,
     patch: Partial<ScheduleResult["assignments"][number]>,
-  ): Promise<ScheduleDraftDetailResponse | null>;
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
   validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null>;
   compareScheduleDraft(id: string): Promise<ScheduleDraftComparisonResponse | null>;
-  publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | null>;
+  publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null>;
+  discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null>;
   close?(): Promise<void>;
 }
 
@@ -282,10 +284,13 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     id: string,
     examTaskId: string,
     patch: Partial<ScheduleResult["assignments"][number]>,
-  ): Promise<ScheduleDraftDetailResponse | null> {
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
     const current = this.drafts.get(id);
-    if (!current || current.draft.status === "published" || current.draft.status === "discarded") {
+    if (!current) {
       return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_editable";
     }
     const index = current.assignments.findIndex((assignment) => (
       assignment.exam_task_id === examTaskId
@@ -364,13 +369,21 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   async compareScheduleDraft(id: string): Promise<ScheduleDraftComparisonResponse | null> {
     const current = this.drafts.get(id);
     const source = current ? this.runs.get(current.draft.sourceRunId) : null;
+    const published = this.publishedRunId ? this.runs.get(this.publishedRunId) ?? null : null;
     if (!current || !source) {
       return null;
     }
-    return buildDraftComparison(current.draft, source, current.assignments);
+    return buildDraftComparison(current, source, published);
   }
 
-  async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | null> {
+  async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {
+    const existing = this.drafts.get(id);
+    if (!existing) {
+      return null;
+    }
+    if (existing.draft.status === "published" || existing.draft.status === "discarded") {
+      return "not_publishable";
+    }
     const current = await this.validateScheduleDraft(id);
     if (!current) {
       return null;
@@ -418,6 +431,32 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       run,
       result,
     };
+  }
+
+  async discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null> {
+    const current = this.drafts.get(id);
+    if (!current) {
+      return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_discardable";
+    }
+    const now = new Date().toISOString();
+    const draft = {
+      ...current.draft,
+      status: "discarded" as const,
+      updatedAt: now,
+    };
+    this.drafts.set(id, {
+      ...current,
+      draft,
+    });
+    this.recordAuditEvent("schedule_draft.discarded", "schedule_draft", id, {
+      sourceRunId: current.draft.sourceRunId,
+      conflictCount: current.draft.conflictCount,
+      assignmentCount: current.draft.assignmentCount,
+    });
+    return { draft };
   }
 
   async getPublishedSchedule(): Promise<PublishedScheduleResponse | null> {
@@ -525,19 +564,47 @@ function assignmentKey(assignment: ScheduleResult["assignments"][number]) {
 }
 
 export function buildDraftComparison(
-  draft: ScheduleDraftSummary,
+  detail: ScheduleDraftDetailResponse,
   source: ScheduleRunResponse,
-  draftAssignments: ScheduleResult["assignments"],
+  published: ScheduleRunResponse | null,
 ): ScheduleDraftComparisonResponse {
-  const sourceByTask = new Map(source.result.assignments.map((assignment) => [
+  const sourceChanges = buildDraftAssignmentChanges(source.result.assignments, detail.assignments);
+  const publishedChanges = published
+    ? buildDraftAssignmentChanges(published.result.assignments, detail.assignments)
+    : null;
+
+  return {
+    draft: detail.draft,
+    source: {
+      run: source.run,
+      assignmentChanges: sourceChanges,
+    },
+    published: published && publishedChanges ? {
+      run: published.run,
+      assignmentChanges: publishedChanges,
+    } : null,
+    summary: {
+      changedFromSource: sourceChanges.changed.length,
+      changedFromPublished: publishedChanges?.changed.length ?? null,
+      hardConflictCount: detail.conflicts.filter((conflict) => conflict.severity === "error").length,
+      score: detail.draft.score,
+    },
+  };
+}
+
+function buildDraftAssignmentChanges(
+  baseAssignments: ScheduleResult["assignments"],
+  draftAssignments: ScheduleResult["assignments"],
+): ScheduleDraftComparisonResponse["source"]["assignmentChanges"] {
+  const baseByTask = new Map(baseAssignments.map((assignment) => [
     assignment.exam_task_id,
     assignment,
   ]));
-  const changed: ScheduleDraftComparisonResponse["assignmentChanges"]["changed"] = [];
+  const changed: ScheduleDraftComparisonResponse["source"]["assignmentChanges"]["changed"] = [];
   let unchanged = 0;
 
   for (const after of draftAssignments) {
-    const before = sourceByTask.get(after.exam_task_id);
+    const before = baseByTask.get(after.exam_task_id);
     if (!before) {
       continue;
     }
@@ -549,12 +616,8 @@ export function buildDraftComparison(
   }
 
   return {
-    draft,
-    sourceRun: source.run,
-    assignmentChanges: {
-      unchanged,
-      changed,
-    },
+    unchanged,
+    changed,
   };
 }
 

@@ -29,6 +29,7 @@ import type {
   ReferenceRecord,
   ReferenceResource,
   ScheduleRunComparisonResponse,
+  ScheduleDraftComparisonResponse,
   ScheduleDraftDetailResponse,
   ScheduleDraftPublishResponse,
   ScheduleDraftSummary,
@@ -171,6 +172,7 @@ export function OperationsConsole() {
   const [publishedSchedule, setPublishedSchedule] = useState<PublishedScheduleResponse | null>(null);
   const [drafts, setDrafts] = useState<ScheduleDraftSummary[]>([]);
   const [currentDraft, setCurrentDraft] = useState<ScheduleDraftDetailResponse | null>(null);
+  const [draftComparison, setDraftComparison] = useState<ScheduleDraftComparisonResponse | null>(null);
   const [selectedDraftAssignmentId, setSelectedDraftAssignmentId] = useState("");
   const [draftForm, setDraftForm] = useState<DraftAssignmentForm>({
     room_id: "",
@@ -337,6 +339,7 @@ export function OperationsConsole() {
       const payload = (await response.json()) as ScheduleDraftDetailResponse;
       setCurrentDraft(payload);
       setSelectedDraftAssignmentId(payload.assignments[0]?.exam_task_id ?? "");
+      await loadDraftComparison(payload.draft.id);
       await loadOperationalHistory();
       setDraftState("ready");
     } catch (reason) {
@@ -358,6 +361,7 @@ export function OperationsConsole() {
       const payload = (await response.json()) as ScheduleDraftDetailResponse;
       setCurrentDraft(payload);
       setSelectedDraftAssignmentId(payload.assignments[0]?.exam_task_id ?? "");
+      await loadDraftComparison(payload.draft.id);
       setDraftState("ready");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "草稿读取失败");
@@ -391,6 +395,7 @@ export function OperationsConsole() {
       }
       const payload = (await response.json()) as ScheduleDraftDetailResponse;
       setCurrentDraft(payload);
+      await loadDraftComparison(payload.draft.id);
       await loadOperationalHistory();
       setDraftState("ready");
     } catch (reason) {
@@ -419,11 +424,51 @@ export function OperationsConsole() {
         ...current,
         draft: payload.draft,
       } : current);
+      await loadDraftComparison(payload.draft.id);
       await loadOperationalHistory();
       setDraftState("ready");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "草稿发布失败");
       setDraftState("error");
+    }
+  }
+
+  async function discardDraft() {
+    if (!currentDraft) {
+      return;
+    }
+    setDraftState("loading");
+    setError(null);
+    try {
+      const response = await fetch(
+        `${apiBase}/api/schedule-drafts/${encodeURIComponent(currentDraft.draft.id)}/discard`,
+        { method: "POST" },
+      );
+      if (!response.ok) {
+        throw new Error("草稿废弃失败");
+      }
+      const payload = (await response.json()) as { draft: ScheduleDraftSummary };
+      setCurrentDraft((current) => current ? {
+        ...current,
+        draft: payload.draft,
+      } : current);
+      await loadDraftComparison(payload.draft.id);
+      await loadOperationalHistory();
+      setDraftState("ready");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "草稿废弃失败");
+      setDraftState("error");
+    }
+  }
+
+  async function loadDraftComparison(id: string) {
+    const response = await fetch(`${apiBase}/api/schedule-drafts/${encodeURIComponent(id)}/compare`, {
+      cache: "no-store",
+    });
+    if (response.ok) {
+      setDraftComparison((await response.json()) as ScheduleDraftComparisonResponse);
+    } else {
+      setDraftComparison(null);
     }
   }
 
@@ -683,6 +728,7 @@ export function OperationsConsole() {
             drafts={drafts}
             runs={runHistory}
             draft={currentDraft}
+            comparison={draftComparison}
             referenceData={referenceData}
             selectedAssignmentId={selectedDraftAssignmentId}
             draftForm={draftForm}
@@ -693,6 +739,7 @@ export function OperationsConsole() {
             onDraftFormChange={setDraftForm}
             onSaveAdjustment={adjustDraftAssignment}
             onPublishDraft={publishDraft}
+            onDiscardDraft={discardDraft}
           />
         </Panel>
 
@@ -968,6 +1015,7 @@ function ScheduleDraftWorkspace({
   drafts,
   runs,
   draft,
+  comparison,
   referenceData,
   selectedAssignmentId,
   draftForm,
@@ -978,10 +1026,12 @@ function ScheduleDraftWorkspace({
   onDraftFormChange,
   onSaveAdjustment,
   onPublishDraft,
+  onDiscardDraft,
 }: {
   drafts: ScheduleDraftSummary[];
   runs: ScheduleRunSummary[];
   draft: ScheduleDraftDetailResponse | null;
+  comparison: ScheduleDraftComparisonResponse | null;
   referenceData: ReferenceDataResponse | null;
   selectedAssignmentId: string;
   draftForm: DraftAssignmentForm;
@@ -992,12 +1042,15 @@ function ScheduleDraftWorkspace({
   onDraftFormChange(form: DraftAssignmentForm): void;
   onSaveAdjustment(): Promise<void>;
   onPublishDraft(): Promise<void>;
+  onDiscardDraft(): Promise<void>;
 }) {
   const [sourceRunId, setSourceRunId] = useState("");
   const scheduleInput = referenceData?.scheduleInput;
   const selectedAssignment = draft?.assignments.find((assignment) => (
     assignment.exam_task_id === selectedAssignmentId
   )) ?? null;
+  const draftLocked = draft?.draft.status === "published" || draft?.draft.status === "discarded";
+  const canPublishDraft = draft?.draft.status === "validated" && draft.draft.conflictCount === 0;
 
   useEffect(() => {
     setSourceRunId((current) => current || runs[0]?.id || "");
@@ -1070,12 +1123,50 @@ function ScheduleDraftWorkspace({
           <button
             type="button"
             className="primary-button"
-            disabled={!draft || draft.draft.conflictCount > 0 || draft.draft.status === "published" || draftState === "loading"}
+            disabled={!canPublishDraft || draftState === "loading"}
             onClick={onPublishDraft}
           >
             <ShieldCheck size={17} />
             发布草稿
           </button>
+        </div>
+
+        <div className="draft-confirmation">
+          <div className="confirmation-metrics">
+            <div>
+              <span>相对来源变化</span>
+              <strong>{comparison?.summary.changedFromSource ?? "--"}</strong>
+            </div>
+            <div>
+              <span>相对发布变化</span>
+              <strong>{comparison?.summary.changedFromPublished ?? "--"}</strong>
+            </div>
+            <div>
+              <span>硬冲突</span>
+              <strong>{comparison?.summary.hardConflictCount ?? draft?.draft.conflictCount ?? "--"}</strong>
+            </div>
+            <div>
+              <span>最近调整</span>
+              <strong>{draft?.changeEvents.length ?? "--"}</strong>
+            </div>
+          </div>
+          <div className="governance-actions">
+            <p className="muted">
+              {draft?.draft.conflictCount
+                ? "存在硬冲突时不能发布，请先修复草稿安排。"
+                : draftLocked
+                  ? "已发布或已废弃草稿仅保留审计与对比，不再允许调整。"
+                  : "发布前请核对评分、变化数量和最近调整记录。"}
+            </p>
+            <button
+              type="button"
+              className="danger-button"
+              disabled={!draft || draftLocked || draftState === "loading"}
+              onClick={onDiscardDraft}
+            >
+              废弃草稿
+            </button>
+          </div>
         </div>
 
         <div className="schedule-matrix" role="grid" aria-label="排考草稿矩阵">
@@ -1176,7 +1267,7 @@ function ScheduleDraftWorkspace({
             <button
               type="button"
               className="secondary-button"
-              disabled={draftState === "loading" || draft?.draft.status === "published"}
+              disabled={draftState === "loading" || draftLocked}
               onClick={onSaveAdjustment}
             >
               <Save size={16} />
@@ -1197,7 +1288,7 @@ function ScheduleDraftWorkspace({
         </div>
 
         <div className="draft-events">
-          {draft?.changeEvents.slice(0, 5).map((event) => (
+          {draft?.changeEvents.slice(0, 10).map((event) => (
             <article key={event.id}>
               <strong>{event.examTaskId}</strong>
               <span>{new Date(event.createdAt).toLocaleString()}</span>

@@ -763,6 +763,7 @@ th {
 .draft-list,
 .draft-inspector,
 .draft-summary,
+.draft-confirmation,
 .draft-events {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -858,6 +859,52 @@ th {
   display: block;
   margin-top: 5px;
   overflow-wrap: anywhere;
+}
+
+.draft-confirmation {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.34fr);
+  gap: 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.confirmation-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.confirmation-metrics div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffaf0;
+  padding: 10px;
+}
+
+.confirmation-metrics span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.confirmation-metrics strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--teal);
+  font-size: 20px;
+}
+
+.governance-actions {
+  display: grid;
+  align-content: space-between;
+  gap: 10px;
+}
+
+.governance-actions .danger-button {
+  width: 100%;
 }
 
 .schedule-matrix {
@@ -1202,7 +1249,9 @@ th {
     .history-list article,
     .schedule-card dl,
     .draft-workspace,
-    .draft-summary {
+    .draft-summary,
+    .draft-confirmation,
+    .confirmation-metrics {
     grid-template-columns: 1fr;
   }
 
