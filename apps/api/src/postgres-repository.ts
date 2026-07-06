@@ -17,11 +17,13 @@ import {
   type AuditEventListResponse,
   type AuditEventSummary,
   type DashboardResponse,
+  type PublishedScheduleResponse,
   type ReferenceRecord,
   type ReferenceDataResponse,
   type ReferenceResource,
   type ScheduleRunComparisonResponse,
   type ScheduleRunListResponse,
+  type ScheduleRollbackResponse,
   type ScheduleResult,
   type ScheduleRunResponse,
   type ScheduleRunSummary,
@@ -429,6 +431,71 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
+  async publishScheduleRun(id: string): Promise<PublishedScheduleResponse | null> {
+    const response = await this.getScheduleRun(id);
+    if (!response) {
+      return null;
+    }
+    const batch = await this.getActiveBatch();
+    const [updatedBatch] = await this.client.db
+      .update(examBatches)
+      .set({
+        status: "published",
+        publishedRunId: id,
+      })
+      .where(eq(examBatches.id, batch.id))
+      .returning();
+
+    await this.recordAuditEvent("schedule_run.published", "schedule_run", id, {
+      batchId: batch.id,
+      score: response.run.score,
+      status: response.run.status,
+    });
+
+    return {
+      batch: this.toBatchSummary(updatedBatch),
+      run: response.run,
+      result: response.result,
+    };
+  }
+
+  async getPublishedSchedule(): Promise<PublishedScheduleResponse | null> {
+    const batch = await this.getActiveBatch();
+    if (!batch.publishedRunId) {
+      return null;
+    }
+    const response = await this.getScheduleRun(batch.publishedRunId);
+    return response ? {
+      batch: this.toBatchSummary(batch),
+      run: response.run,
+      result: response.result,
+    } : null;
+  }
+
+  async rollbackPublishedSchedule(): Promise<ScheduleRollbackResponse> {
+    const batch = await this.getActiveBatch();
+    const previousRun = batch.publishedRunId
+      ? (await this.getScheduleRun(batch.publishedRunId))?.run ?? null
+      : null;
+    const [updatedBatch] = await this.client.db
+      .update(examBatches)
+      .set({
+        status: "ready",
+        publishedRunId: null,
+      })
+      .where(eq(examBatches.id, batch.id))
+      .returning();
+
+    await this.recordAuditEvent("schedule_run.rollback", "exam_batch", batch.id, {
+      previousRunId: previousRun?.id ?? null,
+    });
+
+    return {
+      batch: this.toBatchSummary(updatedBatch),
+      previousRun,
+    };
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }
@@ -552,6 +619,22 @@ export class PostgresPlatformRepository implements PlatformRepository {
       payload: event.payload as Record<string, unknown>,
       createdAt: event.createdAt.toISOString(),
     };
+  }
+
+  private async recordAuditEvent(
+    action: string,
+    entityType: string,
+    entityId: string,
+    payload: Record<string, unknown>,
+  ) {
+    await this.client.db.insert(auditEvents).values({
+      id: `audit-${randomUUID()}`,
+      actor: "system",
+      action,
+      entityType,
+      entityId,
+      payload,
+    });
   }
 }
 

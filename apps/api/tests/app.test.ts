@@ -130,6 +130,46 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("publishes and rolls back a schedule run", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+    });
+    const created = createResponse.json();
+
+    const publishResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${created.run.id}/publish`,
+    });
+    assert.equal(publishResponse.statusCode, 200);
+    assert.equal(publishResponse.json().batch.status, "published");
+    assert.equal(publishResponse.json().run.id, created.run.id);
+
+    const publishedResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule",
+    });
+    assert.equal(publishedResponse.statusCode, 200);
+    assert.equal(publishedResponse.json().run.id, created.run.id);
+
+    const rollbackResponse = await app.inject({
+      method: "POST",
+      url: "/api/published-schedule/rollback",
+    });
+    assert.equal(rollbackResponse.statusCode, 200);
+    assert.equal(rollbackResponse.json().batch.status, "ready");
+
+    const afterRollbackResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule",
+    });
+    assert.equal(afterRollbackResponse.statusCode, 404);
+
+    await app.close();
+  });
+
   it("uses reference data from the configured repository when creating a schedule run", async () => {
     const scheduler = new FakeScheduler();
     const repository = new InMemoryPlatformRepository();
@@ -149,6 +189,9 @@ describe("ExamForge API", () => {
         getScheduleRun: (id) => repository.getScheduleRun(id),
         compareScheduleRuns: (baseId, targetId) => repository.compareScheduleRuns(baseId, targetId),
         listAuditEvents: () => repository.listAuditEvents(),
+        publishScheduleRun: (id) => repository.publishScheduleRun(id),
+        getPublishedSchedule: () => repository.getPublishedSchedule(),
+        rollbackPublishedSchedule: () => repository.rollbackPublishedSchedule(),
       },
     });
 

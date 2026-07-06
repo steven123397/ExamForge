@@ -535,8 +535,9 @@ th {
 
 .history-list article {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 14px;
+  align-items: center;
   padding: 12px;
 }
 
@@ -547,10 +548,23 @@ th {
 }
 
 .history-list article span,
+.history-list article em,
 .audit-list article span,
 .audit-list article p {
   color: var(--muted);
   font-size: 12px;
+}
+
+.history-list article em {
+  display: inline-block;
+  width: fit-content;
+  margin-top: 6px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(21, 128, 61, 0.12);
+  color: var(--green);
+  font-style: normal;
+  font-weight: 900;
 }
 
 .history-list dl {
@@ -576,6 +590,22 @@ th {
 
 .compare-box {
   padding: 12px;
+}
+
+.mini-button {
+  height: 30px;
+  border: 1px solid rgba(15, 118, 110, 0.36);
+  border-radius: 6px;
+  background: rgba(15, 118, 110, 0.08);
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.mini-button:disabled {
+  opacity: 0.55;
+  cursor: wait;
 }
 
 .compare-controls {
@@ -621,6 +651,30 @@ th {
   font-size: 20px;
 }
 
+.publish-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(21, 128, 61, 0.08);
+  padding: 12px;
+}
+
+.publish-box span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.publish-box strong {
+  display: block;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+
 .audit-list article {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
@@ -663,7 +717,13 @@ th {
   .reference-layout,
   .form-grid,
   .compare-controls,
-  .comparison-grid {
+  .comparison-grid,
+  .history-list article {
     grid-template-columns: 1fr;
+  }
+
+  .publish-box {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

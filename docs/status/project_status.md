@@ -22,8 +22,10 @@
 - 变更：本机 WSL2 已启用 Docker daemon 和 Docker Compose，`examforge-postgres` 容器已启动并通过健康检查。
 - 变更：API 已新增基础数据创建和更新入口，覆盖学生群体、教师、课程、考场、时间段和考试任务；运营台已新增课程、教师、考场的基础数据编辑面板。
 - 变更：API 已新增排考运行历史、审计事件列表和排考运行版本对比接口；运营台已新增运行历史、版本对比摘要和审计详情面板。
+- 变更：API 已新增排考方案发布、当前发布方案查询和发布回滚接口；PostgreSQL `exam_batches` 已增加 `published_run_id` 字段，运营台运行历史已支持发布标记和回滚操作。
 - 验证：PostgreSQL 运行路径已完成真实验证，包括按顺序执行 `packages/db/drizzle/*.sql`、运行 `npm run seed --workspace @examforge/db`、API 带 `DATABASE_URL` 读取 dashboard、发起一次排考运行并写入 `schedule_runs`、`scheduled_exams` 和 `audit_events`。
-- 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `7 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
+- 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `8 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
+- 验证：真实 PostgreSQL API 路径已验证 `POST /api/schedule-runs`、`POST /api/schedule-runs/:id/publish`、`GET /api/published-schedule`、`POST /api/published-schedule/rollback` 和回滚后的 `404` 查询结果；数据库已写入对应 `schedule_run.created`、`schedule_run.published` 和 `schedule_run.rollback` 审计事件。
 
 ## 当前风险
 
@@ -42,4 +44,5 @@
 - [x] 将 API 内置演示仓储替换为 PostgreSQL 持久化仓储。
 - [ ] 扩展基础数据管理页面，补齐学生群体、时间段、考试任务编辑和删除/导入能力。
 - [x] 增加排考运行历史、版本对比和审计详情。
-- [ ] 增加方案发布、回滚和教师/学生查询已发布安排。
+- [x] 增加方案发布和回滚。
+- [ ] 增加教师/学生查询已发布安排。

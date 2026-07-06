@@ -36,6 +36,7 @@ export const examBatches = pgTable("exam_batches", {
   startDate: text("start_date").notNull(),
   endDate: text("end_date").notNull(),
   constraintProfile: jsonb("constraint_profile").notNull(),
+  publishedRunId: text("published_run_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

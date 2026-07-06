@@ -251,3 +251,14 @@ export interface ScheduleRunComparisonResponse {
     removed: ScheduledExam[];
   };
 }
+
+export interface PublishedScheduleResponse {
+  batch: ExamBatchSummary;
+  run: ScheduleRunSummary;
+  result: ScheduleResult;
+}
+
+export interface ScheduleRollbackResponse {
+  batch: ExamBatchSummary;
+  previousRun: ScheduleRunSummary | null;
+}

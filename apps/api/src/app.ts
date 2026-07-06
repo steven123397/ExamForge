@@ -145,6 +145,35 @@ export function createApp(options: AppOptions = {}) {
 
   app.get("/api/audit-events", async () => repository.listAuditEvents());
 
+  app.post<{ Params: { id: string } }>(
+    "/api/schedule-runs/:id/publish",
+    async (request, reply) => {
+      const published = await repository.publishScheduleRun(request.params.id);
+      if (!published) {
+        return reply.code(404).send({
+          error: "schedule_run_not_found",
+          message: `Schedule run ${request.params.id} does not exist.`,
+        });
+      }
+      return published;
+    },
+  );
+
+  app.get("/api/published-schedule", async (_request, reply) => {
+    const published = await repository.getPublishedSchedule();
+    if (!published) {
+      return reply.code(404).send({
+        error: "published_schedule_not_found",
+        message: "No schedule has been published.",
+      });
+    }
+    return published;
+  });
+
+  app.post("/api/published-schedule/rollback", async () => (
+    repository.rollbackPublishedSchedule()
+  ));
+
   app.get<{ Params: { id: string } }>("/api/schedule-runs/:id", async (request, reply) => {
     const response = await repository.getScheduleRun(request.params.id);
     if (!response) {

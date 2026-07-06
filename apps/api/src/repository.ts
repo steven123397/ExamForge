@@ -4,11 +4,13 @@ import {
   type AuditEventListResponse,
   type AuditEventSummary,
   type DashboardResponse,
+  type PublishedScheduleResponse,
   type ReferenceRecord,
   type ReferenceDataResponse,
   type ReferenceResource,
   type ScheduleRunComparisonResponse,
   type ScheduleRunListResponse,
+  type ScheduleRollbackResponse,
   type ScheduleResult,
   type ScheduleRunResponse,
   type ScheduleRunSummary,
@@ -32,18 +34,23 @@ export interface PlatformRepository {
     targetId: string,
   ): Promise<ScheduleRunComparisonResponse | null>;
   listAuditEvents(): Promise<AuditEventListResponse>;
+  publishScheduleRun(id: string): Promise<PublishedScheduleResponse | null>;
+  getPublishedSchedule(): Promise<PublishedScheduleResponse | null>;
+  rollbackPublishedSchedule(): Promise<ScheduleRollbackResponse>;
   close?(): Promise<void>;
 }
 
 export class InMemoryPlatformRepository implements PlatformRepository {
   private runs = new Map<string, ScheduleRunResponse>();
   private auditEvents: AuditEventSummary[] = [];
+  private batch = structuredClone(demoBatch);
+  private publishedRunId: string | null = null;
   private scheduleInput = structuredClone(demoScheduleInput);
 
   async getDashboard(): Promise<DashboardResponse> {
     const latestRun = Array.from(this.runs.values()).at(-1)?.run ?? null;
     return {
-      batch: demoBatch,
+      batch: this.batch,
       metrics: {
         examTaskCount: this.scheduleInput.exam_tasks.length,
         teacherCount: this.scheduleInput.teachers.length,
@@ -58,7 +65,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
 
   async getReferenceData(): Promise<ReferenceDataResponse> {
     return {
-      batch: demoBatch,
+      batch: this.batch,
       scheduleInput: this.scheduleInput,
     };
   }
@@ -143,6 +150,55 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return { events: [...this.auditEvents].reverse() };
   }
 
+  async publishScheduleRun(id: string): Promise<PublishedScheduleResponse | null> {
+    const response = this.runs.get(id);
+    if (!response) {
+      return null;
+    }
+    this.publishedRunId = id;
+    this.batch = {
+      ...this.batch,
+      status: "published",
+    };
+    this.recordAuditEvent("schedule_run.published", "schedule_run", id, {
+      status: response.run.status,
+      score: response.run.score,
+    });
+    return {
+      batch: this.batch,
+      ...response,
+    };
+  }
+
+  async getPublishedSchedule(): Promise<PublishedScheduleResponse | null> {
+    if (!this.publishedRunId) {
+      return null;
+    }
+    const response = this.runs.get(this.publishedRunId);
+    return response ? {
+      batch: this.batch,
+      ...response,
+    } : null;
+  }
+
+  async rollbackPublishedSchedule(): Promise<ScheduleRollbackResponse> {
+    const previousRun = this.publishedRunId
+      ? this.runs.get(this.publishedRunId)?.run ?? null
+      : null;
+    this.publishedRunId = null;
+    this.batch = {
+      ...this.batch,
+      status: "ready",
+    };
+    this.recordAuditEvent("schedule_run.rollback", "exam_batch", this.batch.id, {
+      previousRunId: previousRun?.id ?? null,
+    });
+    return {
+      batch: this.batch,
+      previousRun,
+    };
+  }
+
   private getCollection(resource: ReferenceResource): Array<ReferenceRecord> {
     const collections = {
       "student-groups": this.scheduleInput.student_groups,
@@ -153,6 +209,23 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       "exam-tasks": this.scheduleInput.exam_tasks,
     };
     return collections[resource] as Array<ReferenceRecord>;
+  }
+
+  private recordAuditEvent(
+    action: string,
+    entityType: string,
+    entityId: string,
+    payload: Record<string, unknown>,
+  ) {
+    this.auditEvents.push({
+      id: `audit-${randomUUID()}`,
+      actor: "system",
+      action,
+      entityType,
+      entityId,
+      payload,
+      createdAt: new Date().toISOString(),
+    });
   }
 }
 

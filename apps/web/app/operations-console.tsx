@@ -22,6 +22,7 @@ import { useEffect, useMemo, useState } from "react";
 import type {
   DashboardResponse,
   AuditEventSummary,
+  PublishedScheduleResponse,
   ReferenceDataResponse,
   ScheduleRunComparisonResponse,
   ScheduleRunResponse,
@@ -96,9 +97,11 @@ export function OperationsConsole() {
   const [runHistory, setRunHistory] = useState<ScheduleRunSummary[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEventSummary[]>([]);
   const [comparison, setComparison] = useState<ScheduleRunComparisonResponse | null>(null);
+  const [publishedSchedule, setPublishedSchedule] = useState<PublishedScheduleResponse | null>(null);
   const [state, setState] = useState<LoadState>("idle");
   const [runState, setRunState] = useState<LoadState>("idle");
   const [compareState, setCompareState] = useState<LoadState>("idle");
+  const [publishState, setPublishState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -155,9 +158,10 @@ export function OperationsConsole() {
   }
 
   async function loadOperationalHistory() {
-    const [runsResponse, auditResponse] = await Promise.all([
+    const [runsResponse, auditResponse, publishedResponse] = await Promise.all([
       fetch(`${apiBase}/api/schedule-runs`, { cache: "no-store" }),
       fetch(`${apiBase}/api/audit-events`, { cache: "no-store" }),
+      fetch(`${apiBase}/api/published-schedule`, { cache: "no-store" }),
     ]);
 
     if (runsResponse.ok) {
@@ -167,6 +171,11 @@ export function OperationsConsole() {
     if (auditResponse.ok) {
       const payload = (await auditResponse.json()) as { events: AuditEventSummary[] };
       setAuditEvents(payload.events);
+    }
+    if (publishedResponse.ok) {
+      setPublishedSchedule((await publishedResponse.json()) as PublishedScheduleResponse);
+    } else if (publishedResponse.status === 404) {
+      setPublishedSchedule(null);
     }
   }
 
@@ -186,6 +195,52 @@ export function OperationsConsole() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "版本对比失败");
       setCompareState("error");
+    }
+  }
+
+  async function publishRun(id: string) {
+    setPublishState("loading");
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}/api/schedule-runs/${encodeURIComponent(id)}/publish`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error("方案发布失败");
+      }
+      setPublishedSchedule((await response.json()) as PublishedScheduleResponse);
+      await loadOperationalHistory();
+      const dashboardResponse = await fetch(`${apiBase}/api/dashboard`, { cache: "no-store" });
+      if (dashboardResponse.ok) {
+        setDashboard((await dashboardResponse.json()) as DashboardResponse);
+      }
+      setPublishState("ready");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "方案发布失败");
+      setPublishState("error");
+    }
+  }
+
+  async function rollbackPublishedSchedule() {
+    setPublishState("loading");
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}/api/published-schedule/rollback`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error("方案回滚失败");
+      }
+      setPublishedSchedule(null);
+      await loadOperationalHistory();
+      const dashboardResponse = await fetch(`${apiBase}/api/dashboard`, { cache: "no-store" });
+      if (dashboardResponse.ok) {
+        setDashboard((await dashboardResponse.json()) as DashboardResponse);
+      }
+      setPublishState("ready");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "方案回滚失败");
+      setPublishState("error");
     }
   }
 
@@ -363,8 +418,12 @@ export function OperationsConsole() {
             <RunHistory
               runs={runHistory}
               comparison={comparison}
+              publishedSchedule={publishedSchedule}
               compareState={compareState}
+              publishState={publishState}
               onCompare={compareRuns}
+              onPublish={publishRun}
+              onRollback={rollbackPublishedSchedule}
             />
           </Panel>
 
@@ -406,13 +465,21 @@ export function OperationsConsole() {
 function RunHistory({
   runs,
   comparison,
+  publishedSchedule,
   compareState,
+  publishState,
   onCompare,
+  onPublish,
+  onRollback,
 }: {
   runs: ScheduleRunSummary[];
   comparison: ScheduleRunComparisonResponse | null;
+  publishedSchedule: PublishedScheduleResponse | null;
   compareState: LoadState;
+  publishState: LoadState;
   onCompare(baseId: string, targetId: string): Promise<void>;
+  onPublish(id: string): Promise<void>;
+  onRollback(): Promise<void>;
 }) {
   const [baseId, setBaseId] = useState("");
   const [targetId, setTargetId] = useState("");
@@ -435,12 +502,21 @@ function RunHistory({
             <div>
               <strong>{run.status}</strong>
               <span>{new Date(run.createdAt).toLocaleString()}</span>
+              {publishedSchedule?.run.id === run.id ? <em>已发布</em> : null}
             </div>
             <dl>
               <div><dt>评分</dt><dd>{run.score}</dd></div>
               <div><dt>安排</dt><dd>{run.assignmentCount}</dd></div>
               <div><dt>冲突</dt><dd>{run.conflictCount}</dd></div>
             </dl>
+            <button
+              type="button"
+              className="mini-button"
+              disabled={publishState === "loading"}
+              onClick={() => onPublish(run.id)}
+            >
+              发布
+            </button>
           </article>
         ))}
         {!runs.length ? <p className="muted">运行排考后展示历史版本。</p> : null}
@@ -475,6 +551,21 @@ function RunHistory({
             <div><span>新增安排</span><strong>{comparison.assignmentChanges.added.length}</strong></div>
           </div>
         ) : <p className="muted">选择两个运行版本后查看差异。</p>}
+      </div>
+
+      <div className="publish-box">
+        <div>
+          <span>当前发布</span>
+          <strong>{publishedSchedule?.run.id ?? "暂无发布版本"}</strong>
+        </div>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={!publishedSchedule || publishState === "loading"}
+          onClick={() => onRollback()}
+        >
+          回滚发布
+        </button>
       </div>
     </div>
   );
