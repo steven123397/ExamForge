@@ -4,6 +4,7 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  Bell,
   BookOpen,
   Building2,
   CalendarClock,
@@ -11,20 +12,25 @@ import {
   ClipboardList,
   GitCompareArrows,
   Database,
+  Download,
   Gauge,
   History,
   Lightbulb,
+  Lock,
   Move,
   Plus,
   Play,
+  RotateCcw,
   Save,
   ShieldCheck,
+  Unlock,
   Users,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   DashboardResponse,
   AuditEventSummary,
+  PublishedScheduleNotificationsResponse,
   PublishedScheduleAudienceResponse,
   PublishedScheduleResponse,
   ReferenceDataResponse,
@@ -37,6 +43,7 @@ import type {
   ScheduleDraftDetailResponse,
   ScheduleDraftPublishResponse,
   ScheduleDraftSummary,
+  ScheduleJobSummary,
   ScheduleRunResponse,
   ScheduleRunSummary,
   ScheduledExam,
@@ -56,6 +63,7 @@ type FormState = Record<string, string>;
 type DraftAssignmentForm = Pick<ScheduledExam, "room_id" | "time_slot_id"> & {
   teacher_ids: string;
 };
+type WorkspaceRole = "admin" | "operator" | "viewer";
 
 const referenceForms = {
   courses: {
@@ -174,6 +182,8 @@ export function OperationsConsole() {
   const [auditEvents, setAuditEvents] = useState<AuditEventSummary[]>([]);
   const [comparison, setComparison] = useState<ScheduleRunComparisonResponse | null>(null);
   const [publishedSchedule, setPublishedSchedule] = useState<PublishedScheduleResponse | null>(null);
+  const [notifications, setNotifications] = useState<PublishedScheduleNotificationsResponse | null>(null);
+  const [scheduleJobs, setScheduleJobs] = useState<ScheduleJobSummary[]>([]);
   const [drafts, setDrafts] = useState<ScheduleDraftSummary[]>([]);
   const [currentDraft, setCurrentDraft] = useState<ScheduleDraftDetailResponse | null>(null);
   const [draftComparison, setDraftComparison] = useState<ScheduleDraftComparisonResponse | null>(null);
@@ -193,11 +203,26 @@ export function OperationsConsole() {
   const [suggestionState, setSuggestionState] = useState<LoadState>("idle");
   const [publishState, setPublishState] = useState<LoadState>("idle");
   const [queryState, setQueryState] = useState<LoadState>("idle");
+  const [jobState, setJobState] = useState<LoadState>("idle");
+  const [teacherState, setTeacherState] = useState<LoadState>("idle");
+  const [notificationState, setNotificationState] = useState<LoadState>("idle");
+  const [role, setRole] = useState<WorkspaceRole>("admin");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void loadInitialData();
   }, []);
+
+  useEffect(() => {
+    if (!scheduleJobs.some((job) => job.status === "queued" || job.status === "running")) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      void loadScheduleJobs();
+      void loadOperationalHistory();
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [scheduleJobs]);
 
   useEffect(() => {
     const selected = currentDraft?.assignments.find((assignment) => (
@@ -271,12 +296,33 @@ export function OperationsConsole() {
     }
   }
 
+  async function runScheduleJob() {
+    setJobState("loading");
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}/api/schedule-jobs`, {
+        method: "POST",
+        headers: roleHeaders(),
+      });
+      if (!response.ok) {
+        throw new Error(response.status === 403 ? "当前角色没有异步排考权限" : "异步排考启动失败");
+      }
+      const payload = (await response.json()) as { job: ScheduleJobSummary };
+      setScheduleJobs((current) => [payload.job, ...current.filter((job) => job.id !== payload.job.id)]);
+      setJobState("ready");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "异步排考启动失败");
+      setJobState("error");
+    }
+  }
+
   async function loadOperationalHistory() {
-    const [runsResponse, auditResponse, publishedResponse, draftsResponse] = await Promise.all([
+    const [runsResponse, auditResponse, publishedResponse, draftsResponse, jobsResponse] = await Promise.all([
       fetch(`${apiBase}/api/schedule-runs`, { cache: "no-store" }),
       fetch(`${apiBase}/api/audit-events`, { cache: "no-store" }),
       fetch(`${apiBase}/api/published-schedule`, { cache: "no-store" }),
       fetch(`${apiBase}/api/schedule-drafts`, { cache: "no-store" }),
+      fetch(`${apiBase}/api/schedule-jobs`, { cache: "no-store" }),
     ]);
 
     if (runsResponse.ok) {
@@ -289,14 +335,37 @@ export function OperationsConsole() {
     }
     if (publishedResponse.ok) {
       setPublishedSchedule((await publishedResponse.json()) as PublishedScheduleResponse);
+      await loadNotifications();
     } else if (publishedResponse.status === 404) {
       setPublishedSchedule(null);
+      setNotifications(null);
       setTeacherSchedule(null);
       setStudentSchedule(null);
     }
     if (draftsResponse.ok) {
       const payload = (await draftsResponse.json()) as { drafts: ScheduleDraftSummary[] };
       setDrafts(payload.drafts);
+    }
+    if (jobsResponse.ok) {
+      const payload = (await jobsResponse.json()) as { jobs: ScheduleJobSummary[] };
+      setScheduleJobs(payload.jobs);
+    }
+  }
+
+  async function loadScheduleJobs() {
+    const response = await fetch(`${apiBase}/api/schedule-jobs`, { cache: "no-store" });
+    if (response.ok) {
+      const payload = (await response.json()) as { jobs: ScheduleJobSummary[] };
+      setScheduleJobs(payload.jobs);
+      const latestCompleted = payload.jobs.find((job) => job.status === "completed" && job.runId);
+      if (latestCompleted?.runId) {
+        const runResponse = await fetch(`${apiBase}/api/schedule-runs/${encodeURIComponent(latestCompleted.runId)}`, {
+          cache: "no-store",
+        });
+        if (runResponse.ok) {
+          setLatestRun((await runResponse.json()) as ScheduleRunResponse);
+        }
+      }
     }
   }
 
@@ -454,6 +523,58 @@ export function OperationsConsole() {
     }
   }
 
+  async function lockDraftAssignment() {
+    if (!currentDraft || !selectedDraftAssignmentId) {
+      return;
+    }
+    await mutateDraft(
+      `/api/schedule-drafts/${encodeURIComponent(currentDraft.draft.id)}/assignments/${encodeURIComponent(selectedDraftAssignmentId)}/lock`,
+      "考试锁定失败",
+    );
+  }
+
+  async function unlockDraftAssignment() {
+    if (!currentDraft || !selectedDraftAssignmentId) {
+      return;
+    }
+    await mutateDraft(
+      `/api/schedule-drafts/${encodeURIComponent(currentDraft.draft.id)}/assignments/${encodeURIComponent(selectedDraftAssignmentId)}/unlock`,
+      "考试解锁失败",
+    );
+  }
+
+  async function rebalanceDraft() {
+    if (!currentDraft) {
+      return;
+    }
+    await mutateDraft(
+      `/api/schedule-drafts/${encodeURIComponent(currentDraft.draft.id)}/rebalance`,
+      "局部再平衡失败",
+    );
+  }
+
+  async function mutateDraft(path: string, message: string) {
+    setDraftState("loading");
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}${path}`, {
+        method: "POST",
+        headers: roleHeaders(),
+      });
+      if (!response.ok) {
+        throw new Error(message);
+      }
+      const payload = (await response.json()) as ScheduleDraftDetailResponse;
+      setCurrentDraft(payload);
+      await loadDraftComparison(payload.draft.id);
+      await loadOperationalHistory();
+      setDraftState("ready");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : message);
+      setDraftState("error");
+    }
+  }
+
   async function loadDraftSuggestions(id: string, examTaskId: string) {
     setSuggestionState("loading");
     try {
@@ -602,6 +723,54 @@ export function OperationsConsole() {
     }
   }
 
+  async function updateTeacherUnavailable(teacherId: string, slotIds: string[]) {
+    setTeacherState("loading");
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}/api/teachers/${encodeURIComponent(teacherId)}/unavailable-slots`, {
+        method: "PATCH",
+        headers: roleHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({ unavailable_slot_ids: slotIds }),
+      });
+      if (!response.ok) {
+        throw new Error(response.status === 403 ? "当前角色没有维护教师不可用时段权限" : "教师不可用时段保存失败");
+      }
+      await loadInitialData();
+      setTeacherState("ready");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "教师不可用时段保存失败");
+      setTeacherState("error");
+    }
+  }
+
+  async function loadNotifications() {
+    setNotificationState("loading");
+    try {
+      const response = await fetch(`${apiBase}/api/published-schedule/notifications`, { cache: "no-store" });
+      if (!response.ok) {
+        setNotifications(null);
+        setNotificationState(response.status === 404 ? "idle" : "error");
+        return;
+      }
+      setNotifications((await response.json()) as PublishedScheduleNotificationsResponse);
+      setNotificationState("ready");
+    } catch {
+      setNotifications(null);
+      setNotificationState("error");
+    }
+  }
+
+  function downloadPublishedCsv() {
+    window.open(`${apiBase}/api/published-schedule/export.csv`, "_blank", "noopener,noreferrer");
+  }
+
+  function roleHeaders(extra: Record<string, string> = {}) {
+    return {
+      ...extra,
+      "x-examforge-role": role,
+    };
+  }
+
   const scheduleInput = referenceData?.scheduleInput;
   const assignments = latestRun?.result.assignments ?? [];
   const conflicts = latestRun?.result.conflicts ?? [];
@@ -667,6 +836,14 @@ export function OperationsConsole() {
             <Play size={18} />
             {runState === "loading" ? "运行中" : "运行排考"}
           </button>
+          <label className="role-switcher">
+            <span>角色</span>
+            <select value={role} onChange={(event) => setRole(event.target.value as WorkspaceRole)}>
+              <option value="admin">管理员</option>
+              <option value="operator">排考员</option>
+              <option value="viewer">只读</option>
+            </select>
+          </label>
         </header>
 
         {error ? <div className="alert">{error}</div> : null}
@@ -699,6 +876,11 @@ export function OperationsConsole() {
             <p className="muted">
               当前按钮会通过 Fastify API 调用 Python CP-SAT 调度器，并返回真实排考结果、冲突、评分和报告数据。
             </p>
+            <ScheduleJobPanel
+              jobs={scheduleJobs}
+              jobState={jobState}
+              onCreateJob={runScheduleJob}
+            />
           </Panel>
 
           <Panel title="资源利用率" eyebrow="Capacity">
@@ -812,8 +994,19 @@ export function OperationsConsole() {
             onSaveAdjustment={adjustDraftAssignment}
             onApplySuggestion={applyDraftSuggestion}
             onMoveAssignment={moveDraftAssignment}
+            onLockAssignment={lockDraftAssignment}
+            onUnlockAssignment={unlockDraftAssignment}
+            onRebalanceDraft={rebalanceDraft}
             onPublishDraft={publishDraft}
             onDiscardDraft={discardDraft}
+          />
+        </Panel>
+
+        <Panel title="教师不可用维护" eyebrow="Teacher Self-Service">
+          <TeacherAvailabilityPanel
+            referenceData={referenceData}
+            teacherState={teacherState}
+            onSave={updateTeacherUnavailable}
           />
         </Panel>
 
@@ -823,8 +1016,12 @@ export function OperationsConsole() {
             teacherSchedule={teacherSchedule}
             studentSchedule={studentSchedule}
             queryState={queryState}
+            notifications={notifications}
+            notificationState={notificationState}
             onTeacherQuery={queryTeacherSchedule}
             onStudentQuery={queryStudentSchedule}
+            onRefreshNotifications={loadNotifications}
+            onExportCsv={downloadPublishedCsv}
           />
         </Panel>
 
@@ -863,15 +1060,23 @@ function PublishedScheduleLookup({
   teacherSchedule,
   studentSchedule,
   queryState,
+  notifications,
+  notificationState,
   onTeacherQuery,
   onStudentQuery,
+  onRefreshNotifications,
+  onExportCsv,
 }: {
   referenceData: ReferenceDataResponse | null;
   teacherSchedule: PublishedScheduleAudienceResponse | null;
   studentSchedule: PublishedScheduleAudienceResponse | null;
   queryState: LoadState;
+  notifications: PublishedScheduleNotificationsResponse | null;
+  notificationState: LoadState;
   onTeacherQuery(id: string): Promise<void>;
   onStudentQuery(id: string): Promise<void>;
+  onRefreshNotifications(): Promise<void>;
+  onExportCsv(): void;
 }) {
   const teachers = referenceData?.scheduleInput.teachers ?? [];
   const studentGroups = referenceData?.scheduleInput.student_groups ?? [];
@@ -925,6 +1130,151 @@ function PublishedScheduleLookup({
       <div className="published-results">
         <ScheduleAudienceCards title="教师视图" schedule={teacherSchedule} />
         <ScheduleAudienceCards title="学生视图" schedule={studentSchedule} />
+      </div>
+
+      <div className="published-actions">
+        <div className="action-row">
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={notificationState === "loading"}
+            onClick={() => onRefreshNotifications()}
+            data-testid="published-notification-refresh"
+          >
+            <Bell size={16} />
+            刷新通知
+          </button>
+          <button type="button" className="secondary-button" onClick={onExportCsv}>
+            <Download size={16} />
+            导出 CSV
+          </button>
+        </div>
+        <div className="notification-list" data-testid="published-notification-list">
+          {notifications?.notifications.slice(0, 6).map((notice) => (
+            <article key={notice.id}>
+              <strong>{notice.studentGroupName}</strong>
+              <p>{notice.message}</p>
+            </article>
+          ))}
+          {!notifications ? <p className="muted">发布方案后可预览面向学生群体的通知。</p> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScheduleJobPanel({
+  jobs,
+  jobState,
+  onCreateJob,
+}: {
+  jobs: ScheduleJobSummary[];
+  jobState: LoadState;
+  onCreateJob(): Promise<void>;
+}) {
+  return (
+    <div className="job-panel" data-testid="schedule-job-panel">
+      <div className="job-toolbar">
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={jobState === "loading"}
+          onClick={() => onCreateJob()}
+          data-testid="schedule-job-create"
+        >
+          <Play size={16} />
+          异步排考
+        </button>
+        <span>{jobs[0]?.status ?? "无后台作业"}</span>
+      </div>
+      <div className="job-list">
+        {jobs.slice(0, 4).map((job) => (
+          <article key={job.id}>
+            <div>
+              <strong>{job.status}</strong>
+              <span>{job.runId ?? job.id.slice(0, 16)}</span>
+            </div>
+            <div className="progress-track" aria-label={`${job.progress}%`}>
+              <div style={{ width: `${job.progress}%` }} />
+            </div>
+          </article>
+        ))}
+        {!jobs.length ? <p className="muted">后台作业会显示队列、运行进度和生成的运行版本。</p> : null}
+      </div>
+    </div>
+  );
+}
+
+function TeacherAvailabilityPanel({
+  referenceData,
+  teacherState,
+  onSave,
+}: {
+  referenceData: ReferenceDataResponse | null;
+  teacherState: LoadState;
+  onSave(teacherId: string, slotIds: string[]): Promise<void>;
+}) {
+  const teachers = referenceData?.scheduleInput.teachers ?? [];
+  const slots = referenceData?.scheduleInput.time_slots ?? [];
+  const [teacherId, setTeacherId] = useState("");
+  const [slotIds, setSlotIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    const nextTeacher = teachers.find((teacher) => teacher.id === teacherId) ?? teachers[0];
+    setTeacherId(nextTeacher?.id ?? "");
+    setSlotIds(nextTeacher?.unavailable_slot_ids ?? []);
+  }, [teachers, teacherId]);
+
+  function toggleSlot(slotId: string) {
+    setSlotIds((current) => (
+      current.includes(slotId)
+        ? current.filter((item) => item !== slotId)
+        : [...current, slotId]
+    ));
+  }
+
+  return (
+    <div className="teacher-availability" data-testid="teacher-availability-panel">
+      <div className="teacher-toolbar">
+        <label>
+          <span>教师</span>
+          <select
+            value={teacherId}
+            onChange={(event) => {
+              const nextId = event.target.value;
+              const nextTeacher = teachers.find((teacher) => teacher.id === nextId);
+              setTeacherId(nextId);
+              setSlotIds(nextTeacher?.unavailable_slot_ids ?? []);
+            }}
+          >
+            {teachers.map((teacher) => (
+              <option key={teacher.id} value={teacher.id}>{teacher.name}</option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={!teacherId || teacherState === "loading"}
+          onClick={() => onSave(teacherId, slotIds)}
+          data-testid="teacher-availability-save"
+        >
+          <Save size={16} />
+          保存不可用
+        </button>
+      </div>
+      <div className="slot-toggle-grid">
+        {slots.map((slot) => (
+          <label key={slot.id} className={slotIds.includes(slot.id) ? "slot-toggle active" : "slot-toggle"}>
+            <input
+              type="checkbox"
+              checked={slotIds.includes(slot.id)}
+              onChange={() => toggleSlot(slot.id)}
+            />
+            <span>{slot.date} {slot.start_time}-{slot.end_time}</span>
+          </label>
+        ))}
+        {!slots.length ? <p className="muted">加载基础数据后维护教师不可用时段。</p> : null}
       </div>
     </div>
   );
@@ -1103,6 +1453,9 @@ function ScheduleDraftWorkspace({
   onSaveAdjustment,
   onApplySuggestion,
   onMoveAssignment,
+  onLockAssignment,
+  onUnlockAssignment,
+  onRebalanceDraft,
   onPublishDraft,
   onDiscardDraft,
 }: {
@@ -1123,6 +1476,9 @@ function ScheduleDraftWorkspace({
   onSaveAdjustment(): Promise<void>;
   onApplySuggestion(suggestion: ScheduleDraftAdjustmentSuggestion): Promise<void>;
   onMoveAssignment(examTaskId: string, roomId: string, timeSlotId: string): Promise<void>;
+  onLockAssignment(): Promise<void>;
+  onUnlockAssignment(): Promise<void>;
+  onRebalanceDraft(): Promise<void>;
   onPublishDraft(): Promise<void>;
   onDiscardDraft(): Promise<void>;
 }) {
@@ -1136,6 +1492,7 @@ function ScheduleDraftWorkspace({
     assignment.exam_task_id === selectedAssignmentId
   )) ?? null;
   const draftLocked = draft?.draft.status === "published" || draft?.draft.status === "discarded";
+  const assignmentLocked = Boolean(selectedAssignmentId && draft?.lockedExamTaskIds?.includes(selectedAssignmentId));
   const canPublishDraft = draft?.draft.status === "validated" && draft.draft.conflictCount === 0;
 
   useEffect(() => {
@@ -1242,6 +1599,17 @@ function ScheduleDraftWorkspace({
           <div><span>评分</span><strong>{draft?.draft.score ?? "--"}</strong></div>
           <div><span>冲突</span><strong>{draft?.draft.conflictCount ?? "--"}</strong></div>
           <div><span>安排</span><strong>{draft?.draft.assignmentCount ?? "--"}</strong></div>
+          <div><span>锁定</span><strong>{draft?.lockedExamTaskIds?.length ?? 0}</strong></div>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!draft || draftLocked || draftState === "loading"}
+            onClick={onRebalanceDraft}
+            data-testid="draft-rebalance"
+          >
+            <RotateCcw size={17} />
+            局部再平衡
+          </button>
           <button
             type="button"
             className="primary-button"
@@ -1319,6 +1687,7 @@ function ScheduleDraftWorkspace({
                       assignment ? "filled" : "",
                       assignment?.exam_task_id === selectedAssignmentId ? "selected" : "",
                       assignment && assignmentHasConflict(assignment) ? "conflicted" : "",
+                      assignment && draft?.lockedExamTaskIds?.includes(assignment.exam_task_id) ? "locked" : "",
                       dragTargetKey === `${slot.id}-${room.id}` ? "drop-target" : "",
                     ].join(" ")}
                     draggable={Boolean(assignment && !draftLocked)}
@@ -1424,12 +1793,35 @@ function ScheduleDraftWorkspace({
             <button
               type="button"
               className="secondary-button"
-              disabled={draftState === "loading" || draftLocked}
+              disabled={draftState === "loading" || draftLocked || assignmentLocked}
               onClick={onSaveAdjustment}
             >
               <Save size={16} />
               保存调整并校验
             </button>
+            <div className="lock-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={draftState === "loading" || draftLocked || assignmentLocked}
+                onClick={onLockAssignment}
+                data-testid="draft-lock-assignment"
+              >
+                <Lock size={16} />
+                锁定考试
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={draftState === "loading" || draftLocked || !assignmentLocked}
+                onClick={onUnlockAssignment}
+                data-testid="draft-unlock-assignment"
+              >
+                <Unlock size={16} />
+                解锁考试
+              </button>
+              <span data-testid="draft-lock-state">{assignmentLocked ? "已锁定" : "未锁定"}</span>
+            </div>
           </>
         ) : <p className="muted">选择矩阵中的考试卡片后调整时间、考场和监考教师。</p>}
 

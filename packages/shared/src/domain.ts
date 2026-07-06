@@ -309,6 +309,7 @@ export interface ScheduleDraftDetailResponse {
   assignments: ScheduledExam[];
   conflicts: ConflictRecord[];
   changeEvents: ScheduleDraftChangeEvent[];
+  lockedExamTaskIds?: string[];
 }
 
 export interface ScheduleDraftListResponse {
@@ -360,6 +361,44 @@ export interface ScheduleDraftAdjustmentSuggestionsResponse {
   draft: ScheduleDraftSummary;
   examTaskId: string;
   suggestions: ScheduleDraftAdjustmentSuggestion[];
+}
+
+export type ScheduleJobStatus = "queued" | "running" | "completed" | "failed";
+
+export interface ScheduleJobSummary {
+  id: string;
+  status: ScheduleJobStatus;
+  progress: number;
+  runId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduleJobResponse {
+  job: ScheduleJobSummary;
+}
+
+export interface ScheduleJobListResponse {
+  jobs: ScheduleJobSummary[];
+}
+
+export interface PublishedScheduleNotification {
+  id: string;
+  studentGroupId: string;
+  studentGroupName: string;
+  assignmentCount: number;
+  message: string;
+}
+
+export interface PublishedScheduleNotificationsResponse {
+  batch: ExamBatchSummary;
+  run: ScheduleRunSummary;
+  notifications: PublishedScheduleNotification[];
+}
+
+export interface TeacherUnavailableSlotsResponse {
+  teacher: Teacher;
 }
 
 export interface PublishedScheduleAssignmentView {

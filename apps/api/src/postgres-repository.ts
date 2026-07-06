@@ -67,6 +67,8 @@ type DraftRow = typeof scheduleDrafts.$inferSelect;
 type DraftChangeEventRow = typeof draftChangeEvents.$inferSelect;
 
 export class PostgresPlatformRepository implements PlatformRepository {
+  private draftLocks = new Map<string, Set<string>>();
+
   constructor(private readonly client: ExamForgeDbClient) {}
 
   async getDashboard(): Promise<DashboardResponse> {
@@ -576,6 +578,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       assignments,
       conflicts,
       changeEvents: [],
+      lockedExamTaskIds: [],
     };
   }
 
@@ -626,6 +629,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         suggestion: conflict.suggestion,
       })),
       changeEvents: changeRows.map((event) => this.toDraftChangeEvent(event)),
+      lockedExamTaskIds: this.getLockedExamTaskIds(id),
     };
   }
 
@@ -633,13 +637,16 @@ export class PostgresPlatformRepository implements PlatformRepository {
     id: string,
     examTaskId: string,
     patch: Partial<ScheduledExam>,
-  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | "assignment_locked" | null> {
     const current = await this.getScheduleDraft(id);
     if (!current) {
       return null;
     }
     if (current.draft.status === "published" || current.draft.status === "discarded") {
       return "not_editable";
+    }
+    if (this.draftLocks.get(id)?.has(examTaskId)) {
+      return "assignment_locked";
     }
     const index = current.assignments.findIndex((assignment) => (
       assignment.exam_task_id === examTaskId
@@ -780,8 +787,75 @@ export class PostgresPlatformRepository implements PlatformRepository {
       this.getReferenceData(),
     ]);
     return current
-      ? buildDraftAdjustmentSuggestions(referenceData.scheduleInput, current, examTaskId)
+      ? this.draftLocks.get(id)?.has(examTaskId)
+        ? { draft: current.draft, examTaskId, suggestions: [] }
+        : buildDraftAdjustmentSuggestions(referenceData.scheduleInput, current, examTaskId)
       : null;
+  }
+
+  async lockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null> {
+    const current = await this.getScheduleDraft(id);
+    if (!current || !current.assignments.some((assignment) => assignment.exam_task_id === examTaskId)) {
+      return null;
+    }
+    const locks = this.draftLocks.get(id) ?? new Set<string>();
+    locks.add(examTaskId);
+    this.draftLocks.set(id, locks);
+    await this.recordAuditEvent("schedule_draft.assignment_locked", "schedule_draft", id, { examTaskId });
+    return this.withLocks(current);
+  }
+
+  async unlockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null> {
+    const current = await this.getScheduleDraft(id);
+    if (!current || !current.assignments.some((assignment) => assignment.exam_task_id === examTaskId)) {
+      return null;
+    }
+    const locks = this.draftLocks.get(id) ?? new Set<string>();
+    locks.delete(examTaskId);
+    this.draftLocks.set(id, locks);
+    await this.recordAuditEvent("schedule_draft.assignment_unlocked", "schedule_draft", id, { examTaskId });
+    return this.withLocks(current);
+  }
+
+  async rebalanceScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
+    const current = await this.getScheduleDraft(id);
+    if (!current) {
+      return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_editable";
+    }
+
+    const referenceData = await this.getReferenceData();
+    const locked = this.draftLocks.get(id) ?? new Set<string>();
+    let detail = current;
+    const conflictedExamIds = new Set(detail.conflicts.flatMap((conflict) => conflict.affected_ids));
+    for (const assignment of [...detail.assignments]) {
+      if (locked.has(assignment.exam_task_id) || !conflictedExamIds.has(assignment.exam_task_id)) {
+        continue;
+      }
+      const candidate = buildDraftAdjustmentSuggestions(
+        referenceData.scheduleInput,
+        this.withLocks(detail),
+        assignment.exam_task_id,
+      )?.suggestions.find((suggestion) => suggestion.hardConflictCount === 0);
+      if (!candidate) {
+        continue;
+      }
+      const updated = await this.updateScheduleDraftAssignment(id, assignment.exam_task_id, {
+        room_id: candidate.assignment.room_id,
+        time_slot_id: candidate.assignment.time_slot_id,
+        teacher_ids: candidate.assignment.teacher_ids,
+      });
+      if (updated && updated !== "not_editable" && updated !== "assignment_locked") {
+        detail = updated;
+      }
+    }
+    await this.recordAuditEvent("schedule_draft.rebalanced", "schedule_draft", id, {
+      lockedExamTaskIds: [...locked],
+      conflictCount: detail.conflicts.length,
+    });
+    return this.withLocks(detail);
   }
 
   async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {
@@ -1174,6 +1248,17 @@ export class PostgresPlatformRepository implements PlatformRepository {
       entityId,
       payload,
     });
+  }
+
+  private getLockedExamTaskIds(id: string) {
+    return [...(this.draftLocks.get(id) ?? new Set<string>())].sort();
+  }
+
+  private withLocks(detail: ScheduleDraftDetailResponse): ScheduleDraftDetailResponse {
+    return {
+      ...detail,
+      lockedExamTaskIds: this.getLockedExamTaskIds(detail.draft.id),
+    };
   }
 }
 

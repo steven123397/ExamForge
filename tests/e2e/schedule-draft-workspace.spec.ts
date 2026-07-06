@@ -24,9 +24,17 @@ test("方案工作台支持建议应用和矩阵拖拽调整", async ({ page, re
   await expect(page.locator(`[data-exam-task-id="${initialAssignment.exam_task_id}"]`)).toBeVisible();
   await expect(page.getByTestId("draft-suggestion-panel")).toContainText("局部调整建议");
 
+  await page.getByTestId("draft-lock-assignment").click();
+  await expect(page.getByTestId("draft-lock-state")).toContainText("已锁定");
+  await expect(page.getByRole("button", { name: "保存调整并校验" })).toBeDisabled();
+  await page.getByTestId("draft-unlock-assignment").click();
+  await expect(page.getByTestId("draft-lock-state")).toContainText("未锁定");
+
   const applySuggestion = page.getByTestId("draft-suggestion-apply").first();
   await expect(applySuggestion).toBeEnabled();
   await applySuggestion.click();
+  await expect(page.getByText("当前草稿没有硬约束冲突。")).toBeVisible();
+  await page.getByTestId("draft-rebalance").click();
   await expect(page.getByText("当前草稿没有硬约束冲突。")).toBeVisible();
 
   const draftAfterSuggestion = await readDraft(request, createdDraft.draft.id);
@@ -57,6 +65,22 @@ test("方案工作台支持建议应用和矩阵拖拽调整", async ({ page, re
     ));
     return moved ? `${moved.time_slot_id}/${moved.room_id}` : "";
   }).toBe(`${destination.timeSlotId}/${destination.roomId}`);
+});
+
+test("运营台支持异步排考作业和发布通知预览", async ({ page, request }) => {
+  await page.goto("/");
+
+  await page.getByTestId("schedule-job-create").click();
+  await expect(page.getByTestId("schedule-job-panel")).toContainText(/queued|running|completed/);
+
+  const completedRunId = await waitForCompletedJob(request);
+
+  const publishResponse = await request.post(`${apiBase}/api/schedule-runs/${completedRunId}/publish`);
+  expect(publishResponse.ok()).toBeTruthy();
+
+  await page.reload();
+  await page.getByTestId("published-notification-refresh").click();
+  await expect(page.getByTestId("published-notification-list")).toContainText("考试安排已发布");
 });
 
 async function readDraft(
@@ -95,4 +119,21 @@ async function findEmptyDestination(
   }
 
   throw new Error("No empty matrix destination is available.");
+}
+
+async function waitForCompletedJob(request: APIRequestContext) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 8_000) {
+    const jobsResponse = await request.get(`${apiBase}/api/schedule-jobs`);
+    expect(jobsResponse.ok()).toBeTruthy();
+    const payload = await jobsResponse.json() as {
+      jobs: Array<{ status: string; runId: string | null }>;
+    };
+    const runId = payload.jobs.find((job) => job.status === "completed" && job.runId)?.runId;
+    if (runId) {
+      return runId;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error("No completed schedule job was observed.");
 }

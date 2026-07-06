@@ -1,16 +1,19 @@
 import cors from "@fastify/cors";
-import Fastify from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   referenceRecordCreateSchemas,
   referenceRecordUpdateSchemas,
   referenceResourceSchema,
   scheduledExamSchema,
+  type PublishedScheduleNotificationsResponse,
   type PublishedScheduleAudienceResponse,
   type PublishedScheduleResponse,
   type ReferenceDataResponse,
   type ReferenceRecord,
   type ReferenceResource,
+  type ScheduleJobSummary,
 } from "@examforge/shared";
 import type { PlatformRepository } from "./repository.js";
 import { createPlatformRepository } from "./repository-factory.js";
@@ -32,6 +35,7 @@ export function createApp(options: AppOptions = {}) {
   });
   const repository = options.repository ?? createPlatformRepository();
   const scheduler = options.scheduler ?? new PythonSchedulerClient();
+  const scheduleJobs = new Map<string, ScheduleJobSummary>();
 
   app.register(cors, {
     origin: true,
@@ -53,6 +57,9 @@ export function createApp(options: AppOptions = {}) {
   app.post<{ Params: { resource: string } }>(
     "/api/reference-data/:resource/import",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
       const resource = parseReferenceResource(request.params.resource);
       if (!resource) {
         return reply.code(404).send({
@@ -82,6 +89,9 @@ export function createApp(options: AppOptions = {}) {
   app.post<{ Params: { resource: string } }>(
     "/api/reference-data/:resource",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
       const resource = parseReferenceResource(request.params.resource);
       if (!resource) {
         return reply.code(404).send({
@@ -110,6 +120,9 @@ export function createApp(options: AppOptions = {}) {
   app.patch<{ Params: { resource: string; id: string } }>(
     "/api/reference-data/:resource/:id",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
       const resource = parseReferenceResource(request.params.resource);
       if (!resource) {
         return reply.code(404).send({
@@ -146,6 +159,9 @@ export function createApp(options: AppOptions = {}) {
   app.delete<{ Params: { resource: string; id: string } }>(
     "/api/reference-data/:resource/:id",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin"])) {
+        return reply;
+      }
       const resource = parseReferenceResource(request.params.resource);
       if (!resource) {
         return reply.code(404).send({
@@ -166,11 +182,79 @@ export function createApp(options: AppOptions = {}) {
     },
   );
 
-  app.post("/api/schedule-runs", async (_request, reply) => {
+  app.patch<{ Params: { teacherId: string } }>(
+    "/api/teachers/:teacherId/unavailable-slots",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
+      const parsed = z.object({
+        unavailable_slot_ids: z.array(z.string()).max(200),
+      }).safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: "invalid_teacher_unavailable_slots",
+          message: "Teacher unavailable slots payload is invalid.",
+          issues: parsed.error.issues,
+        });
+      }
+      const teacher = await repository.updateReferenceRecord("teachers", request.params.teacherId, {
+        unavailable_slot_ids: parsed.data.unavailable_slot_ids,
+      });
+      if (!teacher) {
+        return reply.code(404).send({
+          error: "teacher_not_found",
+          message: `Teacher ${request.params.teacherId} does not exist.`,
+        });
+      }
+      return { teacher };
+    },
+  );
+
+  app.post("/api/schedule-runs", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin", "operator"])) {
+      return reply;
+    }
     const referenceData = await repository.getReferenceData();
     const result = await scheduler.solve(referenceData.scheduleInput);
     const response = await repository.createScheduleRun(result);
     return reply.code(201).send(response);
+  });
+
+  app.post("/api/schedule-jobs", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin", "operator"])) {
+      return reply;
+    }
+    const now = new Date().toISOString();
+    const job: ScheduleJobSummary = {
+      id: `job-${randomUUID()}`,
+      status: "queued",
+      progress: 0,
+      runId: null,
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    scheduleJobs.set(job.id, job);
+    setTimeout(() => {
+      void runScheduleJob(job.id);
+    }, 0);
+    return reply.code(202).send({ job });
+  });
+
+  app.get("/api/schedule-jobs", async () => ({
+    jobs: [...scheduleJobs.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
+  }));
+
+  app.get<{ Params: { id: string } }>("/api/schedule-jobs/:id", async (request, reply) => {
+    const job = scheduleJobs.get(request.params.id);
+    if (!job) {
+      return reply.code(404).send({
+        error: "schedule_job_not_found",
+        message: `Schedule job ${request.params.id} does not exist.`,
+      });
+    }
+    return { job };
   });
 
   app.get("/api/schedule-runs", async () => repository.listScheduleRuns());
@@ -178,6 +262,9 @@ export function createApp(options: AppOptions = {}) {
   app.post<{ Params: { id: string } }>(
     "/api/schedule-runs/:id/drafts",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
       const draft = await repository.createScheduleDraftFromRun(request.params.id);
       if (!draft) {
         return reply.code(404).send({
@@ -205,6 +292,9 @@ export function createApp(options: AppOptions = {}) {
   app.patch<{ Params: { id: string; examTaskId: string } }>(
     "/api/schedule-drafts/:id/assignments/:examTaskId",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
       const parsed = scheduledExamSchema
         .omit({ exam_task_id: true })
         .partial()
@@ -229,6 +319,12 @@ export function createApp(options: AppOptions = {}) {
           message: "Schedule draft is already published or discarded.",
         });
       }
+      if (draft === "assignment_locked") {
+        return reply.code(409).send({
+          error: "schedule_draft_assignment_locked",
+          message: "Schedule draft assignment is locked.",
+        });
+      }
       if (!draft) {
         return reply.code(404).send({
           error: "schedule_draft_assignment_not_found",
@@ -242,6 +338,9 @@ export function createApp(options: AppOptions = {}) {
   app.post<{ Params: { id: string } }>(
     "/api/schedule-drafts/:id/validate",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
       const draft = await repository.validateScheduleDraft(request.params.id);
       if (!draft) {
         return reply.code(404).send({
@@ -281,9 +380,69 @@ export function createApp(options: AppOptions = {}) {
     },
   );
 
+  app.post<{ Params: { id: string; examTaskId: string } }>(
+    "/api/schedule-drafts/:id/assignments/:examTaskId/lock",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
+      const draft = await repository.lockScheduleDraftAssignment(request.params.id, request.params.examTaskId);
+      if (!draft) {
+        return reply.code(404).send({
+          error: "schedule_draft_assignment_not_found",
+          message: "Schedule draft or assignment does not exist.",
+        });
+      }
+      return draft;
+    },
+  );
+
+  app.post<{ Params: { id: string; examTaskId: string } }>(
+    "/api/schedule-drafts/:id/assignments/:examTaskId/unlock",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
+      const draft = await repository.unlockScheduleDraftAssignment(request.params.id, request.params.examTaskId);
+      if (!draft) {
+        return reply.code(404).send({
+          error: "schedule_draft_assignment_not_found",
+          message: "Schedule draft or assignment does not exist.",
+        });
+      }
+      return draft;
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/schedule-drafts/:id/rebalance",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
+      const draft = await repository.rebalanceScheduleDraft(request.params.id);
+      if (!draft) {
+        return reply.code(404).send({
+          error: "schedule_draft_not_found",
+          message: `Schedule draft ${request.params.id} does not exist.`,
+        });
+      }
+      if (draft === "not_editable") {
+        return reply.code(409).send({
+          error: "schedule_draft_not_editable",
+          message: "Schedule draft is already published or discarded.",
+        });
+      }
+      return draft;
+    },
+  );
+
   app.post<{ Params: { id: string } }>(
     "/api/schedule-drafts/:id/publish",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin"])) {
+        return reply;
+      }
       const published = await repository.publishScheduleDraft(request.params.id);
       if (!published) {
         return reply.code(404).send({
@@ -310,6 +469,9 @@ export function createApp(options: AppOptions = {}) {
   app.post<{ Params: { id: string } }>(
     "/api/schedule-drafts/:id/discard",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
       const discarded = await repository.discardScheduleDraft(request.params.id);
       if (!discarded) {
         return reply.code(404).send({
@@ -357,6 +519,9 @@ export function createApp(options: AppOptions = {}) {
   app.post<{ Params: { id: string } }>(
     "/api/schedule-runs/:id/publish",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin"])) {
+        return reply;
+      }
       const published = await repository.publishScheduleRun(request.params.id);
       if (!published) {
         return reply.code(404).send({
@@ -377,6 +542,36 @@ export function createApp(options: AppOptions = {}) {
       });
     }
     return published;
+  });
+
+  app.get("/api/published-schedule/export.csv", async (_request, reply) => {
+    const [referenceData, published] = await Promise.all([
+      repository.getReferenceData(),
+      repository.getPublishedSchedule(),
+    ]);
+    if (!published) {
+      return reply.code(404).send({
+        error: "published_schedule_not_found",
+        message: "No schedule has been published.",
+      });
+    }
+    return reply
+      .header("content-type", "text/csv; charset=utf-8")
+      .send(buildPublishedScheduleCsv(referenceData, published));
+  });
+
+  app.get("/api/published-schedule/notifications", async (_request, reply) => {
+    const [referenceData, published] = await Promise.all([
+      repository.getReferenceData(),
+      repository.getPublishedSchedule(),
+    ]);
+    if (!published) {
+      return reply.code(404).send({
+        error: "published_schedule_not_found",
+        message: "No schedule has been published.",
+      });
+    }
+    return buildPublishedScheduleNotifications(referenceData, published);
   });
 
   app.get<{ Params: { teacherId: string } }>(
@@ -441,9 +636,12 @@ export function createApp(options: AppOptions = {}) {
     },
   );
 
-  app.post("/api/published-schedule/rollback", async () => (
-    repository.rollbackPublishedSchedule()
-  ));
+  app.post("/api/published-schedule/rollback", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin"])) {
+      return reply;
+    }
+    return repository.rollbackPublishedSchedule();
+  });
 
   app.get<{ Params: { id: string } }>("/api/schedule-runs/:id", async (request, reply) => {
     const response = await repository.getScheduleRun(request.params.id);
@@ -457,6 +655,63 @@ export function createApp(options: AppOptions = {}) {
   });
 
   return app;
+
+  async function runScheduleJob(id: string) {
+    const current = scheduleJobs.get(id);
+    if (!current) {
+      return;
+    }
+    scheduleJobs.set(id, {
+      ...current,
+      status: "running",
+      progress: 35,
+      updatedAt: new Date().toISOString(),
+    });
+    try {
+      const referenceData = await repository.getReferenceData();
+      const result = await scheduler.solve(referenceData.scheduleInput);
+      const response = await repository.createScheduleRun(result);
+      scheduleJobs.set(id, {
+        ...scheduleJobs.get(id)!,
+        status: "completed",
+        progress: 100,
+        runId: response.run.id,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      scheduleJobs.set(id, {
+        ...scheduleJobs.get(id)!,
+        status: "failed",
+        progress: 100,
+        error: error instanceof Error ? error.message : "Schedule job failed.",
+        updatedAt: new Date().toISOString(),
+      });
+    }
+  }
+}
+
+type ExamForgeRole = "admin" | "operator" | "viewer";
+
+function getRequestRole(request: FastifyRequest): ExamForgeRole {
+  const raw = request.headers["x-examforge-role"];
+  const role = Array.isArray(raw) ? raw[0] : raw;
+  return role === "operator" || role === "viewer" ? role : "admin";
+}
+
+function requireRole(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  allowed: ExamForgeRole[],
+) {
+  const role = getRequestRole(request);
+  if (allowed.includes(role)) {
+    return true;
+  }
+  reply.code(403).send({
+    error: "permission_denied",
+    message: `Role ${role} is not allowed to perform this operation.`,
+  });
+  return false;
 }
 
 function parseReferenceResource(value: string): ReferenceResource | null {
@@ -517,4 +772,60 @@ function buildPublishedScheduleAudience(
     },
     assignments,
   };
+}
+
+function buildPublishedScheduleNotifications(
+  referenceData: ReferenceDataResponse,
+  published: PublishedScheduleResponse,
+): PublishedScheduleNotificationsResponse {
+  const groups = new Map(referenceData.scheduleInput.student_groups.map((group) => [group.id, group]));
+  const tasks = new Map(referenceData.scheduleInput.exam_tasks.map((task) => [task.id, task]));
+  const counts = new Map<string, number>();
+  for (const assignment of published.result.assignments) {
+    const task = tasks.get(assignment.exam_task_id);
+    for (const groupId of task?.student_group_ids ?? []) {
+      counts.set(groupId, (counts.get(groupId) ?? 0) + 1);
+    }
+  }
+  return {
+    batch: published.batch,
+    run: published.run,
+    notifications: [...counts.entries()].map(([studentGroupId, assignmentCount]) => {
+      const group = groups.get(studentGroupId);
+      return {
+        id: `notice-${published.run.id}-${studentGroupId}`,
+        studentGroupId,
+        studentGroupName: group?.name ?? studentGroupId,
+        assignmentCount,
+        message: `${group?.name ?? studentGroupId} 的 ${assignmentCount} 场考试安排已发布，请及时查看最新考试时间和考场。`,
+      };
+    }),
+  };
+}
+
+function buildPublishedScheduleCsv(
+  referenceData: ReferenceDataResponse,
+  published: PublishedScheduleResponse,
+) {
+  const courses = new Map(referenceData.scheduleInput.courses.map((course) => [course.id, course]));
+  const rooms = new Map(referenceData.scheduleInput.rooms.map((room) => [room.id, room]));
+  const slots = new Map(referenceData.scheduleInput.time_slots.map((slot) => [slot.id, slot]));
+  const teachers = new Map(referenceData.scheduleInput.teachers.map((teacher) => [teacher.id, teacher]));
+  const tasks = new Map(referenceData.scheduleInput.exam_tasks.map((task) => [task.id, task]));
+  const rows = [["course", "time_slot", "room", "teachers"]];
+  for (const assignment of published.result.assignments) {
+    const task = tasks.get(assignment.exam_task_id);
+    const slot = slots.get(assignment.time_slot_id);
+    rows.push([
+      csvCell(task ? courses.get(task.course_id)?.name ?? task.course_id : assignment.exam_task_id),
+      csvCell(slot ? `${slot.date} ${slot.start_time}-${slot.end_time}` : assignment.time_slot_id),
+      csvCell(rooms.get(assignment.room_id)?.name ?? assignment.room_id),
+      csvCell(assignment.teacher_ids.map((id) => teachers.get(id)?.name ?? id).join("、")),
+    ]);
+  }
+  return rows.map((row) => row.join(",")).join("\n");
+}
+
+function csvCell(value: string) {
+  return `"${value.replaceAll("\"", "\"\"")}"`;
 }

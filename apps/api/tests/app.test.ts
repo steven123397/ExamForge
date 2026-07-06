@@ -284,6 +284,9 @@ describe("ExamForge API", () => {
         validateScheduleDraft: (id) => repository.validateScheduleDraft(id),
         compareScheduleDraft: (id) => repository.compareScheduleDraft(id),
         suggestScheduleDraftAssignment: (id, examTaskId) => repository.suggestScheduleDraftAssignment(id, examTaskId),
+        lockScheduleDraftAssignment: (id, examTaskId) => repository.lockScheduleDraftAssignment(id, examTaskId),
+        unlockScheduleDraftAssignment: (id, examTaskId) => repository.unlockScheduleDraftAssignment(id, examTaskId),
+        rebalanceScheduleDraft: (id) => repository.rebalanceScheduleDraft(id),
         publishScheduleDraft: (id) => repository.publishScheduleDraft(id),
         discardScheduleDraft: (id) => repository.discardScheduleDraft(id),
       },
@@ -658,4 +661,168 @@ describe("ExamForge API", () => {
 
     await app.close();
   });
+
+  it("creates asynchronous schedule jobs and exposes progress until a run is created", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-jobs",
+    });
+    assert.equal(createResponse.statusCode, 202);
+    const created = createResponse.json();
+    assert.equal(created.job.status, "queued");
+    assert.equal(created.job.progress, 0);
+
+    await waitFor(async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/schedule-jobs/${created.job.id}`,
+      });
+      const payload = response.json();
+      return payload.job.status === "completed" && payload.job.runId;
+    });
+
+    const jobResponse = await app.inject({
+      method: "GET",
+      url: `/api/schedule-jobs/${created.job.id}`,
+    });
+    assert.equal(jobResponse.statusCode, 200);
+    assert.equal(jobResponse.json().job.status, "completed");
+    assert.equal(jobResponse.json().job.progress, 100);
+
+    const runResponse = await app.inject({
+      method: "GET",
+      url: `/api/schedule-runs/${jobResponse.json().job.runId}`,
+    });
+    assert.equal(runResponse.statusCode, 200);
+
+    await app.close();
+  });
+
+  it("locks draft assignments and rebalances only unlocked conflicted exams", async () => {
+    const app = createApp({ scheduler: new DraftWorkflowScheduler() });
+
+    const runResponse = await app.inject({ method: "POST", url: "/api/schedule-runs" });
+    const run = runResponse.json();
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${run.run.id}/drafts`,
+    });
+    const draft = draftResponse.json();
+
+    const lockResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-data-structures/lock`,
+    });
+    assert.equal(lockResponse.statusCode, 200);
+    assert.deepEqual(lockResponse.json().lockedExamTaskIds, ["e-data-structures"]);
+
+    const lockedUpdateResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-data-structures`,
+      payload: {
+        room_id: "r-lab-1",
+      },
+    });
+    assert.equal(lockedUpdateResponse.statusCode, 409);
+    assert.equal(lockedUpdateResponse.json().error, "schedule_draft_assignment_locked");
+
+    await app.inject({
+      method: "PATCH",
+      url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database`,
+      payload: {
+        room_id: "r-101",
+        time_slot_id: "s-001",
+        teacher_ids: ["t-zhang"],
+      },
+    });
+
+    const rebalanceResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/rebalance`,
+    });
+    assert.equal(rebalanceResponse.statusCode, 200);
+    assert.equal(rebalanceResponse.json().draft.status, "validated");
+    assert.equal(rebalanceResponse.json().conflicts.length, 0);
+    assert.deepEqual(rebalanceResponse.json().lockedExamTaskIds, ["e-data-structures"]);
+
+    const unlockResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-data-structures/unlock`,
+    });
+    assert.equal(unlockResponse.statusCode, 200);
+    assert.deepEqual(unlockResponse.json().lockedExamTaskIds, []);
+
+    await app.close();
+  });
+
+  it("enforces roles, updates teacher unavailable slots, previews notifications, and exports CSV", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const forbiddenResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: {
+        "x-examforge-role": "viewer",
+      },
+    });
+    assert.equal(forbiddenResponse.statusCode, 403);
+    assert.equal(forbiddenResponse.json().error, "permission_denied");
+
+    const unavailableResponse = await app.inject({
+      method: "PATCH",
+      url: "/api/teachers/t-zhang/unavailable-slots",
+      headers: {
+        "x-examforge-role": "operator",
+      },
+      payload: {
+        unavailable_slot_ids: ["s-002", "s-004"],
+      },
+    });
+    assert.equal(unavailableResponse.statusCode, 200);
+    assert.deepEqual(unavailableResponse.json().teacher.unavailable_slot_ids, ["s-002", "s-004"]);
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: {
+        "x-examforge-role": "operator",
+      },
+    });
+    const created = createResponse.json();
+    await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${created.run.id}/publish`,
+    });
+
+    const notificationsResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/notifications",
+    });
+    assert.equal(notificationsResponse.statusCode, 200);
+    assert.ok(notificationsResponse.json().notifications.length > 0);
+    assert.match(notificationsResponse.json().notifications[0].message, /考试安排已发布/);
+
+    const exportResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/export.csv",
+    });
+    assert.equal(exportResponse.statusCode, 200);
+    assert.match(exportResponse.headers["content-type"] as string, /text\/csv/);
+    assert.match(exportResponse.body, /course,time_slot,room,teachers/);
+
+    await app.close();
+  });
 });
+
+async function waitFor(assertion: () => Promise<boolean>, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await assertion()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("Timed out waiting for condition.");
+}

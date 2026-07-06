@@ -60,13 +60,16 @@ export interface PlatformRepository {
     id: string,
     examTaskId: string,
     patch: Partial<ScheduleResult["assignments"][number]>,
-  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | "assignment_locked" | null>;
   validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null>;
   compareScheduleDraft(id: string): Promise<ScheduleDraftComparisonResponse | null>;
   suggestScheduleDraftAssignment(
     id: string,
     examTaskId: string,
   ): Promise<ScheduleDraftAdjustmentSuggestionsResponse | null>;
+  lockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null>;
+  unlockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null>;
+  rebalanceScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
   publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null>;
   discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null>;
   close?(): Promise<void>;
@@ -75,6 +78,7 @@ export interface PlatformRepository {
 export class InMemoryPlatformRepository implements PlatformRepository {
   private runs = new Map<string, ScheduleRunResponse>();
   private drafts = new Map<string, ScheduleDraftDetailResponse>();
+  private draftLocks = new Map<string, Set<string>>();
   private auditEvents: AuditEventSummary[] = [];
   private batch = structuredClone(demoBatch);
   private publishedRunId: string | null = null;
@@ -263,8 +267,10 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       assignments,
       conflicts,
       changeEvents: [],
+      lockedExamTaskIds: [],
     };
     this.drafts.set(draftId, detail);
+    this.draftLocks.set(draftId, new Set());
     this.recordAuditEvent("schedule_draft.created", "schedule_draft", draftId, {
       sourceRunId: id,
       assignmentCount: assignments.length,
@@ -282,20 +288,24 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   }
 
   async getScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null> {
-    return this.drafts.get(id) ?? null;
+    const draft = this.drafts.get(id);
+    return draft ? this.withLocks(draft) : null;
   }
 
   async updateScheduleDraftAssignment(
     id: string,
     examTaskId: string,
     patch: Partial<ScheduleResult["assignments"][number]>,
-  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | "assignment_locked" | null> {
     const current = this.drafts.get(id);
     if (!current) {
       return null;
     }
     if (current.draft.status === "published" || current.draft.status === "discarded") {
       return "not_editable";
+    }
+    if (this.draftLocks.get(id)?.has(examTaskId)) {
+      return "assignment_locked";
     }
     const index = current.assignments.findIndex((assignment) => (
       assignment.exam_task_id === examTaskId
@@ -335,6 +345,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       assignments,
       conflicts,
       changeEvents: [...current.changeEvents, changeEvent],
+      lockedExamTaskIds: this.getLockedExamTaskIds(id),
     };
     this.drafts.set(id, detail);
     this.recordAuditEvent("schedule_draft.assignment_updated", "schedule_draft", id, {
@@ -363,6 +374,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
         updatedAt: now,
       },
       conflicts,
+      lockedExamTaskIds: this.getLockedExamTaskIds(id),
     };
     this.drafts.set(id, detail);
     this.recordAuditEvent("schedule_draft.validated", "schedule_draft", id, {
@@ -389,7 +401,78 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     if (!current) {
       return null;
     }
-    return buildDraftAdjustmentSuggestions(this.scheduleInput, current, examTaskId);
+    if (this.draftLocks.get(id)?.has(examTaskId)) {
+      return {
+        draft: current.draft,
+        examTaskId,
+        suggestions: [],
+      };
+    }
+    return buildDraftAdjustmentSuggestions(this.scheduleInput, this.withLocks(current), examTaskId);
+  }
+
+  async lockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null> {
+    const current = this.drafts.get(id);
+    if (!current || !current.assignments.some((assignment) => assignment.exam_task_id === examTaskId)) {
+      return null;
+    }
+    const locks = this.draftLocks.get(id) ?? new Set<string>();
+    locks.add(examTaskId);
+    this.draftLocks.set(id, locks);
+    this.recordAuditEvent("schedule_draft.assignment_locked", "schedule_draft", id, { examTaskId });
+    return this.withLocks(current);
+  }
+
+  async unlockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null> {
+    const current = this.drafts.get(id);
+    if (!current || !current.assignments.some((assignment) => assignment.exam_task_id === examTaskId)) {
+      return null;
+    }
+    const locks = this.draftLocks.get(id) ?? new Set<string>();
+    locks.delete(examTaskId);
+    this.draftLocks.set(id, locks);
+    this.recordAuditEvent("schedule_draft.assignment_unlocked", "schedule_draft", id, { examTaskId });
+    return this.withLocks(current);
+  }
+
+  async rebalanceScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
+    const current = this.drafts.get(id);
+    if (!current) {
+      return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_editable";
+    }
+
+    let detail = current;
+    const locked = this.draftLocks.get(id) ?? new Set<string>();
+    const conflictedExamIds = new Set(detail.conflicts.flatMap((conflict) => conflict.affected_ids));
+    for (const assignment of [...detail.assignments]) {
+      if (locked.has(assignment.exam_task_id) || !conflictedExamIds.has(assignment.exam_task_id)) {
+        continue;
+      }
+      const candidate = buildDraftAdjustmentSuggestions(
+        this.scheduleInput,
+        this.withLocks(detail),
+        assignment.exam_task_id,
+      )?.suggestions.find((suggestion) => suggestion.hardConflictCount === 0);
+      if (!candidate) {
+        continue;
+      }
+      const updated = await this.updateScheduleDraftAssignment(id, assignment.exam_task_id, {
+        room_id: candidate.assignment.room_id,
+        time_slot_id: candidate.assignment.time_slot_id,
+        teacher_ids: candidate.assignment.teacher_ids,
+      });
+      if (updated && updated !== "not_editable" && updated !== "assignment_locked") {
+        detail = updated;
+      }
+    }
+    this.recordAuditEvent("schedule_draft.rebalanced", "schedule_draft", id, {
+      lockedExamTaskIds: [...locked],
+      conflictCount: detail.conflicts.length,
+    });
+    return this.withLocks(detail);
   }
 
   async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {
@@ -434,6 +517,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     const detail = {
       ...current,
       draft,
+      lockedExamTaskIds: this.getLockedExamTaskIds(id),
     };
     this.drafts.set(id, detail);
     this.recordAuditEvent("schedule_draft.published", "schedule_draft", id, {
@@ -466,6 +550,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     this.drafts.set(id, {
       ...current,
       draft,
+      lockedExamTaskIds: this.getLockedExamTaskIds(id),
     });
     this.recordAuditEvent("schedule_draft.discarded", "schedule_draft", id, {
       sourceRunId: current.draft.sourceRunId,
@@ -514,6 +599,17 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       "exam-tasks": this.scheduleInput.exam_tasks,
     };
     return collections[resource] as Array<ReferenceRecord>;
+  }
+
+  private getLockedExamTaskIds(id: string) {
+    return [...(this.draftLocks.get(id) ?? new Set<string>())].sort();
+  }
+
+  private withLocks(detail: ScheduleDraftDetailResponse): ScheduleDraftDetailResponse {
+    return {
+      ...detail,
+      lockedExamTaskIds: this.getLockedExamTaskIds(detail.draft.id),
+    };
   }
 
   private recordAuditEvent(
