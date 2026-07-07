@@ -55,6 +55,7 @@
 - 变更：第三版第一阶段已完成 Web 运营台拆分，新增 `apps/web/lib/api-client.ts`、`roles.ts`、`query-keys.ts`、`query-client-provider.tsx`，并引入 `@tanstack/react-query`。
 - 变更：运营台业务面已拆入 `apps/web/features/`，覆盖异步作业、已发布查询、基础数据管理、教师不可用维护、运行历史/审计和草稿工作台；共享 `LoadState`、指标卡和面板壳已迁入 `apps/web/components/shared/`。
 - 变更：`apps/web/app/operations-console.tsx` 从约 2397 行收敛到 851 行，主组件不再直接发起 `fetch` 请求，主要承担页面布局、角色演示、跨面板状态和动作编排。
+- 变更：已新增 `docs/plan/第三版第二阶段计划.md`，将第二阶段收敛为 PostgreSQL 集成测试、迁移从空库验证、scheduler CLI 契约测试和 API service 提取；软约束入 CP-SAT 留到后续独立阶段。
 - 验证：PostgreSQL 运行路径已完成真实验证，包括按顺序执行 `packages/db/drizzle/*.sql`、运行 `npm run seed --workspace @examforge/db`、API 带 `DATABASE_URL` 读取 dashboard、发起一次排考运行并写入 `schedule_runs`、`scheduled_exams` 和 `audit_events`。
 - 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `10 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
 - 验证：真实 PostgreSQL API 路径已验证 `POST /api/schedule-runs`、`POST /api/schedule-runs/:id/publish`、`GET /api/published-schedule`、`POST /api/published-schedule/rollback` 和回滚后的 `404` 查询结果；数据库已写入对应 `schedule_run.created`、`schedule_run.published` 和 `schedule_run.rollback` 审计事件。
@@ -93,3 +94,4 @@
 - [ ] 执行全量代码审查，并将审查发现写入 `docs/status/code_review_status.md`。
 - [x] 执行第三版第一阶段：完成 Web 运营台拆分、API client 抽取和 TanStack Query 引入。
 - [ ] 执行第三版第二阶段：补齐 PostgreSQL 集成测试、迁移验证、scheduler CLI 契约测试和 API service 提取。
+- [ ] 执行第三版第三阶段：将软约束纳入 CP-SAT 优化目标，并补齐权重影响解选择的调度器测试。
