@@ -4,10 +4,15 @@ import {
   auditEvents,
   conflictRecords,
   createDbClient,
+  draftExamInvigilators,
+  draftScheduledExams,
+  examTaskStudentGroups,
   runMigrations,
   scheduleJobs,
+  scheduledExamInvigilators,
   scheduledExams,
   seedDemoData,
+  teacherUnavailableSlots,
   type ExamForgeDbClient,
 } from "@examforge/db";
 import type { ScheduleInput, ScheduleResult } from "@examforge/shared";
@@ -52,6 +57,13 @@ describe("PostgreSQL platform integration", () => {
     assert.equal(dashboardResponse.statusCode, 200);
     assert.equal(dashboardResponse.json().metrics.examTaskCount, 6);
 
+    const [taskGroupRows, unavailableRows] = await Promise.all([
+      dbClient.db.select().from(examTaskStudentGroups),
+      dbClient.db.select().from(teacherUnavailableSlots),
+    ]);
+    assert.ok(taskGroupRows.length > 0);
+    assert.ok(unavailableRows.length > 0);
+
     const createResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
@@ -60,13 +72,17 @@ describe("PostgreSQL platform integration", () => {
     assert.equal(createResponse.statusCode, 201);
     const created = createResponse.json();
 
-    const [assignmentRows, conflictRows, auditRows] = await Promise.all([
+    const [assignmentRows, invigilatorRows, conflictRows, auditRows] = await Promise.all([
       dbClient.db.select().from(scheduledExams).where(eq(scheduledExams.runId, created.run.id)),
+      dbClient.db
+        .select()
+        .from(scheduledExamInvigilators),
       dbClient.db.select().from(conflictRecords).where(eq(conflictRecords.runId, created.run.id)),
       dbClient.db.select().from(auditEvents).where(eq(auditEvents.entityId, created.run.id)),
     ]);
 
     assert.equal(assignmentRows.length, 2);
+    assert.equal(invigilatorRows.length, 2);
     assert.equal(conflictRows.length, 1);
     assert.ok(auditRows.some((event) => event.action === "schedule_run.created"));
 
@@ -116,6 +132,10 @@ describe("PostgreSQL platform integration", () => {
     assert.equal(draftResponse.statusCode, 201);
     const draft = draftResponse.json();
     assert.equal(draft.draft.status, "validated");
+    const initialDraftInvigilators = await dbClient.db
+      .select()
+      .from(draftExamInvigilators);
+    assert.equal(initialDraftInvigilators.length, 2);
 
     const conflictResponse = await app.inject({
       method: "PATCH",
@@ -152,6 +172,15 @@ describe("PostgreSQL platform integration", () => {
     assert.equal(repairResponse.statusCode, 200);
     assert.equal(repairResponse.json().draft.status, "validated");
     assert.equal(repairResponse.json().conflicts.length, 0);
+    const [databaseDraftAssignment] = await dbClient.db
+      .select()
+      .from(draftScheduledExams)
+      .where(eq(draftScheduledExams.examTaskId, "e-database"));
+    const repairedInvigilators = await dbClient.db
+      .select()
+      .from(draftExamInvigilators)
+      .where(eq(draftExamInvigilators.draftScheduledExamId, databaseDraftAssignment.id));
+    assert.deepEqual(repairedInvigilators.map((row) => row.teacherId), ["t-li"]);
 
     const publishResponse = await app.inject({
       method: "POST",
@@ -161,6 +190,10 @@ describe("PostgreSQL platform integration", () => {
     assert.equal(publishResponse.statusCode, 200);
     assert.equal(publishResponse.json().batch.status, "published");
     assert.equal(publishResponse.json().result.assignments.length, 2);
+    const publishedInvigilators = await dbClient.db
+      .select()
+      .from(scheduledExamInvigilators);
+    assert.equal(publishedInvigilators.length, 4);
 
     await app.close();
     client = null;

@@ -5,9 +5,11 @@ import {
   courses,
   departments,
   examBatches,
+  examTaskStudentGroups,
   examTasks,
   rooms,
   studentGroups,
+  teacherUnavailableSlots,
   teachers,
   timeSlots,
 } from "./schema.js";
@@ -123,6 +125,32 @@ export async function seedDemoData(client: ExamForgeDbClient): Promise<void> {
         })),
       )
       .onConflictDoNothing();
+
+    const examTaskStudentGroupRows = demoScheduleInput.exam_tasks.flatMap((task) => (
+      task.student_group_ids.map((studentGroupId) => ({
+        examTaskId: task.id,
+        studentGroupId,
+      }))
+    ));
+    if (examTaskStudentGroupRows.length > 0) {
+      await tx
+        .insert(examTaskStudentGroups)
+        .values(examTaskStudentGroupRows)
+        .onConflictDoNothing();
+    }
+
+    const teacherUnavailableSlotRows = demoScheduleInput.teachers.flatMap((teacher) => (
+      teacher.unavailable_slot_ids.map((timeSlotId) => ({
+        teacherId: teacher.id,
+        timeSlotId,
+      }))
+    ));
+    if (teacherUnavailableSlotRows.length > 0) {
+      await tx
+        .insert(teacherUnavailableSlots)
+        .values(teacherUnavailableSlotRows)
+        .onConflictDoNothing();
+    }
   });
 }
 

@@ -758,29 +758,35 @@ export function validateReferenceRecord(
   record: ReferenceRecord,
   scheduleInput: ReferenceDataResponse["scheduleInput"],
 ) {
-  if (resource !== "exam-tasks") {
-    return;
-  }
-
-  const task = record as ReferenceDataResponse["scheduleInput"]["exam_tasks"][number];
-  const courseIds = new Set(scheduleInput.courses.map((course) => course.id));
-  const studentGroupIds = new Set(scheduleInput.student_groups.map((group) => group.id));
-  const timeSlotIds = new Set(scheduleInput.time_slots.map((slot) => slot.id));
   const issues: string[] = [];
 
-  if (!courseIds.has(task.course_id)) {
-    issues.push(`Course ${task.course_id} does not exist.`);
-  }
-
-  for (const groupId of task.student_group_ids) {
-    if (!studentGroupIds.has(groupId)) {
-      issues.push(`Student group ${groupId} does not exist.`);
+  if (resource === "rooms") {
+    const room = record as ReferenceDataResponse["scheduleInput"]["rooms"][number];
+    if (!/^[a-z][a-z0-9-]{1,63}$/.test(room.building_id)) {
+      issues.push("Room building_id must be a lowercase slug between 2 and 64 characters.");
     }
   }
 
-  for (const slotId of task.allowed_slot_ids) {
-    if (!timeSlotIds.has(slotId)) {
-      issues.push(`Time slot ${slotId} does not exist.`);
+  if (resource === "exam-tasks") {
+    const task = record as ReferenceDataResponse["scheduleInput"]["exam_tasks"][number];
+    const courseIds = new Set(scheduleInput.courses.map((course) => course.id));
+    const studentGroupIds = new Set(scheduleInput.student_groups.map((group) => group.id));
+    const timeSlotIds = new Set(scheduleInput.time_slots.map((slot) => slot.id));
+
+    if (!courseIds.has(task.course_id)) {
+      issues.push(`Course ${task.course_id} does not exist.`);
+    }
+
+    for (const groupId of task.student_group_ids) {
+      if (!studentGroupIds.has(groupId)) {
+        issues.push(`Student group ${groupId} does not exist.`);
+      }
+    }
+
+    for (const slotId of task.allowed_slot_ids) {
+      if (!timeSlotIds.has(slotId)) {
+        issues.push(`Time slot ${slotId} does not exist.`);
+      }
     }
   }
 

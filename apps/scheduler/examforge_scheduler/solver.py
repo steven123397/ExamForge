@@ -12,6 +12,7 @@ from .models import (
     ScoreBreakdown,
     SolveStatus,
     SolverStatistics,
+    Teacher,
     validate_schedule_input,
 )
 from .scoring import LOW_ROOM_UTILIZATION_THRESHOLD, calculate_score
@@ -53,13 +54,16 @@ def solve_schedule(schedule_input: ScheduleInput) -> ScheduleResult:
     missing_candidate_conflicts = _missing_candidate_conflicts(
         schedule_input, candidates_by_task
     )
-    if missing_candidate_conflicts:
+    fixed_assignment_conflicts = _fixed_assignment_conflicts(
+        schedule_input, candidates_by_task
+    )
+    if missing_candidate_conflicts or fixed_assignment_conflicts:
         return _build_result(
             schedule_input=schedule_input,
             status=SolveStatus.INFEASIBLE,
             started_at=started_at,
             attempted_assignments=attempted_assignments,
-            conflicts=missing_candidate_conflicts,
+            conflicts=missing_candidate_conflicts + fixed_assignment_conflicts,
         )
 
     model = cp_model.CpModel()
@@ -73,6 +77,7 @@ def solve_schedule(schedule_input: ScheduleInput) -> ScheduleResult:
     _add_exam_assignment_constraints(model, candidates_by_task, variables)
     _add_room_time_constraints(model, variables)
     _add_student_group_constraints(schedule_input, model, variables)
+    _add_fixed_assignment_constraints(schedule_input, model, variables)
     objective_terms = _build_soft_objective_terms(schedule_input, model, variables)
     if objective_terms:
         model.Minimize(sum(objective_terms))
@@ -181,6 +186,36 @@ def _missing_candidate_conflicts(
     return tuple(conflicts)
 
 
+def _fixed_assignment_conflicts(
+    schedule_input: ScheduleInput,
+    candidates_by_task: dict[str, tuple[_Candidate, ...]],
+) -> tuple[ConflictRecord, ...]:
+    conflicts: list[ConflictRecord] = []
+    for fixed_assignment in schedule_input.fixed_assignments:
+        expected_candidate = _Candidate(
+            exam_task_id=fixed_assignment.exam_task_id,
+            room_id=fixed_assignment.room_id,
+            slot_id=fixed_assignment.time_slot_id,
+        )
+        if expected_candidate in candidates_by_task.get(
+            fixed_assignment.exam_task_id, ()
+        ):
+            continue
+        conflicts.append(
+            ConflictRecord(
+                type="fixed_assignment_no_candidate",
+                severity=ConflictSeverity.ERROR,
+                affected_ids=(fixed_assignment.exam_task_id,),
+                message=(
+                    f"固定安排 {fixed_assignment.exam_task_id} 无法映射到满足容量、"
+                    "类型、设备和允许时间的候选安排。"
+                ),
+                suggestion="请调整固定考场、固定时间或该考试的约束条件。",
+            )
+        )
+    return tuple(conflicts)
+
+
 def _add_exam_assignment_constraints(
     model: cp_model.CpModel,
     candidates_by_task: dict[str, tuple[_Candidate, ...]],
@@ -227,6 +262,21 @@ def _add_student_group_constraints(
             ]
             if group_slot_variables:
                 model.Add(sum(group_slot_variables) <= 1)
+
+
+def _add_fixed_assignment_constraints(
+    schedule_input: ScheduleInput,
+    model: cp_model.CpModel,
+    variables: dict[_Candidate, cp_model.IntVar],
+) -> None:
+    for fixed_assignment in schedule_input.fixed_assignments:
+        candidate = _Candidate(
+            exam_task_id=fixed_assignment.exam_task_id,
+            room_id=fixed_assignment.room_id,
+            slot_id=fixed_assignment.time_slot_id,
+        )
+        if candidate in variables:
+            model.Add(variables[candidate] == 1)
 
 
 def _build_soft_objective_terms(
@@ -383,7 +433,13 @@ def _assign_teachers(
     assignments: tuple[ScheduledExam, ...],
 ) -> tuple[tuple[ScheduledExam, ...], tuple[ConflictRecord, ...]]:
     tasks_by_id = {task.id: task for task in schedule_input.exam_tasks}
+    teachers_by_id = {teacher.id: teacher for teacher in schedule_input.teachers}
+    fixed_assignments_by_task = {
+        assignment.exam_task_id: assignment
+        for assignment in schedule_input.fixed_assignments
+    }
     busy_teacher_slots: set[tuple[str, str]] = set()
+    teacher_workload = {teacher.id: 0 for teacher in schedule_input.teachers}
     assignments_with_teachers: list[ScheduledExam] = []
     conflicts: list[ConflictRecord] = []
 
@@ -391,17 +447,36 @@ def _assign_teachers(
         assignments, key=lambda item: (item.time_slot_id, item.exam_task_id)
     ):
         task = tasks_by_id[assignment.exam_task_id]
-        teacher_ids: list[str] = []
-        for teacher in schedule_input.teachers:
-            if assignment.time_slot_id in teacher.unavailable_slot_ids:
+        fixed_assignment = fixed_assignments_by_task.get(assignment.exam_task_id)
+        fixed_teacher_ids = (
+            tuple(fixed_assignment.teacher_ids) if fixed_assignment else ()
+        )
+        if fixed_teacher_ids:
+            teacher_ids = list(fixed_teacher_ids)
+            fixed_teacher_conflict = _fixed_teacher_conflict(
+                assignment=assignment,
+                task_invigilator_count=task.invigilator_count,
+                teacher_ids=teacher_ids,
+                teachers_by_id=teachers_by_id,
+                busy_teacher_slots=busy_teacher_slots,
+            )
+            if fixed_teacher_conflict:
+                conflicts.append(fixed_teacher_conflict)
                 continue
-            teacher_slot = (teacher.id, assignment.time_slot_id)
-            if teacher_slot in busy_teacher_slots:
-                continue
-            teacher_ids.append(teacher.id)
-            busy_teacher_slots.add(teacher_slot)
-            if len(teacher_ids) == task.invigilator_count:
-                break
+        else:
+            teacher_ids = []
+            for teacher in sorted(
+                schedule_input.teachers,
+                key=lambda item: (teacher_workload[item.id], item.id),
+            ):
+                if assignment.time_slot_id in teacher.unavailable_slot_ids:
+                    continue
+                teacher_slot = (teacher.id, assignment.time_slot_id)
+                if teacher_slot in busy_teacher_slots:
+                    continue
+                teacher_ids.append(teacher.id)
+                if len(teacher_ids) == task.invigilator_count:
+                    break
 
         if len(teacher_ids) < task.invigilator_count:
             conflicts.append(
@@ -414,6 +489,10 @@ def _assign_teachers(
                 )
             )
             continue
+
+        for teacher_id in teacher_ids:
+            busy_teacher_slots.add((teacher_id, assignment.time_slot_id))
+            teacher_workload[teacher_id] += 1
 
         assignments_with_teachers.append(
             ScheduledExam(
@@ -428,6 +507,51 @@ def _assign_teachers(
         return (), tuple(conflicts)
 
     return tuple(assignments_with_teachers), ()
+
+
+def _fixed_teacher_conflict(
+    *,
+    assignment: ScheduledExam,
+    task_invigilator_count: int,
+    teacher_ids: list[str],
+    teachers_by_id: dict[str, Teacher],
+    busy_teacher_slots: set[tuple[str, str]],
+) -> ConflictRecord | None:
+    if len(set(teacher_ids)) != len(teacher_ids):
+        return ConflictRecord(
+            type="fixed_teacher_assignment_conflict",
+            severity=ConflictSeverity.ERROR,
+            affected_ids=(assignment.exam_task_id,),
+            message=f"考试 {assignment.exam_task_id} 的固定监考教师存在重复。",
+            suggestion="请为固定安排选择不重复的监考教师。",
+        )
+    if len(teacher_ids) < task_invigilator_count:
+        return ConflictRecord(
+            type="fixed_teacher_assignment_conflict",
+            severity=ConflictSeverity.ERROR,
+            affected_ids=(assignment.exam_task_id,),
+            message=f"考试 {assignment.exam_task_id} 的固定监考教师数量不足。",
+            suggestion="请补齐固定监考教师或移除固定教师约束。",
+        )
+    for teacher_id in teacher_ids:
+        teacher = teachers_by_id[teacher_id]
+        if assignment.time_slot_id in teacher.unavailable_slot_ids:
+            return ConflictRecord(
+                type="fixed_teacher_assignment_conflict",
+                severity=ConflictSeverity.ERROR,
+                affected_ids=(assignment.exam_task_id, teacher_id),
+                message=f"固定监考教师 {teacher_id} 在时间段 {assignment.time_slot_id} 不可用。",
+                suggestion="请调整固定监考教师或考试时间。",
+            )
+        if (teacher_id, assignment.time_slot_id) in busy_teacher_slots:
+            return ConflictRecord(
+                type="fixed_teacher_assignment_conflict",
+                severity=ConflictSeverity.ERROR,
+                affected_ids=(assignment.exam_task_id, teacher_id),
+                message=f"固定监考教师 {teacher_id} 在时间段 {assignment.time_slot_id} 已有监考安排。",
+                suggestion="请调整固定监考教师或考试时间。",
+            )
+    return None
 
 
 def _build_result(

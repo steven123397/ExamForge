@@ -3,6 +3,7 @@ import {
   integer,
   jsonb,
   pgEnum,
+  primaryKey,
   pgTable,
   text,
   timestamp,
@@ -114,6 +115,13 @@ export const examTasks = pgTable("exam_tasks", {
   invigilatorCount: integer("invigilator_count").notNull(),
 });
 
+export const examTaskStudentGroups = pgTable("exam_task_student_groups", {
+  examTaskId: text("exam_task_id").notNull().references(() => examTasks.id, { onDelete: "cascade" }),
+  studentGroupId: text("student_group_id").notNull().references(() => studentGroups.id),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.examTaskId, table.studentGroupId] }),
+}));
+
 export const scheduleRuns = pgTable("schedule_runs", {
   id: text("id").primaryKey(),
   batchId: text("batch_id").notNull().references(() => examBatches.id, { onDelete: "cascade" }),
@@ -138,6 +146,14 @@ export const scheduledExams = pgTable("scheduled_exams", {
 }, (table) => ({
   runExamTaskUnique: uniqueIndex("scheduled_exams_run_exam_task_unique").on(table.runId, table.examTaskId),
   runRoomSlotUnique: uniqueIndex("scheduled_exams_run_room_slot_unique").on(table.runId, table.roomId, table.timeSlotId),
+}));
+
+export const scheduledExamInvigilators = pgTable("scheduled_exam_invigilators", {
+  scheduledExamId: text("scheduled_exam_id").notNull().references(() => scheduledExams.id, { onDelete: "cascade" }),
+  position: integer("position").notNull(),
+  teacherId: text("teacher_id").notNull().references(() => teachers.id),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.scheduledExamId, table.position] }),
 }));
 
 export const conflictRecords = pgTable("conflict_records", {
@@ -175,6 +191,14 @@ export const draftScheduledExams = pgTable("draft_scheduled_exams", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   draftExamTaskUnique: uniqueIndex("draft_scheduled_exams_draft_exam_task_unique").on(table.draftId, table.examTaskId),
+}));
+
+export const draftExamInvigilators = pgTable("draft_exam_invigilators", {
+  draftScheduledExamId: text("draft_scheduled_exam_id").notNull().references(() => draftScheduledExams.id, { onDelete: "cascade" }),
+  position: integer("position").notNull(),
+  teacherId: text("teacher_id").notNull().references(() => teachers.id),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.draftScheduledExamId, table.position] }),
 }));
 
 export const draftConflictRecords = pgTable("draft_conflict_records", {
@@ -216,3 +240,10 @@ export const scheduleJobs = pgTable("schedule_jobs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const teacherUnavailableSlots = pgTable("teacher_unavailable_slots", {
+  teacherId: text("teacher_id").notNull().references(() => teachers.id, { onDelete: "cascade" }),
+  timeSlotId: text("time_slot_id").notNull().references(() => timeSlots.id, { onDelete: "cascade" }),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.teacherId, table.timeSlotId] }),
+}));

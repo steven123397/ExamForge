@@ -62,6 +62,10 @@
 - 变更：第三版第三阶段已完成并归入 `docs/plan/history_plan.md`，覆盖调度器软约束入 CP-SAT 目标、权重影响解选择测试和求解输出评分对齐。
 - 变更：`solve_schedule()` 已将 `room_utilization`、`student_consecutive_exam` 和 `exam_distribution_balance` 纳入 room-slot 维度目标函数；教师分配仍保持求解后贪心策略，不宣称教师工作量 CP-SAT 优化。
 - 变更：调度器成功求解后直接返回与最终安排一致的 `score_breakdown`；Python CLI 复用求解器评分，只在合并预检、求解和人工调整冲突时修正硬冲突计数。
+- 变更：第三版第四阶段已完成并归入 `docs/plan/history_plan.md`，覆盖第三版设计中的选做内容兼容式实现。
+- 变更：`packages/shared` 和 `apps/scheduler` 已新增 `fixed_assignments` 合同、`FixedAssignment` 模型、CLI 解析、固定 room-slot 约束、固定监考教师处理和不可行固定安排冲突；非固定监考教师分配已改为负载感知选择。
+- 变更：`packages/db` 已新增迁移 `0007_association_tables.sql`，建立 `exam_task_student_groups`、`scheduled_exam_invigilators`、`draft_exam_invigilators` 和 `teacher_unavailable_slots` 关联表；seed 和 PostgreSQL 仓储已在保持 JSONB 兼容字段的同时同步写入关联表。
+- 变更：API 基础数据校验已新增考场 `building_id` 小写 slug 语义约束，避免继续写入明显不可用的楼栋标识。
 - 验证：PostgreSQL 运行路径已完成真实验证，包括按顺序执行 `packages/db/drizzle/*.sql`、运行 `npm run seed --workspace @examforge/db`、API 带 `DATABASE_URL` 读取 dashboard、发起一次排考运行并写入 `schedule_runs`、`scheduled_exams` 和 `audit_events`。
 - 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `10 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
 - 验证：真实 PostgreSQL API 路径已验证 `POST /api/schedule-runs`、`POST /api/schedule-runs/:id/publish`、`GET /api/published-schedule`、`POST /api/published-schedule/rollback` 和回滚后的 `404` 查询结果；数据库已写入对应 `schedule_run.created`、`schedule_run.published` 和 `schedule_run.rollback` 审计事件。
@@ -85,6 +89,7 @@
 - 验证：第三版第一阶段 Web 拆分验证包括 `npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `22` 个通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`git diff --check` 通过。
 - 验证：第三版第二阶段验证包括 `npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `29` 个通过；`npm run build` 通过；`npm run test:scheduler` 通过，调度器测试结果为 `34 passed`；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres` 通过，PostgreSQL 集成测试结果为 `3 passed`；同测试库运行 `npm run test:migrations` 通过，迁移测试结果为 `1 passed`；清空测试库后以 `DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 验证正式迁移入口通过并应用 `0000` 至 `0006`；`git diff --check` 通过。
 - 验证：第三版第三阶段先运行新增软约束目标红灯测试，`npm run test:scheduler` 预期失败为 `4 failed, 34 passed`；实现后 `npm run test:scheduler` 通过，调度器测试结果为 `38 passed`；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `29` 个通过；`npm run typecheck` 通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`。曾并行运行 `npm run build` 与 `npm run test:e2e` 导致 Next `.next` manifest 争用失败，串行重跑后两项均通过。
+- 验证：第三版第四阶段验证包括 `npm run test:scheduler` 通过，调度器测试结果为 `42 passed`；`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `30` 个通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres` 通过，PostgreSQL 集成测试结果为 `3 passed`；同测试库运行 `npm run test:migrations` 通过，迁移测试结果为 `1 passed`；`DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 通过且无待应用迁移；`git diff --check` 通过。
 
 ## 下一步
 
@@ -99,8 +104,8 @@
 - [x] 规划第三阶段：拖拽式工作台、局部重排建议、权限审计或报告导出。
 - [x] 执行第三阶段：拖拽式矩阵调整、单场局部调整建议、报告图示材料和浏览器级拖拽验收。
 - [x] 执行第四阶段：异步排考作业、草稿锁定、局部再平衡、角色权限护栏、教师不可用维护、通知导出和课程交付文档。
-- [ ] 执行全量代码审查，并将审查发现写入 `docs/status/code_review_status.md`。
 - [x] 执行第三版第一阶段：完成 Web 运营台拆分、API client 抽取和 TanStack Query 引入。
 - [x] 执行第三版第二阶段：补齐 PostgreSQL 集成测试、迁移验证、scheduler CLI 契约测试和 API service 提取。
 - [x] 执行第三版第三阶段：将软约束纳入 CP-SAT 优化目标，并补齐权重影响解选择的调度器测试。
-- [ ] 规划第三版第四阶段：处理关联表重构、楼栋语义、教师分配增强和增量重排合同等选做内容。
+- [x] 执行第三版第四阶段：处理关联表重构、楼栋语义、教师分配增强和固定安排合同等选做内容。
+- [ ] 执行全量代码审查，并将审查发现写入 `docs/status/code_review_status.md`。

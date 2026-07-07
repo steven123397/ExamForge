@@ -532,6 +532,44 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("validates room building identifiers", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const invalidResponse = await app.inject({
+      method: "POST",
+      url: "/api/reference-data/rooms",
+      headers: operatorHeaders,
+      payload: {
+        id: "r-invalid-building",
+        name: "楼栋错误考场",
+        building_id: "Test Building",
+        capacity: 40,
+        room_type: "standard",
+        equipment_tags: [],
+      },
+    });
+    assert.equal(invalidResponse.statusCode, 409);
+    assert.equal(invalidResponse.json().error, "reference_integrity_violation");
+
+    const validResponse = await app.inject({
+      method: "POST",
+      url: "/api/reference-data/rooms",
+      headers: operatorHeaders,
+      payload: {
+        id: "r-valid-building",
+        name: "楼栋合法考场",
+        building_id: "test-building",
+        capacity: 40,
+        room_type: "standard",
+        equipment_tags: [],
+      },
+    });
+    assert.equal(validResponse.statusCode, 201);
+    assert.equal(validResponse.json().record.building_id, "test-building");
+
+    await app.close();
+  });
+
   it("rejects reference records that point at missing resources", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
 

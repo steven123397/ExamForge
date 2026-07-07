@@ -11,6 +11,7 @@ from .models import (
     Course,
     ExamTask,
     ExamType,
+    FixedAssignment,
     Room,
     RoomType,
     ScheduleInput,
@@ -148,6 +149,15 @@ def _schedule_input_from_json(payload: dict[str, Any]) -> ScheduleInput:
             hard_rules=tuple(payload["constraint_profile"]["hard_rules"]),
             soft_weights=dict(payload["constraint_profile"]["soft_weights"]),
             time_limit_seconds=payload["constraint_profile"]["time_limit_seconds"],
+        ),
+        fixed_assignments=tuple(
+            FixedAssignment(
+                exam_task_id=item["exam_task_id"],
+                room_id=item["room_id"],
+                time_slot_id=item["time_slot_id"],
+                teacher_ids=tuple(item.get("teacher_ids", ())),
+            )
+            for item in payload.get("fixed_assignments", ())
         ),
     )
 

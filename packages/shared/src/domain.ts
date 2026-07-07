@@ -71,6 +71,13 @@ export const constraintProfileSchema = z.object({
   time_limit_seconds: z.number().int().positive(),
 });
 
+export const fixedAssignmentSchema = z.object({
+  exam_task_id: z.string(),
+  room_id: z.string(),
+  time_slot_id: z.string(),
+  teacher_ids: z.array(z.string()).default([]),
+});
+
 export const scheduleInputSchema = z.object({
   student_groups: z.array(studentGroupSchema),
   teachers: z.array(teacherSchema),
@@ -79,6 +86,7 @@ export const scheduleInputSchema = z.object({
   time_slots: z.array(timeSlotSchema),
   exam_tasks: z.array(examTaskSchema),
   constraint_profile: constraintProfileSchema,
+  fixed_assignments: z.array(fixedAssignmentSchema).default([]),
 });
 
 export const scheduledExamSchema = z.object({
@@ -161,6 +169,7 @@ export type Room = z.infer<typeof roomSchema>;
 export type TimeSlot = z.infer<typeof timeSlotSchema>;
 export type ExamTask = z.infer<typeof examTaskSchema>;
 export type ConstraintProfile = z.infer<typeof constraintProfileSchema>;
+export type FixedAssignment = z.infer<typeof fixedAssignmentSchema>;
 export type ScheduleInput = z.infer<typeof scheduleInputSchema>;
 export type ScheduledExam = z.infer<typeof scheduledExamSchema>;
 export type ConflictRecord = z.infer<typeof conflictRecordSchema>;

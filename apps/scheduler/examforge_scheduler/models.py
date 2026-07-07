@@ -98,6 +98,14 @@ class ScheduledExam:
 
 
 @dataclass(frozen=True)
+class FixedAssignment:
+    exam_task_id: str
+    room_id: str
+    time_slot_id: str
+    teacher_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ConflictRecord:
     type: str
     severity: ConflictSeverity
@@ -139,6 +147,7 @@ class ScheduleInput:
     time_slots: tuple[TimeSlot, ...]
     exam_tasks: tuple[ExamTask, ...]
     constraint_profile: ConstraintProfile
+    fixed_assignments: tuple[FixedAssignment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -154,7 +163,10 @@ def validate_schedule_input(schedule_input: ScheduleInput) -> tuple[str, ...]:
 
     student_group_ids = {group.id for group in schedule_input.student_groups}
     course_ids = {course.id for course in schedule_input.courses}
+    teacher_ids = {teacher.id for teacher in schedule_input.teachers}
+    room_ids = {room.id for room in schedule_input.rooms}
     slot_ids = {slot.id for slot in schedule_input.time_slots}
+    task_ids = {task.id for task in schedule_input.exam_tasks}
 
     _validate_entity_ids(
         errors,
@@ -219,6 +231,36 @@ def validate_schedule_input(schedule_input: ScheduleInput) -> tuple[str, ...]:
             if slot_id not in slot_ids:
                 errors.append(
                     f"exam_task {task.id} references missing allowed_slot_id {slot_id}"
+                )
+
+    fixed_task_ids: set[str] = set()
+    for fixed_assignment in schedule_input.fixed_assignments:
+        if fixed_assignment.exam_task_id in fixed_task_ids:
+            errors.append(
+                "fixed_assignment references duplicate exam_task_id "
+                f"{fixed_assignment.exam_task_id}"
+            )
+        fixed_task_ids.add(fixed_assignment.exam_task_id)
+        if fixed_assignment.exam_task_id not in task_ids:
+            errors.append(
+                "fixed_assignment references missing exam_task_id "
+                f"{fixed_assignment.exam_task_id}"
+            )
+        if fixed_assignment.room_id not in room_ids:
+            errors.append(
+                f"fixed_assignment {fixed_assignment.exam_task_id} "
+                f"references missing room_id {fixed_assignment.room_id}"
+            )
+        if fixed_assignment.time_slot_id not in slot_ids:
+            errors.append(
+                f"fixed_assignment {fixed_assignment.exam_task_id} "
+                f"references missing time_slot_id {fixed_assignment.time_slot_id}"
+            )
+        for teacher_id in fixed_assignment.teacher_ids:
+            if teacher_id not in teacher_ids:
+                errors.append(
+                    f"fixed_assignment {fixed_assignment.exam_task_id} "
+                    f"references missing teacher_id {teacher_id}"
                 )
 
     return tuple(errors)

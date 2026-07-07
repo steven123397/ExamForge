@@ -122,3 +122,12 @@
 - 验证结果：先运行新增软约束目标红灯测试，`npm run test:scheduler` 预期失败为 `4 failed, 34 passed`；实现后 `npm run test:scheduler` 通过，调度器测试结果为 `38 passed`；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `29` 个通过；`npm run typecheck` 通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`。
 - 验证说明：曾并行运行 `npm run build` 与 `npm run test:e2e`，Next 同时读写 `.next` 导致 manifest 缺失并失败；串行重跑后构建和 E2E 均通过，该失败不归因于本阶段业务代码。
 - 后续影响：第三版必做主线已覆盖 Web 拆分、测试基线/API service 和软约束入模；第四阶段可以转向设计文档中的选做内容，包括关联表重构、楼栋语义、教师分配增强和增量重排合同。
+
+## 2026-07-07 第三版第四阶段：选做内容实现
+
+- 原计划：`docs/plan/第三版第四阶段计划.md`
+- 完成提交：本轮本地提交 `feat(第三版): 完成第四阶段选做内容`；未 push。
+- 完成内容：新增 `fixed_assignments` shared 合同、Python scheduler `FixedAssignment` 模型、CLI 解析、固定 room-slot 约束和固定监考教师处理；将非固定监考教师分配改为负载感知选择；新增 `0007_association_tables.sql`，建立考试任务学生群体、正式监考、草稿监考和教师不可用时间关联表；seed、PostgreSQL 仓储创建/更新基础数据、正式排考、草稿创建/调整/发布路径均保持 JSONB 字段兼容并同步写入关联表；API 基础数据校验新增考场 `building_id` 语义约束。
+- 范围边界：未删除既有 JSONB 数组字段，未改变 Web/API 返回结构；未把教师分配纳入 CP-SAT 联合求解；未新增完整 `buildings` 主数据表、楼栋 UI、跨楼栋软约束、Redis/BullMQ、SSE/WebSocket、FastAPI scheduler、OpenAPI/SDK 或复杂权限矩阵。
+- 验证结果：`npm run test:scheduler` 通过，调度器测试结果为 `42 passed`；`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `30` 个通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres` 通过，PostgreSQL 集成测试结果为 `3 passed`；同测试库运行 `npm run test:migrations` 通过，迁移测试结果为 `1 passed`；`DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 通过且无待应用迁移；`git diff --check` 通过。
+- 后续影响：第三版设计中的选做内容已形成兼容式实现基线；后续如果继续企业化，应优先评估是否删除 JSONB 冗余字段、补楼栋主数据和跨楼栋约束，或将固定安排合同接入 Web 锁定考试与局部重排请求。

@@ -4,15 +4,19 @@ import {
   courses,
   draftChangeEvents,
   draftConflictRecords,
+  draftExamInvigilators,
   draftScheduledExams,
   examBatches,
+  examTaskStudentGroups,
   examTasks,
   rooms,
   scheduleDrafts,
   scheduleJobs,
+  scheduledExamInvigilators,
   scheduledExams,
   scheduleRuns,
   studentGroups,
+  teacherUnavailableSlots,
   teachers,
   timeSlots,
   type ExamForgeDbClient,
@@ -159,6 +163,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
           invigilator_count: task.invigilatorCount,
         })),
         constraint_profile: batch.constraintProfile as ConstraintProfile,
+        fixed_assignments: [],
       },
     };
   }
@@ -182,12 +187,24 @@ export class PostgresPlatformRepository implements PlatformRepository {
         return this.toStudentGroup(row);
       }
       case "teachers": {
-        const [row] = await this.client.db.insert(teachers).values({
-          id: data.id as string,
-          name: data.name as string,
-          departmentId: data.department_id as string,
-          unavailableSlotIds: data.unavailable_slot_ids as string[],
-        }).returning();
+        const [row] = await this.client.db.transaction(async (tx) => {
+          const [teacher] = await tx.insert(teachers).values({
+            id: data.id as string,
+            name: data.name as string,
+            departmentId: data.department_id as string,
+            unavailableSlotIds: data.unavailable_slot_ids as string[],
+          }).returning();
+          const unavailableSlotIds = data.unavailable_slot_ids as string[];
+          if (unavailableSlotIds.length > 0) {
+            await tx.insert(teacherUnavailableSlots).values(
+              unavailableSlotIds.map((timeSlotId) => ({
+                teacherId: teacher.id,
+                timeSlotId,
+              })),
+            ).onConflictDoNothing();
+          }
+          return [teacher];
+        });
         return this.toTeacher(row);
       }
       case "courses": {
@@ -222,18 +239,30 @@ export class PostgresPlatformRepository implements PlatformRepository {
         return this.toTimeSlot(row);
       }
       case "exam-tasks": {
-        const [row] = await this.client.db.insert(examTasks).values({
-          id: data.id as string,
-          batchId: batch.id,
-          courseId: data.course_id as string,
-          studentGroupIds: data.student_group_ids as string[],
-          expectedCount: data.expected_count as number,
-          durationMinutes: data.duration_minutes as number,
-          requiredRoomType: data.required_room_type as "standard" | "computer_lab" | "language_lab",
-          requiredEquipmentTags: data.required_equipment_tags as string[],
-          allowedSlotIds: data.allowed_slot_ids as string[],
-          invigilatorCount: data.invigilator_count as number,
-        }).returning();
+        const [row] = await this.client.db.transaction(async (tx) => {
+          const [task] = await tx.insert(examTasks).values({
+            id: data.id as string,
+            batchId: batch.id,
+            courseId: data.course_id as string,
+            studentGroupIds: data.student_group_ids as string[],
+            expectedCount: data.expected_count as number,
+            durationMinutes: data.duration_minutes as number,
+            requiredRoomType: data.required_room_type as "standard" | "computer_lab" | "language_lab",
+            requiredEquipmentTags: data.required_equipment_tags as string[],
+            allowedSlotIds: data.allowed_slot_ids as string[],
+            invigilatorCount: data.invigilator_count as number,
+          }).returning();
+          const studentGroupIds = data.student_group_ids as string[];
+          if (studentGroupIds.length > 0) {
+            await tx.insert(examTaskStudentGroups).values(
+              studentGroupIds.map((studentGroupId) => ({
+                examTaskId: task.id,
+                studentGroupId,
+              })),
+            ).onConflictDoNothing();
+          }
+          return [task];
+        });
         return this.toExamTask(row);
       }
     }
@@ -267,11 +296,26 @@ export class PostgresPlatformRepository implements PlatformRepository {
         return row ? this.toStudentGroup(row) : null;
       }
       case "teachers": {
-        const [row] = await this.client.db.update(teachers).set(stripUndefined({
-          name: data.name as string | undefined,
-          departmentId: data.department_id as string | undefined,
-          unavailableSlotIds: data.unavailable_slot_ids as string[] | undefined,
-        })).where(eq(teachers.id, id)).returning();
+        const [row] = await this.client.db.transaction(async (tx) => {
+          const [teacher] = await tx.update(teachers).set(stripUndefined({
+            name: data.name as string | undefined,
+            departmentId: data.department_id as string | undefined,
+            unavailableSlotIds: data.unavailable_slot_ids as string[] | undefined,
+          })).where(eq(teachers.id, id)).returning();
+          if (teacher && data.unavailable_slot_ids) {
+            await tx.delete(teacherUnavailableSlots).where(eq(teacherUnavailableSlots.teacherId, id));
+            const unavailableSlotIds = data.unavailable_slot_ids as string[];
+            if (unavailableSlotIds.length > 0) {
+              await tx.insert(teacherUnavailableSlots).values(
+                unavailableSlotIds.map((timeSlotId) => ({
+                  teacherId: id,
+                  timeSlotId,
+                })),
+              ).onConflictDoNothing();
+            }
+          }
+          return [teacher];
+        });
         return row ? this.toTeacher(row) : null;
       }
       case "courses": {
@@ -302,16 +346,31 @@ export class PostgresPlatformRepository implements PlatformRepository {
         return row ? this.toTimeSlot(row) : null;
       }
       case "exam-tasks": {
-        const [row] = await this.client.db.update(examTasks).set(stripUndefined({
-          courseId: data.course_id as string | undefined,
-          studentGroupIds: data.student_group_ids as string[] | undefined,
-          expectedCount: data.expected_count as number | undefined,
-          durationMinutes: data.duration_minutes as number | undefined,
-          requiredRoomType: data.required_room_type as "standard" | "computer_lab" | "language_lab" | undefined,
-          requiredEquipmentTags: data.required_equipment_tags as string[] | undefined,
-          allowedSlotIds: data.allowed_slot_ids as string[] | undefined,
-          invigilatorCount: data.invigilator_count as number | undefined,
-        })).where(eq(examTasks.id, id)).returning();
+        const [row] = await this.client.db.transaction(async (tx) => {
+          const [task] = await tx.update(examTasks).set(stripUndefined({
+            courseId: data.course_id as string | undefined,
+            studentGroupIds: data.student_group_ids as string[] | undefined,
+            expectedCount: data.expected_count as number | undefined,
+            durationMinutes: data.duration_minutes as number | undefined,
+            requiredRoomType: data.required_room_type as "standard" | "computer_lab" | "language_lab" | undefined,
+            requiredEquipmentTags: data.required_equipment_tags as string[] | undefined,
+            allowedSlotIds: data.allowed_slot_ids as string[] | undefined,
+            invigilatorCount: data.invigilator_count as number | undefined,
+          })).where(eq(examTasks.id, id)).returning();
+          if (task && data.student_group_ids) {
+            await tx.delete(examTaskStudentGroups).where(eq(examTaskStudentGroups.examTaskId, id));
+            const studentGroupIds = data.student_group_ids as string[];
+            if (studentGroupIds.length > 0) {
+              await tx.insert(examTaskStudentGroups).values(
+                studentGroupIds.map((studentGroupId) => ({
+                  examTaskId: id,
+                  studentGroupId,
+                })),
+              ).onConflictDoNothing();
+            }
+          }
+          return [task];
+        });
         return row ? this.toExamTask(row) : null;
       }
     }
@@ -401,16 +460,25 @@ export class PostgresPlatformRepository implements PlatformRepository {
       });
 
       if (result.assignments.length > 0) {
-        await tx.insert(scheduledExams).values(
-          result.assignments.map((assignment, index) => ({
+        const scheduledExamRows = result.assignments.map((assignment, index) => ({
             id: `${id}-exam-${index + 1}`,
             runId: id,
             examTaskId: assignment.exam_task_id,
             roomId: assignment.room_id,
             timeSlotId: assignment.time_slot_id,
             teacherIds: assignment.teacher_ids,
-          })),
-        );
+          }));
+        await tx.insert(scheduledExams).values(scheduledExamRows);
+        const invigilatorRows = scheduledExamRows.flatMap((row, index) => (
+          result.assignments[index].teacher_ids.map((teacherId, teacherIndex) => ({
+            scheduledExamId: row.id,
+            position: teacherIndex + 1,
+            teacherId,
+          }))
+        ));
+        if (invigilatorRows.length > 0) {
+          await tx.insert(scheduledExamInvigilators).values(invigilatorRows);
+        }
       }
 
       if (result.conflicts.length > 0) {
@@ -555,7 +623,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         updatedAt: now,
       });
       if (assignments.length > 0) {
-        await tx.insert(draftScheduledExams).values(assignments.map((assignment, index) => ({
+        const draftScheduledExamRows = assignments.map((assignment, index) => ({
           id: `${draftId}-exam-${index + 1}`,
           draftId,
           examTaskId: assignment.exam_task_id,
@@ -564,7 +632,18 @@ export class PostgresPlatformRepository implements PlatformRepository {
           teacherIds: assignment.teacher_ids,
           locked: false,
           updatedAt: now,
-        })));
+        }));
+        await tx.insert(draftScheduledExams).values(draftScheduledExamRows);
+        const invigilatorRows = draftScheduledExamRows.flatMap((row, index) => (
+          assignments[index].teacher_ids.map((teacherId, teacherIndex) => ({
+            draftScheduledExamId: row.id,
+            position: teacherIndex + 1,
+            teacherId,
+          }))
+        ));
+        if (invigilatorRows.length > 0) {
+          await tx.insert(draftExamInvigilators).values(invigilatorRows);
+        }
       }
       if (conflicts.length > 0) {
         await tx.insert(draftConflictRecords).values(conflicts.map((conflict, index) => ({
@@ -692,7 +771,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     const changeId = `draft-change-${randomUUID()}`;
 
     await this.client.db.transaction(async (tx) => {
-      await tx.update(draftScheduledExams)
+      const [updatedAssignment] = await tx.update(draftScheduledExams)
         .set({
           roomId: after.room_id,
           timeSlotId: after.time_slot_id,
@@ -702,7 +781,21 @@ export class PostgresPlatformRepository implements PlatformRepository {
         .where(and(
           eq(draftScheduledExams.draftId, id),
           eq(draftScheduledExams.examTaskId, examTaskId),
-        ));
+        ))
+        .returning();
+      if (updatedAssignment) {
+        await tx.delete(draftExamInvigilators)
+          .where(eq(draftExamInvigilators.draftScheduledExamId, updatedAssignment.id));
+        if (after.teacher_ids.length > 0) {
+          await tx.insert(draftExamInvigilators).values(
+            after.teacher_ids.map((teacherId, index) => ({
+              draftScheduledExamId: updatedAssignment.id,
+              position: index + 1,
+              teacherId,
+            })),
+          );
+        }
+      }
       await tx.delete(draftConflictRecords).where(eq(draftConflictRecords.draftId, id));
       if (conflicts.length > 0) {
         await tx.insert(draftConflictRecords).values(conflicts.map((conflict, conflictIndex) => ({
@@ -937,14 +1030,25 @@ export class PostgresPlatformRepository implements PlatformRepository {
         createdAt,
       });
       if (current.assignments.length > 0) {
-        await tx.insert(scheduledExams).values(current.assignments.map((assignment, index) => ({
+        const scheduledExamRows = current.assignments.map((assignment, index) => ({
           id: `${runId}-exam-${index + 1}`,
           runId,
           examTaskId: assignment.exam_task_id,
           roomId: assignment.room_id,
           timeSlotId: assignment.time_slot_id,
           teacherIds: assignment.teacher_ids,
-        })));
+        }));
+        await tx.insert(scheduledExams).values(scheduledExamRows);
+        const invigilatorRows = scheduledExamRows.flatMap((row, index) => (
+          current.assignments[index].teacher_ids.map((teacherId, teacherIndex) => ({
+            scheduledExamId: row.id,
+            position: teacherIndex + 1,
+            teacherId,
+          }))
+        ));
+        if (invigilatorRows.length > 0) {
+          await tx.insert(scheduledExamInvigilators).values(invigilatorRows);
+        }
       }
       await tx.update(examBatches)
         .set({
