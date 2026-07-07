@@ -93,3 +93,12 @@
 - 范围边界：当轮实现中异步作业为进程内作业表，权限为请求头轻量护栏，通知为预览与导出，不接入生产级队列、SSO、短信、邮件、WebSocket 或外部教务系统；后续代码审查修复已将作业状态迁入 repository/PostgreSQL 表，并将权限升级为 Bearer token 登录与鉴权。
 - 验证结果：`npm test` 通过，API 测试结果为 `16 passed`；`npm run typecheck` 通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`uv run --python 3.12 --extra dev python -m pytest -q` 通过，调度器测试结果为 `32 passed`；`git diff --check` 通过。
 - 后续影响：第二版设计文档中列出的增强方向已完成轻量闭环实现；后续可进入第三版企业化，优先生产化任务队列、真实认证授权、消息投递状态、下载审计、标准迁移执行器和部署监控。
+
+## 2026-07-07 第三版第一阶段：Web 运营台拆分
+
+- 原计划：`docs/plan/第三版第一阶段计划.md`
+- 完成提交：未提交；本轮按用户要求只保留本地工作区改动，未 push。
+- 完成内容：新增 Web API client、角色 token 边界、query keys 和 TanStack Query provider；将异步作业、已发布查询、基础数据管理、教师不可用维护、运行历史/审计、草稿工作台拆入 `apps/web/features/`；将共享 `LoadState`、指标卡和面板壳提取到 `apps/web/components/shared/`；`apps/web/app/operations-console.tsx` 从约 2397 行收敛到 851 行，主要保留页面编排、角色选择、跨面板状态和动作 handler。
+- 范围边界：未修改 API、数据库、调度器业务行为；未引入 PostgreSQL 集成测试体系、软约束入 CP-SAT、Redis/BullMQ、SSE/WebSocket 或 FastAPI scheduler；未重设计运营台视觉风格。
+- 验证结果：`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `22` 个通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`git diff --check` 通过。
+- 后续影响：CR-009 的 Web 单文件维护风险已显著降低；第三版第二阶段可转向 PostgreSQL 集成测试、迁移验证、scheduler CLI 契约测试和 API service 提取。

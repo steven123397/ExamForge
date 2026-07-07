@@ -1,0 +1,36 @@
+export const queryKeys = {
+  dashboard: ["dashboard"] as const,
+  referenceData: ["reference-data"] as const,
+  scheduleRuns: ["schedule-runs"] as const,
+  scheduleRun: (id: string) => ["schedule-runs", id] as const,
+  scheduleRunComparison: (baseId: string, targetId: string) => [
+    "schedule-runs",
+    "compare",
+    baseId,
+    targetId,
+  ] as const,
+  auditEvents: ["audit-events"] as const,
+  publishedSchedule: ["published-schedule"] as const,
+  publishedScheduleNotifications: ["published-schedule", "notifications"] as const,
+  publishedTeacherSchedule: (teacherId: string) => [
+    "published-schedule",
+    "teachers",
+    teacherId,
+  ] as const,
+  publishedStudentSchedule: (studentGroupId: string) => [
+    "published-schedule",
+    "student-groups",
+    studentGroupId,
+  ] as const,
+  scheduleDrafts: ["schedule-drafts"] as const,
+  scheduleDraft: (id: string) => ["schedule-drafts", id] as const,
+  scheduleDraftComparison: (id: string) => ["schedule-drafts", id, "compare"] as const,
+  scheduleDraftSuggestions: (id: string, examTaskId: string) => [
+    "schedule-drafts",
+    id,
+    "assignments",
+    examTaskId,
+    "suggestions",
+  ] as const,
+  scheduleJobs: ["schedule-jobs"] as const,
+};

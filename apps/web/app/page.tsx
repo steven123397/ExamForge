@@ -1,5 +1,10 @@
 import { OperationsConsole } from "./operations-console";
+import { ExamForgeQueryClientProvider } from "../lib/query-client-provider";
 
 export default function Page() {
-  return <OperationsConsole />;
+  return (
+    <ExamForgeQueryClientProvider>
+      <OperationsConsole />
+    </ExamForgeQueryClientProvider>
+  );
 }

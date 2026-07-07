@@ -8,7 +8,7 @@
 
 ## 最新进展
 
-- 日期：2026-07-06
+- 日期：2026-07-07
 - 变更：Agent A 已完成调度器数据模型与测试数据生成器，并形成本地提交 `ff195cb feat(调度器): 添加数据模型与测试数据生成器`。
 - 变更：文档治理规则改为简化版单一事实源，完成计划统一沉淀到 `docs/plan/history_plan.md`，不使用专门归档目录。
 - 变更：Agent B、Agent C、Agent D 三条并行实现分支已合并到 `main`。
@@ -50,6 +50,11 @@
 - 变更：已新增 `docs/background/第二版课程报告终稿.md` 和 `docs/background/第二版部署与演示说明.md`，并更新第二版设计文档的增强方向落地边界。
 - 变更：第二版增强方向第四阶段计划已归入 `docs/plan/history_plan.md`，第二版设计文档中列出的增强方向已完成轻量闭环实现。
 - 变更：CodeGraph 已启用；已新增 `docs/plan/全量代码审查计划.md` 和 `docs/status/code_review_status.md`，后续全量代码审查结果和存留问题状态统一写入 `code_review_status.md`。
+- 变更：已新增 `docs/design/第三版实现内容设计.md`，明确第三版优先处理 Web 运营台拆分、软约束入模、PostgreSQL 集成测试和 API service 提取；临时评审材料不再作为正式文档保留。
+- 变更：第三版第一阶段计划已完成并归入 `docs/plan/history_plan.md`，该阶段聚焦 Web 运营台拆分、API client 抽取和 TanStack Query 引入。
+- 变更：第三版第一阶段已完成 Web 运营台拆分，新增 `apps/web/lib/api-client.ts`、`roles.ts`、`query-keys.ts`、`query-client-provider.tsx`，并引入 `@tanstack/react-query`。
+- 变更：运营台业务面已拆入 `apps/web/features/`，覆盖异步作业、已发布查询、基础数据管理、教师不可用维护、运行历史/审计和草稿工作台；共享 `LoadState`、指标卡和面板壳已迁入 `apps/web/components/shared/`。
+- 变更：`apps/web/app/operations-console.tsx` 从约 2397 行收敛到 851 行，主组件不再直接发起 `fetch` 请求，主要承担页面布局、角色演示、跨面板状态和动作编排。
 - 验证：PostgreSQL 运行路径已完成真实验证，包括按顺序执行 `packages/db/drizzle/*.sql`、运行 `npm run seed --workspace @examforge/db`、API 带 `DATABASE_URL` 读取 dashboard、发起一次排考运行并写入 `schedule_runs`、`scheduled_exams` 和 `audit_events`。
 - 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `10 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
 - 验证：真实 PostgreSQL API 路径已验证 `POST /api/schedule-runs`、`POST /api/schedule-runs/:id/publish`、`GET /api/published-schedule`、`POST /api/published-schedule/rollback` 和回滚后的 `404` 查询结果；数据库已写入对应 `schedule_run.created`、`schedule_run.published` 和 `schedule_run.rollback` 审计事件。
@@ -70,6 +75,7 @@
 - 验证：第四阶段浏览器级验收已通过，`npm run test:e2e` 在 Chromium 中验证草稿锁定/解锁、局部再平衡、矩阵拖拽、异步排考作业和发布通知预览，结果为 `2 passed`。
 - 验证：第四阶段调度器回归已通过，`uv run --python 3.12 --extra dev python -m pytest -q` 结果为 `32 passed`。
 - 验证：第四阶段 `git diff --check` 通过。
+- 验证：第三版第一阶段 Web 拆分验证包括 `npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `22` 个通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`git diff --check` 通过。
 
 ## 下一步
 
@@ -85,4 +91,5 @@
 - [x] 执行第三阶段：拖拽式矩阵调整、单场局部调整建议、报告图示材料和浏览器级拖拽验收。
 - [x] 执行第四阶段：异步排考作业、草稿锁定、局部再平衡、角色权限护栏、教师不可用维护、通知导出和课程交付文档。
 - [ ] 执行全量代码审查，并将审查发现写入 `docs/status/code_review_status.md`。
-- [ ] 规划第三版或后续企业化阶段：持久化任务队列、真实认证授权、消息投递状态、下载审计、标准迁移执行器和部署监控。
+- [x] 执行第三版第一阶段：完成 Web 运营台拆分、API client 抽取和 TanStack Query 引入。
+- [ ] 执行第三版第二阶段：补齐 PostgreSQL 集成测试、迁移验证、scheduler CLI 契约测试和 API service 提取。

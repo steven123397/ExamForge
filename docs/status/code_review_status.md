@@ -52,13 +52,13 @@
 - 严重级别：P2 中优先级
 - 所属模块：`apps/api`、`apps/web`
 - 发现来源：`docs/design/总体设计与技术选型.md`
-- 位置：`apps/web/app/operations-console.tsx`、`apps/api/src/app.ts`
+- 位置：`apps/web/features/async-jobs/`、`apps/api/src/app.ts`
 - 问题描述：当前异步排考进度通过 Web 轮询 `/api/schedule-jobs` 获取，没有 WebSocket 或 SSE。
 - 影响：当前体验可演示；长任务、高频进度和多用户场景下效率和实时性不足。
 - 建议处理：在持久化队列完成后再评估 SSE 或 WebSocket，避免先做实时通道但缺少可靠任务状态。
 - 验证方式：新增浏览器端实时进度测试或 API 事件流测试。
 - 解决记录：未解决。
-- 本轮复核：仍成立。`apps/web/app/operations-console.tsx` 仍通过 `setInterval` 轮询 `/api/schedule-jobs` 和运行历史，未实现 SSE 或 WebSocket。
+- 本轮复核：仍成立。第三版第一阶段已将异步作业轮询迁入 TanStack Query `refetchInterval`，但进度通道本质仍是 HTTP 轮询，未实现 SSE 或 WebSocket。
 
 ### CR-008：Python 调度器尚未独立 FastAPI 服务化
 
@@ -74,20 +74,6 @@
 - 解决记录：未解决。
 - 本轮复核：仍成立。`apps/api/src/scheduler-client.ts` 仍通过 `uv run ... python -m examforge_scheduler.cli solve` 和 stdin/stdout 调用调度器。
 
-### CR-009：Web 运营台主组件体量过大，存在后续维护风险
-
-- 状态：待解决
-- 严重级别：P2 中优先级
-- 所属模块：`apps/web`
-- 发现来源：当前代码结构观察
-- 位置：`apps/web/app/operations-console.tsx`
-- 问题描述：运营台多个业务区块、状态管理和 API 调用集中在单个大型组件文件中。
-- 影响：当前功能可用，但后续继续增加第三版能力时，状态耦合和回归风险会上升。
-- 建议处理：在全量代码审查中重点评估拆分边界；优先按业务面拆出 API client、方案工作台、基础数据管理、已发布查询和异步作业组件。
-- 验证方式：拆分后运行 `npm run typecheck`、`npm run build` 和 `npm run test:e2e`。
-- 解决记录：未解决。
-- 本轮复核：仍成立。`apps/web/app/operations-console.tsx` 仍集中承载 API 调用、角色状态、排考运行、草稿工作台、基础数据管理、教师不可用维护和已发布查询等多个业务面。
-
 ## 4. 已解决问题
 
 - CR-001：本机默认 Python 环境不满足调度器要求
@@ -98,6 +84,7 @@
 - CR-011：草稿校验错误处理空 `allowed_slot_ids`，会阻断合法的不限时段考试
 - CR-012：PostgreSQL 草稿锁定状态只保存在进程内，重启后会丢失
 - CR-013：数据库 schema 缺少外键和关键唯一约束，持久化数据一致性主要依赖应用自律
+- CR-009：Web 运营台主组件体量过大，存在后续维护风险
 
 ## 5. 审查记录
 
@@ -106,3 +93,4 @@
 - 2026-07-07：修复 CR-010、CR-011、CR-012，提交为 `a835a94 fix(审查): 修复角色权限与草稿锁定问题`。先新增 API 红灯测试，确认无角色默认管理员、空 `allowed_slot_ids` 草稿误阻断和 DB schema 缺少锁字段三个问题可复现；随后完成修复并验证 `npm run typecheck`、`npm test`、`npm run build`、`npm run test:e2e` 均通过。
 - 2026-07-07：修复 CR-001。仓库根 `package.json` 新增 `npm run test:scheduler`，统一通过 `uv run --python 3.12 --extra dev python -m pytest -q` 调用调度器测试；`apps/scheduler/AGENTS.md` 和 `README.md` 同步改为推荐项目级脚本，避免后续代理依赖本机默认 `python`。验证 `npm run test:scheduler` 通过，调度器测试结果为 `32 passed`。
 - 2026-07-07：修复 CR-004、CR-005、CR-006、CR-013。新增 `schema_migrations` 迁移执行器和 `npm run db:migrate`；API 改为 Bearer token 登录与鉴权，Web 角色演示改用对应 token；异步排考作业移入 repository，并在 PostgreSQL 中新增 `schedule_jobs` 表；DB schema 和迁移补充外键、唯一约束，API 基础数据写入补充跨资源引用校验。验证 `npm run typecheck`、`LOG_LEVEL=silent npm test`、`npm run build`、`npm run test:scheduler`、`npm run test:e2e`、`git diff --check` 均通过；API 测试结果为 `22` 个测试通过，调度器测试结果为 `32 passed`，E2E 结果为 `2 passed`。
+- 2026-07-07：修复 CR-009。完成第三版第一阶段 Web 运营台拆分：新增统一 API client、角色 token 边界、query keys、TanStack Query provider 和按业务面组织的 `apps/web/features/`；异步作业、已发布查询、基础数据、教师不可用、运行历史/审计和草稿工作台均已从主组件拆出；`operations-console.tsx` 从约 2397 行收敛到 851 行。验证 `npm run typecheck`、`LOG_LEVEL=silent npm test`、`npm run build`、`npm run test:e2e`、`git diff --check` 均通过；API 测试结果为 `22` 个通过，E2E 结果为 `2 passed`。

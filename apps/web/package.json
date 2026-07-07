@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@examforge/shared": "0.1.0",
+    "@tanstack/react-query": "^5.101.2",
     "lucide-react": "^0.468.0",
     "next": "^15.0.0",
     "react": "^19.0.0",
