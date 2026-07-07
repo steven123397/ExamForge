@@ -10,6 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import tsx tests/*.test.ts",
+    "test:postgres": "node --test --import tsx tests/postgres/postgres-integration.test.ts",
     "start": "node dist/server.js"
   },
   "dependencies": {

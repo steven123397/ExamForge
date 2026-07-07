@@ -19,6 +19,7 @@ import {
 } from "@examforge/db";
 import {
   type ConstraintProfile,
+  type AuditEventFilter,
   type AuditEventListResponse,
   type AuditEventSummary,
   type DashboardResponse,
@@ -45,7 +46,7 @@ import {
   type ScheduleRunSummary,
   type ScheduledExam,
 } from "@examforge/shared";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte, lte } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import {
   buildDraftComparison,
@@ -1022,12 +1023,21 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return updated ? { draft: this.toDraftSummary(updated) } : null;
   }
 
-  async listAuditEvents(): Promise<AuditEventListResponse> {
+  async listAuditEvents(filter: AuditEventFilter = {}): Promise<AuditEventListResponse> {
+    const conditions = [
+      filter.entityType ? eq(auditEvents.entityType, filter.entityType) : undefined,
+      filter.entityId ? eq(auditEvents.entityId, filter.entityId) : undefined,
+      filter.actor ? eq(auditEvents.actor, filter.actor) : undefined,
+      filter.since ? gte(auditEvents.createdAt, new Date(filter.since)) : undefined,
+      filter.until ? lte(auditEvents.createdAt, new Date(filter.until)) : undefined,
+    ].filter((condition) => condition !== undefined);
+
     const rows = await this.client.db
       .select()
       .from(auditEvents)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(auditEvents.createdAt))
-      .limit(50);
+      .limit(filter.limit ?? 50);
 
     return {
       events: rows.map((event) => this.toAuditEvent(event)),

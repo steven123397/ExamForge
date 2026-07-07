@@ -9,6 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "migrate": "tsx src/migrations.ts",
+    "check:migrations": "tsx src/migration-check.ts",
+    "test:migrations": "node --test --import tsx tests/migrations.test.ts",
     "seed": "tsx src/seed.ts"
   },
   "dependencies": {

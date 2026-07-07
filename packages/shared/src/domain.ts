@@ -246,6 +246,15 @@ export interface AuditEventListResponse {
   events: AuditEventSummary[];
 }
 
+export interface AuditEventFilter {
+  entityType?: string;
+  entityId?: string;
+  actor?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+}
+
 export interface ScheduleRunComparisonResponse {
   baseRun: ScheduleRunSummary;
   targetRun: ScheduleRunSummary;

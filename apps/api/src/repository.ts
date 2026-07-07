@@ -2,6 +2,7 @@ import {
   demoBatch,
   demoScheduleInput,
   type AuditEventListResponse,
+  type AuditEventFilter,
   type AuditEventSummary,
   type DashboardResponse,
   type PublishedScheduleResponse,
@@ -50,7 +51,7 @@ export interface PlatformRepository {
     baseId: string,
     targetId: string,
   ): Promise<ScheduleRunComparisonResponse | null>;
-  listAuditEvents(): Promise<AuditEventListResponse>;
+  listAuditEvents(filter?: AuditEventFilter): Promise<AuditEventListResponse>;
   publishScheduleRun(id: string): Promise<PublishedScheduleResponse | null>;
   getPublishedSchedule(): Promise<PublishedScheduleResponse | null>;
   rollbackPublishedSchedule(): Promise<ScheduleRollbackResponse>;
@@ -237,8 +238,12 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return base && target ? buildRunComparison(base, target) : null;
   }
 
-  async listAuditEvents(): Promise<AuditEventListResponse> {
-    return { events: [...this.auditEvents].reverse() };
+  async listAuditEvents(filter: AuditEventFilter = {}): Promise<AuditEventListResponse> {
+    const events = [...this.auditEvents]
+      .reverse()
+      .filter((event) => matchesAuditFilter(event, filter))
+      .slice(0, filter.limit ?? 50);
+    return { events };
   }
 
   async publishScheduleRun(id: string): Promise<PublishedScheduleResponse | null> {
@@ -693,6 +698,14 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       createdAt: new Date().toISOString(),
     });
   }
+}
+
+function matchesAuditFilter(event: AuditEventSummary, filter: AuditEventFilter) {
+  return (!filter.entityType || event.entityType === filter.entityType)
+    && (!filter.entityId || event.entityId === filter.entityId)
+    && (!filter.actor || event.actor === filter.actor)
+    && (!filter.since || Date.parse(event.createdAt) >= Date.parse(filter.since))
+    && (!filter.until || Date.parse(event.createdAt) <= Date.parse(filter.until));
 }
 
 export function buildRunComparison(

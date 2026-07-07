@@ -26,6 +26,33 @@ def test_cli_solves_schedule_input_from_json():
     assert "report" in result
 
 
+def test_cli_returns_json_error_for_invalid_solve_payload():
+    completed = subprocess.run(
+        [sys.executable, "-m", "examforge_scheduler.cli", "solve"],
+        input="{not-json",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    payload = json.loads(completed.stdout)
+    assert payload["error"]["type"] == "JSONDecodeError"
+    assert payload["error"]["message"]
+
+
+def test_cli_rejects_unknown_commands_on_stderr():
+    completed = subprocess.run(
+        [sys.executable, "-m", "examforge_scheduler.cli", "unknown"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "invalid choice" in completed.stderr
+
+
 def _to_jsonable(value):
     if hasattr(value, "value"):
         return value.value

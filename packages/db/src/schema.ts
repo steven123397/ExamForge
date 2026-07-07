@@ -175,7 +175,6 @@ export const draftScheduledExams = pgTable("draft_scheduled_exams", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   draftExamTaskUnique: uniqueIndex("draft_scheduled_exams_draft_exam_task_unique").on(table.draftId, table.examTaskId),
-  draftRoomSlotUnique: uniqueIndex("draft_scheduled_exams_draft_room_slot_unique").on(table.draftId, table.roomId, table.timeSlotId),
 }));
 
 export const draftConflictRecords = pgTable("draft_conflict_records", {

@@ -97,8 +97,18 @@
 ## 2026-07-07 第三版第一阶段：Web 运营台拆分
 
 - 原计划：`docs/plan/第三版第一阶段计划.md`
-- 完成提交：未提交；本轮按用户要求只保留本地工作区改动，未 push。
+- 完成提交：`efa3eac feat(第三版): 拆分 Web 运营台`；未 push。
 - 完成内容：新增 Web API client、角色 token 边界、query keys 和 TanStack Query provider；将异步作业、已发布查询、基础数据管理、教师不可用维护、运行历史/审计、草稿工作台拆入 `apps/web/features/`；将共享 `LoadState`、指标卡和面板壳提取到 `apps/web/components/shared/`；`apps/web/app/operations-console.tsx` 从约 2397 行收敛到 851 行，主要保留页面编排、角色选择、跨面板状态和动作 handler。
 - 范围边界：未修改 API、数据库、调度器业务行为；未引入 PostgreSQL 集成测试体系、软约束入 CP-SAT、Redis/BullMQ、SSE/WebSocket 或 FastAPI scheduler；未重设计运营台视觉风格。
 - 验证结果：`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `22` 个通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`git diff --check` 通过。
 - 后续影响：CR-009 的 Web 单文件维护风险已显著降低；第三版第二阶段可转向 PostgreSQL 集成测试、迁移验证、scheduler CLI 契约测试和 API service 提取。
+
+## 2026-07-07 第三版第二阶段：测试基线补强与 API service 提取
+
+- 原计划：`docs/plan/第三版第二阶段计划.md`
+- 完成提交：未提交；本轮按用户要求只保留本地工作区改动，未 push。
+- 完成内容：新增 PostgreSQL 集成测试入口和根脚本，覆盖真实仓储的排考运行、草稿冲突阻断与修复发布、作业状态迁移和审计过滤；新增迁移从空库执行验证入口和 `migration-check`；新增 API 到 Python scheduler CLI 契约测试；提取已发布方案受众、通知预览、CSV 导出 service；新增审计过滤 service，并让内存仓储、PostgreSQL 仓储和 API 路由支持 `entityType`、`entityId`、`actor`、`since`、`until` 过滤。
+- 范围边界：未做软约束入 CP-SAT；未重构 JSONB 数组为关联表；未引入 Redis/BullMQ、SSE/WebSocket 或 FastAPI scheduler；未重设计 Web 交互。
+- 迁移与数据修复：新增 `0006_allow_conflicting_draft_assignments.sql`，移除草稿安排的 `(draft_id, room_id, time_slot_id)` 唯一约束，让草稿可以暂存冲突并由草稿校验逻辑展示和阻断发布；正式 `scheduled_exams` 的唯一约束保持不变。
+- 验证结果：`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `29` 个通过；`npm run build` 通过；`npm run test:scheduler` 通过，调度器测试结果为 `34 passed`；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres` 通过，PostgreSQL 集成测试结果为 `3 passed`；同测试库运行 `npm run test:migrations` 通过，迁移测试结果为 `1 passed`；清空测试库后以 `DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 验证正式迁移入口通过并应用 `0000` 至 `0006`；`git diff --check` 通过。
+- 后续影响：第三版第三阶段可以在有 PostgreSQL、迁移、scheduler CLI 和 API service 测试保护的前提下推进软约束入 CP-SAT。

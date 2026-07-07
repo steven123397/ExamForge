@@ -1,5 +1,6 @@
 import { demoBatch, demoScheduleInput } from "@examforge/shared";
-import { createDbClient } from "./client.js";
+import { pathToFileURL } from "node:url";
+import { createDbClient, type ExamForgeDbClient } from "./client.js";
 import {
   courses,
   departments,
@@ -29,103 +30,107 @@ function collectDepartments() {
   }));
 }
 
+export async function seedDemoData(client: ExamForgeDbClient): Promise<void> {
+  await client.db.transaction(async (tx) => {
+    await tx.insert(departments).values(collectDepartments()).onConflictDoNothing();
+
+    await tx
+      .insert(examBatches)
+      .values({
+        ...demoBatch,
+        constraintProfile: demoScheduleInput.constraint_profile,
+      })
+      .onConflictDoNothing();
+
+    await tx
+      .insert(studentGroups)
+      .values(
+        demoScheduleInput.student_groups.map((group) => ({
+          id: group.id,
+          name: group.name,
+          size: group.size,
+          departmentId: group.department_id,
+        })),
+      )
+      .onConflictDoNothing();
+
+    await tx
+      .insert(teachers)
+      .values(
+        demoScheduleInput.teachers.map((teacher) => ({
+          id: teacher.id,
+          name: teacher.name,
+          departmentId: teacher.department_id,
+          unavailableSlotIds: teacher.unavailable_slot_ids,
+        })),
+      )
+      .onConflictDoNothing();
+
+    await tx
+      .insert(courses)
+      .values(
+        demoScheduleInput.courses.map((course) => ({
+          id: course.id,
+          name: course.name,
+          departmentId: course.department_id,
+          type: course.exam_type,
+        })),
+      )
+      .onConflictDoNothing();
+
+    await tx
+      .insert(rooms)
+      .values(
+        demoScheduleInput.rooms.map((room) => ({
+          id: room.id,
+          name: room.name,
+          buildingId: room.building_id,
+          capacity: room.capacity,
+          type: room.room_type,
+          equipmentTags: room.equipment_tags,
+        })),
+      )
+      .onConflictDoNothing();
+
+    await tx
+      .insert(timeSlots)
+      .values(
+        demoScheduleInput.time_slots.map((slot) => ({
+          id: slot.id,
+          batchId: demoBatch.id,
+          date: slot.date,
+          startTime: slot.start_time,
+          endTime: slot.end_time,
+          periodIndex: slot.period_index,
+        })),
+      )
+      .onConflictDoNothing();
+
+    await tx
+      .insert(examTasks)
+      .values(
+        demoScheduleInput.exam_tasks.map((task) => ({
+          id: task.id,
+          batchId: demoBatch.id,
+          courseId: task.course_id,
+          studentGroupIds: task.student_group_ids,
+          expectedCount: task.expected_count,
+          durationMinutes: task.duration_minutes,
+          requiredRoomType: task.required_room_type,
+          requiredEquipmentTags: task.required_equipment_tags,
+          allowedSlotIds: task.allowed_slot_ids,
+          invigilatorCount: task.invigilator_count,
+        })),
+      )
+      .onConflictDoNothing();
+  });
+}
+
 async function main() {
   const client = createDbClient();
 
   try {
-    await client.db.transaction(async (tx) => {
-      await tx.insert(departments).values(collectDepartments()).onConflictDoNothing();
-
-      await tx
-        .insert(examBatches)
-        .values({
-          ...demoBatch,
-          constraintProfile: demoScheduleInput.constraint_profile,
-        })
-        .onConflictDoNothing();
-
-      await tx
-        .insert(studentGroups)
-        .values(
-          demoScheduleInput.student_groups.map((group) => ({
-            id: group.id,
-            name: group.name,
-            size: group.size,
-            departmentId: group.department_id,
-          })),
-        )
-        .onConflictDoNothing();
-
-      await tx
-        .insert(teachers)
-        .values(
-          demoScheduleInput.teachers.map((teacher) => ({
-            id: teacher.id,
-            name: teacher.name,
-            departmentId: teacher.department_id,
-            unavailableSlotIds: teacher.unavailable_slot_ids,
-          })),
-        )
-        .onConflictDoNothing();
-
-      await tx
-        .insert(courses)
-        .values(
-          demoScheduleInput.courses.map((course) => ({
-            id: course.id,
-            name: course.name,
-            departmentId: course.department_id,
-            type: course.exam_type,
-          })),
-        )
-        .onConflictDoNothing();
-
-      await tx
-        .insert(rooms)
-        .values(
-          demoScheduleInput.rooms.map((room) => ({
-            id: room.id,
-            name: room.name,
-            buildingId: room.building_id,
-            capacity: room.capacity,
-            type: room.room_type,
-            equipmentTags: room.equipment_tags,
-          })),
-        )
-        .onConflictDoNothing();
-
-      await tx
-        .insert(timeSlots)
-        .values(
-          demoScheduleInput.time_slots.map((slot) => ({
-            id: slot.id,
-            batchId: demoBatch.id,
-            date: slot.date,
-            startTime: slot.start_time,
-            endTime: slot.end_time,
-            periodIndex: slot.period_index,
-          })),
-        )
-        .onConflictDoNothing();
-
-      await tx
-        .insert(examTasks)
-        .values(
-          demoScheduleInput.exam_tasks.map((task) => ({
-            id: task.id,
-            batchId: demoBatch.id,
-            courseId: task.course_id,
-            studentGroupIds: task.student_group_ids,
-            expectedCount: task.expected_count,
-            durationMinutes: task.duration_minutes,
-            requiredRoomType: task.required_room_type,
-            requiredEquipmentTags: task.required_equipment_tags,
-            allowedSlotIds: task.allowed_slot_ids,
-            invigilatorCount: task.invigilator_count,
-          })),
-        )
-        .onConflictDoNothing();
-    });
+    await seedDemoData(client);
 
     console.log(JSON.stringify({
       seeded: true,
@@ -145,7 +150,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

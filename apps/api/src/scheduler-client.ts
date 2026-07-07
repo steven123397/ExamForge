@@ -37,7 +37,12 @@ export class PythonSchedulerClient implements SchedulerClient {
       child.stderr.on("data", (chunk) => {
         stderr += chunk;
       });
-      child.on("error", reject);
+      child.on("error", (error) => {
+        reject(new Error(
+          `failed to start scheduler process "${this.executable}" in ${this.schedulerDir}: ${error.message}`,
+          { cause: error },
+        ));
+      });
       child.on("close", (code) => {
         if (code !== 0) {
           reject(new Error(`scheduler exited with ${code}: ${stderr || stdout}`));

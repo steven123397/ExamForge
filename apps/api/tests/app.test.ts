@@ -225,6 +225,23 @@ describe("ExamForge API", () => {
     assert.equal(auditResponse.json().events.length, 2);
     assert.equal(auditResponse.json().events[0].action, "schedule_run.created");
 
+    const filteredAuditResponse = await app.inject({
+      method: "GET",
+      url: `/api/audit-events?entityType=schedule_run&entityId=${first.run.id}&actor=system`,
+    });
+    assert.equal(filteredAuditResponse.statusCode, 200);
+    assert.deepEqual(
+      filteredAuditResponse.json().events.map((event: { entityId: string }) => event.entityId),
+      [first.run.id],
+    );
+
+    const invalidAuditFilterResponse = await app.inject({
+      method: "GET",
+      url: "/api/audit-events?since=not-a-date",
+    });
+    assert.equal(invalidAuditFilterResponse.statusCode, 400);
+    assert.equal(invalidAuditFilterResponse.json().error, "invalid_audit_filter");
+
     const compareResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-runs/compare?baseId=${first.run.id}&targetId=${second.run.id}`,
@@ -343,7 +360,7 @@ describe("ExamForge API", () => {
         listScheduleRuns: () => repository.listScheduleRuns(),
         getScheduleRun: (id) => repository.getScheduleRun(id),
         compareScheduleRuns: (baseId, targetId) => repository.compareScheduleRuns(baseId, targetId),
-        listAuditEvents: () => repository.listAuditEvents(),
+        listAuditEvents: (filter) => repository.listAuditEvents(filter),
         publishScheduleRun: (id) => repository.publishScheduleRun(id),
         getPublishedSchedule: () => repository.getPublishedSchedule(),
         rollbackPublishedSchedule: () => repository.rollbackPublishedSchedule(),
