@@ -20,7 +20,6 @@ from .models import (
 )
 from .precheck import run_precheck
 from .report import build_schedule_report
-from .scoring import calculate_score
 from .solver import solve_schedule
 
 
@@ -61,14 +60,13 @@ def _solve_with_report(schedule_input: ScheduleInput) -> dict[str, Any]:
     result = solve_schedule(schedule_input)
     assignment_conflicts = detect_assignment_conflicts(schedule_input, result.assignments)
     all_conflicts = (*precheck_conflicts, *result.conflicts, *assignment_conflicts)
-    score = calculate_score(schedule_input, result.assignments)
     result_with_score = result.__class__(
         assignments=result.assignments,
         conflicts=all_conflicts,
-        score=score.__class__(
-            total_score=0 if all_conflicts else score.total_score,
+        score=result.score.__class__(
+            total_score=0 if all_conflicts else result.score.total_score,
             hard_violation_count=len(all_conflicts),
-            soft_penalty_items=score.soft_penalty_items,
+            soft_penalty_items=result.score.soft_penalty_items,
         ),
         statistics=result.statistics,
     )

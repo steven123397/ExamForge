@@ -112,3 +112,13 @@
 - 迁移与数据修复：新增 `0006_allow_conflicting_draft_assignments.sql`，移除草稿安排的 `(draft_id, room_id, time_slot_id)` 唯一约束，让草稿可以暂存冲突并由草稿校验逻辑展示和阻断发布；正式 `scheduled_exams` 的唯一约束保持不变。
 - 验证结果：`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `29` 个通过；`npm run build` 通过；`npm run test:scheduler` 通过，调度器测试结果为 `34 passed`；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres` 通过，PostgreSQL 集成测试结果为 `3 passed`；同测试库运行 `npm run test:migrations` 通过，迁移测试结果为 `1 passed`；清空测试库后以 `DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 验证正式迁移入口通过并应用 `0000` 至 `0006`；`git diff --check` 通过。
 - 后续影响：第三版第三阶段可以在有 PostgreSQL、迁移、scheduler CLI 和 API service 测试保护的前提下推进软约束入 CP-SAT。
+
+## 2026-07-07 第三版第三阶段：软约束入模
+
+- 原计划：`docs/plan/第三版第三阶段计划.md`
+- 完成提交：本轮本地提交 `feat(第三版): 完成软约束入模`；未 push。
+- 完成内容：在 `solve_schedule()` 中为 room-slot 决策变量新增 CP-SAT 软约束目标函数，覆盖 `room_utilization`、`student_consecutive_exam` 和 `exam_distribution_balance`；新增 `test_solver_soft_objective.py`，证明软约束权重能改变考场选择、避免同一学生群体连续考试并降低单日集中安排；成功求解后返回与最终安排一致的 `score_breakdown`，Python CLI 复用求解器评分并只修正合并冲突后的硬冲突计数。
+- 范围边界：未把教师分配纳入 CP-SAT 联合求解；未实现教师工作量负载感知匹配；未新增 `fixed_assignments`；未重构 JSONB 数组为关联表；未新增 `buildings` 表；未引入 Redis/BullMQ、SSE/WebSocket、FastAPI scheduler、OpenAPI/SDK 或复杂权限矩阵。
+- 验证结果：先运行新增软约束目标红灯测试，`npm run test:scheduler` 预期失败为 `4 failed, 34 passed`；实现后 `npm run test:scheduler` 通过，调度器测试结果为 `38 passed`；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `29` 个通过；`npm run typecheck` 通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`。
+- 验证说明：曾并行运行 `npm run build` 与 `npm run test:e2e`，Next 同时读写 `.next` 导致 manifest 缺失并失败；串行重跑后构建和 E2E 均通过，该失败不归因于本阶段业务代码。
+- 后续影响：第三版必做主线已覆盖 Web 拆分、测试基线/API service 和软约束入模；第四阶段可以转向设计文档中的选做内容，包括关联表重构、楼栋语义、教师分配增强和增量重排合同。

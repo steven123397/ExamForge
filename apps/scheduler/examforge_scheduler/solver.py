@@ -14,6 +14,7 @@ from .models import (
     SolverStatistics,
     validate_schedule_input,
 )
+from .scoring import LOW_ROOM_UTILIZATION_THRESHOLD, calculate_score
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,9 @@ def solve_schedule(schedule_input: ScheduleInput) -> ScheduleResult:
     _add_exam_assignment_constraints(model, candidates_by_task, variables)
     _add_room_time_constraints(model, variables)
     _add_student_group_constraints(schedule_input, model, variables)
+    objective_terms = _build_soft_objective_terms(schedule_input, model, variables)
+    if objective_terms:
+        model.Minimize(sum(objective_terms))
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = max(
@@ -225,6 +229,136 @@ def _add_student_group_constraints(
                 model.Add(sum(group_slot_variables) <= 1)
 
 
+def _build_soft_objective_terms(
+    schedule_input: ScheduleInput,
+    model: cp_model.CpModel,
+    variables: dict[_Candidate, cp_model.IntVar],
+) -> list:
+    return [
+        *_room_utilization_terms(schedule_input, variables),
+        *_student_consecutive_exam_terms(schedule_input, model, variables),
+        *_exam_distribution_balance_terms(schedule_input, model, variables),
+    ]
+
+
+def _room_utilization_terms(
+    schedule_input: ScheduleInput,
+    variables: dict[_Candidate, cp_model.IntVar],
+) -> list:
+    weight = schedule_input.constraint_profile.soft_weights.get("room_utilization", 0)
+    if weight <= 0:
+        return []
+
+    tasks_by_id = {task.id: task for task in schedule_input.exam_tasks}
+    rooms_by_id = {room.id: room for room in schedule_input.rooms}
+    terms = []
+
+    for candidate, variable in variables.items():
+        task = tasks_by_id[candidate.exam_task_id]
+        room = rooms_by_id[candidate.room_id]
+        if room.capacity <= 0:
+            continue
+        utilization = task.expected_count / room.capacity
+        if utilization < LOW_ROOM_UTILIZATION_THRESHOLD:
+            terms.append(variable * weight)
+
+    return terms
+
+
+def _student_consecutive_exam_terms(
+    schedule_input: ScheduleInput,
+    model: cp_model.CpModel,
+    variables: dict[_Candidate, cp_model.IntVar],
+) -> list:
+    weight = schedule_input.constraint_profile.soft_weights.get(
+        "student_consecutive_exam", 0
+    )
+    if weight <= 0:
+        return []
+
+    tasks_by_id = {task.id: task for task in schedule_input.exam_tasks}
+    slots_by_id = {slot.id: slot for slot in schedule_input.time_slots}
+    terms = []
+    penalty_index = 0
+
+    task_pairs: set[tuple[str, str]] = set()
+    for group in schedule_input.student_groups:
+        group_task_ids = [
+            task.id
+            for task in schedule_input.exam_tasks
+            if group.id in task.student_group_ids
+        ]
+        for left_index, left_task_id in enumerate(group_task_ids):
+            for right_task_id in group_task_ids[left_index + 1 :]:
+                task_pairs.add((left_task_id, right_task_id))
+
+    for left_task_id, right_task_id in task_pairs:
+        for left_candidate, left_variable in variables.items():
+            if left_candidate.exam_task_id != left_task_id:
+                continue
+            left_slot = slots_by_id[left_candidate.slot_id]
+            for right_candidate, right_variable in variables.items():
+                if right_candidate.exam_task_id != right_task_id:
+                    continue
+                right_slot = slots_by_id[right_candidate.slot_id]
+                if abs(left_slot.period_index - right_slot.period_index) != 1:
+                    continue
+                penalty = model.NewBoolVar(
+                    "student_consecutive_exam"
+                    f"_{left_task_id}_{right_task_id}_{penalty_index}"
+                )
+                model.Add(penalty <= left_variable)
+                model.Add(penalty <= right_variable)
+                model.Add(penalty >= left_variable + right_variable - 1)
+                terms.append(penalty * weight)
+                penalty_index += 1
+
+    return terms
+
+
+def _exam_distribution_balance_terms(
+    schedule_input: ScheduleInput,
+    model: cp_model.CpModel,
+    variables: dict[_Candidate, cp_model.IntVar],
+) -> list:
+    weight = schedule_input.constraint_profile.soft_weights.get(
+        "exam_distribution_balance", 0
+    )
+    dates = sorted({slot.date for slot in schedule_input.time_slots})
+    if weight <= 0 or not dates or not schedule_input.exam_tasks:
+        return []
+
+    date_by_slot_id = {slot.id: slot.date for slot in schedule_input.time_slots}
+    exam_count = len(schedule_input.exam_tasks)
+    date_count = len(dates)
+    terms = []
+
+    for date in dates:
+        date_variables = [
+            variable
+            for candidate, variable in variables.items()
+            if date_by_slot_id[candidate.slot_id] == date
+        ]
+        if not date_variables:
+            continue
+        selected_count = sum(date_variables)
+        scaled_excess = model.NewIntVar(
+            0,
+            exam_count * date_count,
+            f"exam_distribution_scaled_excess_{date}",
+        )
+        penalty_units = model.NewIntVar(
+            0,
+            exam_count,
+            f"exam_distribution_penalty_{date}",
+        )
+        model.Add(scaled_excess >= selected_count * date_count - exam_count)
+        model.Add(penalty_units * date_count >= scaled_excess)
+        terms.append(penalty_units * weight)
+
+    return terms
+
+
 def _extract_assignments(
     schedule_input: ScheduleInput,
     variables: dict[_Candidate, cp_model.IntVar],
@@ -306,14 +440,24 @@ def _build_result(
     conflicts: tuple[ConflictRecord, ...] = (),
 ) -> ScheduleResult:
     hard_violation_count = len(conflicts)
+    if hard_violation_count > 0:
+        score = ScoreBreakdown(
+            total_score=0,
+            hard_violation_count=hard_violation_count,
+            soft_penalty_items=(),
+        )
+    elif assignments:
+        score = calculate_score(schedule_input, assignments)
+    else:
+        score = ScoreBreakdown(
+            total_score=100,
+            hard_violation_count=0,
+            soft_penalty_items=(),
+        )
     return ScheduleResult(
         assignments=assignments,
         conflicts=conflicts,
-        score=ScoreBreakdown(
-            total_score=100 if hard_violation_count == 0 else 0,
-            hard_violation_count=hard_violation_count,
-            soft_penalty_items=(),
-        ),
+        score=score,
         statistics=SolverStatistics(
             status=status,
             elapsed_ms=max(0, int((perf_counter() - started_at) * 1000)),
