@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  criticalMigrationTables,
   draftScheduledExams,
   loadMigrationFiles,
   migrationStateTableName,
@@ -974,6 +975,36 @@ describe("ExamForge API", () => {
     await secondApp.close();
   });
 
+  it("marks interrupted asynchronous schedule jobs as failed on startup", async () => {
+    const repository = new InMemoryPlatformRepository();
+    const queuedJob = await repository.createScheduleJob();
+    const runningJob = await repository.createScheduleJob();
+    await repository.updateScheduleJob(runningJob.id, {
+      status: "running",
+      progress: 35,
+    });
+
+    const app = createApp({ scheduler: new FakeScheduler(), repository });
+    await app.ready();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs",
+    });
+    assert.equal(response.statusCode, 200);
+    const jobs = response.json().jobs;
+    const restoredQueuedJob = jobs.find((job: { id: string }) => job.id === queuedJob.id);
+    const restoredRunningJob = jobs.find((job: { id: string }) => job.id === runningJob.id);
+    assert.equal(restoredQueuedJob.status, "failed");
+    assert.equal(restoredQueuedJob.progress, 100);
+    assert.match(restoredQueuedJob.error, /interrupted/i);
+    assert.equal(restoredRunningJob.status, "failed");
+    assert.equal(restoredRunningJob.progress, 100);
+    assert.match(restoredRunningJob.error, /interrupted/i);
+
+    await app.close();
+  });
+
   it("locks draft assignments and rebalances only unlocked conflicted exams", async () => {
     const app = createApp({ scheduler: new DraftWorkflowScheduler() });
 
@@ -1044,14 +1075,19 @@ describe("ExamForge API", () => {
   it("exposes migration state, job persistence, and integrity constraints", async () => {
     assert.equal(migrationStateTableName, "schema_migrations");
     assert.ok("status" in scheduleJobs);
+    assert.ok(criticalMigrationTables.includes("exam_task_student_groups"));
+    assert.ok(criticalMigrationTables.includes("scheduled_exam_invigilators"));
+    assert.ok(criticalMigrationTables.includes("draft_exam_invigilators"));
+    assert.ok(criticalMigrationTables.includes("teacher_unavailable_slots"));
 
     const migrations = await loadMigrationFiles();
     const sql = migrations.map((migration) => migration.sql).join("\n");
     assert.ok(migrations.some((migration) => migration.id === "0005_auth_jobs_constraints"));
+    assert.ok(migrations.some((migration) => migration.id === "0007_association_tables"));
     assert.match(sql, /CREATE TABLE IF NOT EXISTS schedule_jobs/);
     assert.match(sql, /FOREIGN KEY \(batch_id\) REFERENCES exam_batches\(id\)/);
     assert.match(sql, /UNIQUE \(run_id, room_id, time_slot_id\)/);
-    assert.match(sql, /UNIQUE \(draft_id, room_id, time_slot_id\)/);
+    assert.match(sql, /DROP CONSTRAINT IF EXISTS draft_scheduled_exams_draft_room_slot_unique/);
   });
 
   it("enforces roles, updates teacher unavailable slots, previews notifications, and exports CSV", async () => {
@@ -1096,13 +1132,28 @@ describe("ExamForge API", () => {
     assert.ok(notificationsResponse.json().notifications.length > 0);
     assert.match(notificationsResponse.json().notifications[0].message, /考试安排已发布/);
 
+    const unauthenticatedExportResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/export.csv",
+    });
+    assert.equal(unauthenticatedExportResponse.statusCode, 403);
+
     const exportResponse = await app.inject({
       method: "GET",
       url: "/api/published-schedule/export.csv",
+      headers: viewerHeaders,
     });
     assert.equal(exportResponse.statusCode, 200);
     assert.match(exportResponse.headers["content-type"] as string, /text\/csv/);
     assert.match(exportResponse.body, /course,time_slot,room,teachers/);
+
+    const auditResponse = await app.inject({
+      method: "GET",
+      url: `/api/audit-events?entityType=schedule_run&entityId=${created.run.id}&actor=viewer`,
+      headers: adminHeaders,
+    });
+    assert.equal(auditResponse.statusCode, 200);
+    assert.equal(auditResponse.json().events[0].action, "published_schedule.exported");
 
     await app.close();
   });

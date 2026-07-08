@@ -14,9 +14,9 @@
 - `已解决`：问题已有修复提交或明确证据证明不再存在。
 - `暂缓`：问题确认存在，但当前阶段不处理，需要说明暂缓原因和重新评估条件。
 
-解决问题时，从 `## 3. 待解决问题` 移入 `## 4. 已解决问题`。已解决问题区只保留编号和题目，解决提交与验证证据集中记录在 `## 5. 审查记录`，避免待处理列表被历史问题稀释。
+`## 3. 问题明细` 只保留 `待解决` 或 `暂缓` 的问题。问题解决后，从问题明细中移除完整条目，在 `## 4. 已解决问题索引` 保留编号和题目，并将解决过程与验证证据写入 `## 5. 审查记录`。
 
-## 3. 待解决问题
+## 3. 问题明细
 
 ### CR-002：Next 依赖链存在 npm audit moderate 公告
 
@@ -30,7 +30,7 @@
 - 建议处理：保留审计记录；后续升级 Next 或等待其依赖 PostCSS 修复版本，避免盲目执行降级式自动修复。
 - 验证方式：运行 `npm audit`，确认公告状态；升级后运行 `npm test`、`npm run typecheck`、`npm run build`、`npm run test:e2e`。
 - 解决记录：未解决。
-- 本轮复核：仍成立。2026-07-06 运行 `npm audit --audit-level=moderate` 返回 `postcss <8.5.10` 的 2 个 moderate 公告，自动修复仍提示会强制安装 `next@9.3.3`。
+- 本轮复核：仍成立。2026-07-08 运行 `npm audit --audit-level=moderate` 返回 `postcss <8.5.10` 的 2 个 moderate 公告，自动修复仍提示会强制安装 `next@9.3.3`。
 
 ### CR-003：Docker daemon 拉取镜像依赖当前 WSL 到 Windows 代理
 
@@ -44,7 +44,7 @@
 - 建议处理：代理变化时同步更新 Docker systemd 代理配置并重启 `docker.service`；部署文档中保留环境依赖说明。
 - 验证方式：执行 `docker compose pull` 或重新创建 PostgreSQL 容器并确认健康检查通过。
 - 解决记录：未解决。
-- 本轮复核：仍成立。仓库内未新增替代镜像源或离线镜像方案，`docker-compose.yml` 仍直接使用 `postgres:16-alpine`。
+- 本轮复核：仍成立。2026-07-08 运行 `docker ps --format ...` 未发现运行中的 PostgreSQL 容器；仓库内未新增替代镜像源或离线镜像方案，`docker-compose.yml` 仍直接使用 `postgres:16-alpine`。
 
 ### CR-007：排考进度仍使用轮询，没有 WebSocket 或 SSE 实时推送
 
@@ -58,7 +58,7 @@
 - 建议处理：在持久化队列完成后再评估 SSE 或 WebSocket，避免先做实时通道但缺少可靠任务状态。
 - 验证方式：新增浏览器端实时进度测试或 API 事件流测试。
 - 解决记录：未解决。
-- 本轮复核：仍成立。第三版第一阶段已将异步作业轮询迁入 TanStack Query `refetchInterval`，但进度通道本质仍是 HTTP 轮询，未实现 SSE 或 WebSocket。
+- 本轮复核：仍成立。第三版第一阶段已将异步作业轮询迁入 TanStack Query `refetchInterval`，但进度通道本质仍是 HTTP 轮询，未实现 SSE 或 WebSocket；2026-07-08 E2E 仍通过轮询路径验证异步排考作业。
 
 ### CR-008：Python 调度器尚未独立 FastAPI 服务化
 
@@ -72,9 +72,9 @@
 - 建议处理：若第三版需要独立部署算法服务，再引入 FastAPI；否则保持 CLI 方案，避免过早增加运维复杂度。
 - 验证方式：服务化后补充 API 到 scheduler 服务的契约测试和故障降级测试。
 - 解决记录：未解决。
-- 本轮复核：仍成立。`apps/api/src/scheduler-client.ts` 仍通过 `uv run ... python -m examforge_scheduler.cli solve` 和 stdin/stdout 调用调度器。
+- 本轮复核：仍成立。`apps/api/src/scheduler-client.ts` 仍通过 `uv run ... python -m examforge_scheduler.cli solve` 和 stdin/stdout 调用调度器；2026-07-08 `LOG_LEVEL=silent npm test` 中 Python CLI 契约测试通过。
 
-## 4. 已解决问题
+## 4. 已解决问题索引
 
 - CR-001：本机默认 Python 环境不满足调度器要求
 - CR-004：SQL 迁移文件缺少正式迁移执行器和迁移状态表
@@ -85,6 +85,10 @@
 - CR-012：PostgreSQL 草稿锁定状态只保存在进程内，重启后会丢失
 - CR-013：数据库 schema 缺少外键和关键唯一约束，持久化数据一致性主要依赖应用自律
 - CR-009：Web 运营台主组件体量过大，存在后续维护风险
+- CR-014：已发布排考 CSV 导出未鉴权且没有下载审计
+- CR-015：Web 运营台仍把 Query 数据大量镜像到本地状态
+- CR-016：异步排考作业缺少启动恢复和超时失败语义
+- CR-017：迁移完整性测试仍断言已废弃的草稿唯一约束
 
 ## 5. 审查记录
 
@@ -94,3 +98,5 @@
 - 2026-07-07：修复 CR-001。仓库根 `package.json` 新增 `npm run test:scheduler`，统一通过 `uv run --python 3.12 --extra dev python -m pytest -q` 调用调度器测试；`apps/scheduler/AGENTS.md` 和 `README.md` 同步改为推荐项目级脚本，避免后续代理依赖本机默认 `python`。验证 `npm run test:scheduler` 通过，调度器测试结果为 `32 passed`。
 - 2026-07-07：修复 CR-004、CR-005、CR-006、CR-013。新增 `schema_migrations` 迁移执行器和 `npm run db:migrate`；API 改为 Bearer token 登录与鉴权，Web 角色演示改用对应 token；异步排考作业移入 repository，并在 PostgreSQL 中新增 `schedule_jobs` 表；DB schema 和迁移补充外键、唯一约束，API 基础数据写入补充跨资源引用校验。验证 `npm run typecheck`、`LOG_LEVEL=silent npm test`、`npm run build`、`npm run test:scheduler`、`npm run test:e2e`、`git diff --check` 均通过；API 测试结果为 `22` 个测试通过，调度器测试结果为 `32 passed`，E2E 结果为 `2 passed`。
 - 2026-07-07：修复 CR-009。完成第三版第一阶段 Web 运营台拆分：新增统一 API client、角色 token 边界、query keys、TanStack Query provider 和按业务面组织的 `apps/web/features/`；异步作业、已发布查询、基础数据、教师不可用、运行历史/审计和草稿工作台均已从主组件拆出；`operations-console.tsx` 从约 2397 行收敛到 851 行。验证 `npm run typecheck`、`LOG_LEVEL=silent npm test`、`npm run build`、`npm run test:e2e`、`git diff --check` 均通过；API 测试结果为 `22` 个通过，E2E 结果为 `2 passed`。
+- 2026-07-08：执行第三版第四阶段后全量代码审查；复核 CR-002、CR-003、CR-007、CR-008 仍成立，新增 CR-014 至 CR-017。新鲜验证包括：`npm run test:scheduler` 通过，调度器测试结果为 `42 passed`；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `30` 个通过；`npm run typecheck` 通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`npm audit --audit-level=moderate` 仍返回 2 个 moderate 公告；`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres`、`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:migrations` 和 `DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 均因 `connect ECONNREFUSED 127.0.0.1:5432` 失败，当前会话未取得真实 PostgreSQL 通过结论。
+- 2026-07-08：按审查顺序修复 CR-014、CR-015、CR-016、CR-017。CSV 导出改为 Bearer 鉴权和下载审计；Web 运营台只读服务端数据改为直接消费 TanStack Query 数据；API 启动时将历史 `queued` / `running` 异步作业标为 failed 并记录审计；迁移完整性测试移除废弃草稿唯一约束断言，并将 `0007` 关联表纳入关键迁移检查。验证 `LOG_LEVEL=silent npm test`、`npm run test:scheduler`、`npm run typecheck`、`npm run build`、`npm run test:e2e` 均通过；API 测试结果为 `31` 个通过，调度器测试结果为 `42 passed`，E2E 结果为 `2 passed`。真实 PostgreSQL 验证仍受本机环境阻塞：`docker ps --format ...` 未发现运行中容器，`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres`、`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:migrations`、`DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 均因 `connect ECONNREFUSED 127.0.0.1:5432` 失败。

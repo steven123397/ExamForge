@@ -190,8 +190,15 @@ export const apiClient = {
     );
   },
 
-  publishedScheduleCsvUrl() {
-    return `${apiBase}/api/published-schedule/export.csv`;
+  async downloadPublishedScheduleCsv(role: WorkspaceRole) {
+    const response = await fetch(`${apiBase}/api/published-schedule/export.csv`, {
+      cache: "no-store",
+      headers: roleHeaders(role),
+    });
+    if (!response.ok) {
+      throw new ApiClientError(response.status, await readErrorMessage(response));
+    }
+    return await response.blob();
   },
 
   listScheduleDrafts() {

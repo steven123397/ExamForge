@@ -1262,6 +1262,28 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return row ? this.toScheduleJob(row) : null;
   }
 
+  async recoverInterruptedScheduleJobs(): Promise<ScheduleJobSummary[]> {
+    const { jobs } = await this.listScheduleJobs();
+    const recovered: ScheduleJobSummary[] = [];
+    for (const job of jobs) {
+      if (job.status !== "queued" && job.status !== "running") {
+        continue;
+      }
+      const failed = await this.updateScheduleJob(job.id, {
+        status: "failed",
+        progress: 100,
+        error: "Schedule job was interrupted before completion.",
+      });
+      if (failed) {
+        recovered.push(failed);
+        await this.recordAuditEvent("schedule_job.interrupted", "schedule_job", failed.id, {
+          previousStatus: job.status,
+        });
+      }
+    }
+    return recovered;
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }
@@ -1443,15 +1465,16 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return collections[resource].find((record) => record.id === id) ?? null;
   }
 
-  private async recordAuditEvent(
+  async recordAuditEvent(
     action: string,
     entityType: string,
     entityId: string,
     payload: Record<string, unknown>,
+    actor = "system",
   ) {
     await this.client.db.insert(auditEvents).values({
       id: `audit-${randomUUID()}`,
-      actor: "system",
+      actor,
       action,
       entityType,
       entityId,

@@ -100,6 +100,10 @@ export function createApp(options: AppOptions = {}) {
     await repository.close?.();
   });
 
+  app.addHook("onReady", async () => {
+    await repository.recoverInterruptedScheduleJobs?.();
+  });
+
   app.get("/api/dashboard", async () => repository.getDashboard());
 
   app.get("/api/reference-data", async () => repository.getReferenceData());
@@ -625,7 +629,11 @@ export function createApp(options: AppOptions = {}) {
     return published;
   });
 
-  app.get("/api/published-schedule/export.csv", async (_request, reply) => {
+  app.get("/api/published-schedule/export.csv", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin", "operator", "viewer"])) {
+      return reply;
+    }
+    const user = getRequestUser(request);
     const [referenceData, published] = await Promise.all([
       repository.getReferenceData(),
       repository.getPublishedSchedule(),
@@ -636,6 +644,10 @@ export function createApp(options: AppOptions = {}) {
         message: "No schedule has been published.",
       });
     }
+    await repository.recordAuditEvent?.("published_schedule.exported", "schedule_run", published.run.id, {
+      batchId: published.batch.id,
+      format: "csv",
+    }, user?.username ?? "unknown");
     return reply
       .header("content-type", "text/csv; charset=utf-8")
       .send(buildPublishedScheduleCsv(referenceData, published));

@@ -17,21 +17,15 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
-  DashboardResponse,
-  AuditEventSummary,
   PublishedScheduleNotificationsResponse,
   PublishedScheduleAudienceResponse,
   PublishedScheduleResponse,
-  ReferenceDataResponse,
   ScheduleDraftAdjustmentSuggestion,
   ScheduleDraftAdjustmentSuggestionsResponse,
   ScheduleRunComparisonResponse,
   ScheduleDraftComparisonResponse,
   ScheduleDraftDetailResponse,
-  ScheduleDraftSummary,
-  ScheduleJobSummary,
   ScheduleRunResponse,
-  ScheduleRunSummary,
   ScheduledExam,
 } from "@examforge/shared";
 import type { LoadState } from "../components/shared/load-state";
@@ -51,16 +45,9 @@ import type { WorkspaceRole } from "../lib/roles";
 
 
 export function OperationsConsole() {
-  const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
-  const [referenceData, setReferenceData] = useState<ReferenceDataResponse | null>(null);
   const [latestRun, setLatestRun] = useState<ScheduleRunResponse | null>(null);
-  const [runHistory, setRunHistory] = useState<ScheduleRunSummary[]>([]);
-  const [auditEvents, setAuditEvents] = useState<AuditEventSummary[]>([]);
   const [comparison, setComparison] = useState<ScheduleRunComparisonResponse | null>(null);
-  const [publishedSchedule, setPublishedSchedule] = useState<PublishedScheduleResponse | null>(null);
   const [notifications, setNotifications] = useState<PublishedScheduleNotificationsResponse | null>(null);
-  const [scheduleJobs, setScheduleJobs] = useState<ScheduleJobSummary[]>([]);
-  const [drafts, setDrafts] = useState<ScheduleDraftSummary[]>([]);
   const [currentDraft, setCurrentDraft] = useState<ScheduleDraftDetailResponse | null>(null);
   const [draftComparison, setDraftComparison] = useState<ScheduleDraftComparisonResponse | null>(null);
   const [draftSuggestions, setDraftSuggestions] = useState<ScheduleDraftAdjustmentSuggestionsResponse | null>(null);
@@ -88,24 +75,45 @@ export function OperationsConsole() {
   const dashboardQuery = useQuery({
     queryKey: queryKeys.dashboard,
     queryFn: () => apiClient.getDashboard(),
-    enabled: false,
   });
   const referenceDataQuery = useQuery({
     queryKey: queryKeys.referenceData,
     queryFn: () => apiClient.getReferenceData(),
-    enabled: false,
   });
   const scheduleRunsQuery = useQuery({
     queryKey: queryKeys.scheduleRuns,
     queryFn: () => apiClient.listScheduleRuns(),
-    enabled: false,
   });
   const auditEventsQuery = useQuery({
     queryKey: queryKeys.auditEvents,
     queryFn: () => apiClient.listAuditEvents(),
-    enabled: false,
+  });
+  const publishedScheduleQuery = useQuery<PublishedScheduleResponse | null>({
+    queryKey: queryKeys.publishedSchedule,
+    queryFn: async () => {
+      try {
+        return await apiClient.getPublishedSchedule();
+      } catch (reason) {
+        if (statusOf(reason) === 404) {
+          return null;
+        }
+        throw reason;
+      }
+    },
+    retry: false,
+  });
+  const draftsQuery = useQuery({
+    queryKey: queryKeys.scheduleDrafts,
+    queryFn: () => apiClient.listScheduleDrafts(),
   });
   const scheduleJobsQuery = useScheduleJobsQuery();
+  const dashboard = dashboardQuery.data ?? null;
+  const referenceData = referenceDataQuery.data ?? null;
+  const runHistory = scheduleRunsQuery.data?.runs ?? [];
+  const auditEvents = auditEventsQuery.data?.events ?? [];
+  const publishedSchedule = publishedScheduleQuery.data ?? null;
+  const drafts = draftsQuery.data?.drafts ?? [];
+  const scheduleJobs = scheduleJobsQuery.data?.jobs ?? [];
 
   useEffect(() => {
     void loadInitialData();
@@ -115,9 +123,7 @@ export function OperationsConsole() {
     if (!scheduleJobsQuery.data) {
       return;
     }
-    const jobs = scheduleJobsQuery.data.jobs;
-    setScheduleJobs(jobs);
-    const latestCompleted = jobs.find((job) => job.status === "completed" && job.runId);
+    const latestCompleted = scheduleJobsQuery.data.jobs.find((job) => job.status === "completed" && job.runId);
     if (latestCompleted?.runId && latestCompletedJobRunIdRef.current !== latestCompleted.runId) {
       latestCompletedJobRunIdRef.current = latestCompleted.runId;
       void apiClient.getScheduleRun(latestCompleted.runId).then(setLatestRun).catch(() => undefined);
@@ -159,10 +165,6 @@ export function OperationsConsole() {
       if (dashboardResult.error || referenceResult.error || !dashboardResult.data || !referenceResult.data) {
         throw dashboardResult.error ?? referenceResult.error ?? new Error("API 响应异常");
       }
-      const dashboardPayload = dashboardResult.data;
-      const referencePayload = referenceResult.data;
-      setDashboard(dashboardPayload);
-      setReferenceData(referencePayload);
       await loadOperationalHistory();
       setState("ready");
     } catch (reason) {
@@ -190,8 +192,7 @@ export function OperationsConsole() {
     setJobState("loading");
     setError(null);
     try {
-      const payload = await apiClient.createScheduleJob(role);
-      setScheduleJobs((current) => [payload.job, ...current.filter((job) => job.id !== payload.job.id)]);
+      await apiClient.createScheduleJob(role);
       await scheduleJobsQuery.refetch();
       setJobState("ready");
     } catch (reason) {
@@ -201,48 +202,20 @@ export function OperationsConsole() {
   }
 
   async function loadOperationalHistory() {
-    const [runsResult, auditResult, publishedResult, draftsResult, jobsResult] = await Promise.allSettled([
+    const [, , publishedResult] = await Promise.allSettled([
       scheduleRunsQuery.refetch(),
       auditEventsQuery.refetch(),
-      apiClient.getPublishedSchedule(),
-      apiClient.listScheduleDrafts(),
+      publishedScheduleQuery.refetch(),
+      draftsQuery.refetch(),
       scheduleJobsQuery.refetch(),
     ]);
 
-    if (runsResult.status === "fulfilled" && !runsResult.value.error && runsResult.value.data) {
-      setRunHistory(runsResult.value.data.runs);
-    }
-    if (auditResult.status === "fulfilled" && !auditResult.value.error && auditResult.value.data) {
-      setAuditEvents(auditResult.value.data.events);
-    }
-    if (publishedResult.status === "fulfilled") {
-      setPublishedSchedule(publishedResult.value);
+    if (publishedResult.status === "fulfilled" && !publishedResult.value.error && publishedResult.value.data) {
       await loadNotifications();
-    } else if (statusOf(publishedResult.reason) === 404) {
-      setPublishedSchedule(null);
+    } else if (publishedResult.status === "fulfilled" && !publishedResult.value.error && !publishedResult.value.data) {
       setNotifications(null);
       setTeacherSchedule(null);
       setStudentSchedule(null);
-    }
-    if (draftsResult.status === "fulfilled") {
-      setDrafts(draftsResult.value.drafts);
-    }
-    if (jobsResult.status === "fulfilled" && !jobsResult.value.error && jobsResult.value.data) {
-      setScheduleJobs(jobsResult.value.data.jobs);
-    }
-  }
-
-  async function loadScheduleJobs() {
-    try {
-      const payload = await scheduleJobsQuery.refetch();
-      const jobs = payload.data?.jobs ?? [];
-      setScheduleJobs(jobs);
-      const latestCompleted = jobs.find((job) => job.status === "completed" && job.runId);
-      if (latestCompleted?.runId) {
-        setLatestRun(await apiClient.getScheduleRun(latestCompleted.runId));
-      }
-    } catch {
-      // Polling should not replace the visible action error state.
     }
   }
 
@@ -262,7 +235,7 @@ export function OperationsConsole() {
     setPublishState("loading");
     setError(null);
     try {
-      setPublishedSchedule(await apiClient.publishScheduleRun(id, role));
+      await apiClient.publishScheduleRun(id, role);
       await loadOperationalHistory();
       await refreshDashboard();
       setPublishState("ready");
@@ -430,7 +403,6 @@ export function OperationsConsole() {
     setError(null);
     try {
       const payload = await apiClient.publishScheduleDraft(currentDraft.draft.id, role);
-      setPublishedSchedule(payload);
       setCurrentDraft((current) => current ? {
         ...current,
         draft: payload.draft,
@@ -478,7 +450,6 @@ export function OperationsConsole() {
     setError(null);
     try {
       await apiClient.rollbackPublishedSchedule(role);
-      setPublishedSchedule(null);
       await loadOperationalHistory();
       await refreshDashboard();
       setPublishState("ready");
@@ -545,15 +516,26 @@ export function OperationsConsole() {
     }
   }
 
-  function downloadPublishedCsv() {
-    window.open(apiClient.publishedScheduleCsvUrl(), "_blank", "noopener,noreferrer");
+  async function downloadPublishedCsv() {
+    setNotificationState("loading");
+    setError(null);
+    try {
+      const blob = await apiClient.downloadPublishedScheduleCsv(role);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "published-schedule.csv";
+      link.click();
+      URL.revokeObjectURL(url);
+      setNotificationState("ready");
+    } catch (reason) {
+      setError(statusOf(reason) === 403 ? "当前角色没有导出已发布方案权限" : reason instanceof Error ? reason.message : "CSV 导出失败");
+      setNotificationState("error");
+    }
   }
 
   async function refreshDashboard() {
     const result = await dashboardQuery.refetch();
-    if (result.data) {
-      setDashboard(result.data);
-    }
     return result.data;
   }
 

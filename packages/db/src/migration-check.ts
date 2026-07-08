@@ -2,12 +2,16 @@ import { pathToFileURL } from "node:url";
 import { createDbClient, type ExamForgeDbClient } from "./client.js";
 import { loadMigrationFiles, migrationStateTableName, runMigrations } from "./migrations.js";
 
-const criticalTables = [
+export const criticalMigrationTables = [
   migrationStateTableName,
   "exam_batches",
   "schedule_runs",
   "scheduled_exams",
+  "exam_task_student_groups",
+  "scheduled_exam_invigilators",
   "schedule_drafts",
+  "draft_exam_invigilators",
+  "teacher_unavailable_slots",
   "schedule_jobs",
   "audit_events",
 ];
@@ -28,7 +32,7 @@ export async function checkMigrations(
   const secondRunApplied = await runMigrations(client);
   const missingTables: string[] = [];
 
-  for (const tableName of criticalTables) {
+  for (const tableName of criticalMigrationTables) {
     const result = await client.pool.query<{ exists: string | null }>(
       "SELECT to_regclass($1) AS exists",
       [`public.${tableName}`],
@@ -42,7 +46,7 @@ export async function checkMigrations(
     migrationCount: migrationFiles.length,
     firstRunAppliedCount: firstRunApplied.length,
     secondRunAppliedCount: secondRunApplied.length,
-    checkedTables: criticalTables,
+    checkedTables: criticalMigrationTables,
     missingTables,
   };
 }

@@ -27,6 +27,10 @@ describe("database migration checks", () => {
     assert.deepEqual(result.missingTables, []);
     assert.ok(result.checkedTables.includes("schedule_jobs"));
     assert.ok(result.checkedTables.includes("schema_migrations"));
+    assert.ok(result.checkedTables.includes("exam_task_student_groups"));
+    assert.ok(result.checkedTables.includes("scheduled_exam_invigilators"));
+    assert.ok(result.checkedTables.includes("draft_exam_invigilators"));
+    assert.ok(result.checkedTables.includes("teacher_unavailable_slots"));
   });
 });
 

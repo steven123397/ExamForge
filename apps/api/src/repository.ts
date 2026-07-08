@@ -52,6 +52,13 @@ export interface PlatformRepository {
     targetId: string,
   ): Promise<ScheduleRunComparisonResponse | null>;
   listAuditEvents(filter?: AuditEventFilter): Promise<AuditEventListResponse>;
+  recordAuditEvent?(
+    action: string,
+    entityType: string,
+    entityId: string,
+    payload: Record<string, unknown>,
+    actor?: string,
+  ): Promise<void> | void;
   publishScheduleRun(id: string): Promise<PublishedScheduleResponse | null>;
   getPublishedSchedule(): Promise<PublishedScheduleResponse | null>;
   rollbackPublishedSchedule(): Promise<ScheduleRollbackResponse>;
@@ -81,6 +88,7 @@ export interface PlatformRepository {
     id: string,
     patch: Partial<Pick<ScheduleJobSummary, "status" | "progress" | "runId" | "error">>,
   ): Promise<ScheduleJobSummary | null>;
+  recoverInterruptedScheduleJobs?(): Promise<ScheduleJobSummary[]>;
   close?(): Promise<void>;
 }
 
@@ -630,6 +638,27 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return next;
   }
 
+  async recoverInterruptedScheduleJobs(): Promise<ScheduleJobSummary[]> {
+    const recovered: ScheduleJobSummary[] = [];
+    for (const job of this.scheduleJobs.values()) {
+      if (job.status !== "queued" && job.status !== "running") {
+        continue;
+      }
+      const failed = await this.updateScheduleJob(job.id, {
+        status: "failed",
+        progress: 100,
+        error: "Schedule job was interrupted before completion.",
+      });
+      if (failed) {
+        recovered.push(failed);
+        this.recordAuditEvent("schedule_job.interrupted", "schedule_job", failed.id, {
+          previousStatus: job.status,
+        });
+      }
+    }
+    return recovered;
+  }
+
   async getPublishedSchedule(): Promise<PublishedScheduleResponse | null> {
     if (!this.publishedRunId) {
       return null;
@@ -682,15 +711,16 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     };
   }
 
-  private recordAuditEvent(
+  recordAuditEvent(
     action: string,
     entityType: string,
     entityId: string,
     payload: Record<string, unknown>,
+    actor = "system",
   ) {
     this.auditEvents.push({
       id: `audit-${randomUUID()}`,
-      actor: "system",
+      actor,
       action,
       entityType,
       entityId,
