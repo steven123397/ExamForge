@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 from examforge_scheduler.models import (
     ConflictRecord,
@@ -9,6 +10,7 @@ from examforge_scheduler.models import (
     ExamType,
     Room,
     RoomType,
+    RescheduleContext,
     ScheduledExam,
     ScheduleInput,
     ScheduleResult,
@@ -132,6 +134,7 @@ def test_build_schedule_report_contains_summary_score_and_conflicts():
             "suggestion": "调整时间段",
         }
     ]
+    assert "reschedule" not in report
 
 
 def test_build_schedule_report_contains_utilization_and_workload_summaries():
@@ -190,3 +193,61 @@ def test_build_schedule_report_returns_json_serializable_data():
     report = build_schedule_report(data, result)
 
     json.dumps(report, ensure_ascii=False)
+
+
+def test_build_schedule_report_contains_reschedule_summary():
+    data = make_report_input()
+    third_exam = ExamTask(
+        id="e3",
+        course_id="c3",
+        student_group_ids=("g3",),
+        expected_count=20,
+        duration_minutes=120,
+        required_room_type=RoomType.STANDARD,
+    )
+    data = replace(
+        data,
+        student_groups=data.student_groups
+        + (StudentGroup("g3", "CS 2303", 20, "cs"),),
+        courses=data.courses
+        + (Course("c3", "Course 3", "cs", ExamType.WRITTEN),),
+        exam_tasks=(
+            data.exam_tasks[0],
+            replace(data.exam_tasks[1], invigilator_count=2),
+            third_exam,
+        ),
+        reschedule_context=RescheduleContext(
+            baseline_assignments=(
+                ScheduledExam("e1", "r1", "s1", ("t1",)),
+                ScheduledExam("e2", "r2", "s2", ("t2", "t1")),
+                ScheduledExam("e3", "r1", "s2", ("t1",)),
+            ),
+            movable_exam_task_ids=("e2", "e3"),
+        ),
+    )
+    result = ScheduleResult(
+        assignments=(
+            ScheduledExam("e1", "r1", "s1", ("t1",)),
+            ScheduledExam("e2", "r2", "s2", ("t1", "t2")),
+            ScheduledExam("e3", "r2", "s1", ("t2",)),
+        ),
+        conflicts=(),
+        score=ScoreBreakdown(total_score=90, hard_violation_count=0),
+        statistics=SolverStatistics(
+            status=SolveStatus.FEASIBLE,
+            elapsed_ms=50,
+            exam_count=3,
+            room_count=2,
+            slot_count=2,
+            attempted_assignments=6,
+        ),
+    )
+
+    report = build_schedule_report(data, result)
+
+    assert report["reschedule"] == {
+        "baseline_exam_count": 3,
+        "frozen_exam_task_ids": ["e1"],
+        "retained_exam_task_ids": ["e1", "e2"],
+        "changed_exam_task_ids": ["e3"],
+    }

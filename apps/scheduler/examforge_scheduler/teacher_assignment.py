@@ -25,6 +25,20 @@ def assign_teachers(
         for assignment in schedule_input.fixed_assignments
         if assignment.teacher_ids
     }
+    reschedule_context = schedule_input.reschedule_context
+    baseline_by_exam = (
+        {
+            assignment.exam_task_id: assignment
+            for assignment in reschedule_context.baseline_assignments
+        }
+        if reschedule_context is not None
+        else {}
+    )
+    movable_exam_ids = (
+        set(reschedule_context.movable_exam_task_ids)
+        if reschedule_context is not None
+        else set()
+    )
 
     model = cp_model.CpModel()
     variables: dict[tuple[str, str], cp_model.IntVar] = {}
@@ -54,6 +68,15 @@ def assign_teachers(
                 model.Add(
                     variables[(assignment.exam_task_id, teacher.id)]
                     == (1 if teacher.id in fixed_teacher_ids else 0)
+                )
+
+        baseline = baseline_by_exam.get(assignment.exam_task_id)
+        if baseline is not None and assignment.exam_task_id not in movable_exam_ids:
+            baseline_teacher_ids = set(baseline.teacher_ids)
+            for teacher in teachers:
+                model.Add(
+                    variables[(assignment.exam_task_id, teacher.id)]
+                    == (1 if teacher.id in baseline_teacher_ids else 0)
                 )
 
     slot_ids = {assignment.time_slot_id for assignment in assignments}
@@ -86,6 +109,13 @@ def assign_teachers(
             teachers,
             variables,
             model,
+            business_scale,
+        ),
+        *_reschedule_stability_terms(
+            schedule_input,
+            assignments,
+            teachers,
+            variables,
             business_scale,
         ),
     ]
@@ -231,3 +261,38 @@ def _tie_break_terms(
         for exam_index, assignment in enumerate(assignments)
         for teacher_index, teacher in enumerate(teachers)
     ]
+
+
+def _reschedule_stability_terms(
+    schedule_input: ScheduleInput,
+    assignments: tuple[ScheduledExam, ...],
+    teachers: tuple[Teacher, ...],
+    variables: dict[tuple[str, str], cp_model.IntVar],
+    business_scale: int,
+) -> list:
+    context = schedule_input.reschedule_context
+    weight = schedule_input.constraint_profile.soft_weights.get(
+        "schedule_stability", 0
+    )
+    if context is None or weight <= 0:
+        return []
+
+    baseline_by_exam = {
+        assignment.exam_task_id: assignment
+        for assignment in context.baseline_assignments
+    }
+    movable_exam_ids = set(context.movable_exam_task_ids)
+    terms = []
+    coefficient = weight * business_scale
+    for assignment in assignments:
+        if assignment.exam_task_id not in movable_exam_ids:
+            continue
+        baseline = baseline_by_exam[assignment.exam_task_id]
+        baseline_teacher_ids = set(baseline.teacher_ids)
+        for teacher in teachers:
+            variable = variables[(assignment.exam_task_id, teacher.id)]
+            if teacher.id in baseline_teacher_ids:
+                terms.append((1 - variable) * coefficient)
+            else:
+                terms.append(variable * coefficient)
+    return terms

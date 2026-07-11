@@ -1,6 +1,6 @@
 from collections import Counter, defaultdict
 
-from .models import ExamTask, Room, ScheduleInput, ScheduleResult
+from .models import ExamTask, Room, ScheduledExam, ScheduleInput, ScheduleResult
 
 
 def build_schedule_report(
@@ -10,7 +10,7 @@ def build_schedule_report(
     task_by_id = {task.id: task for task in schedule_input.exam_tasks}
     room_by_id = {room.id: room for room in schedule_input.rooms}
 
-    return {
+    report = {
         "summary": _build_summary(schedule_input, result),
         "statistics": _build_statistics(result),
         "score": _build_score(result),
@@ -18,6 +18,9 @@ def build_schedule_report(
         "room_utilization": _build_room_utilization(result, task_by_id, room_by_id),
         "teacher_workload": _build_teacher_workload(schedule_input, result),
     }
+    if schedule_input.reschedule_context is not None:
+        report["reschedule"] = _build_reschedule_summary(schedule_input, result)
+    return report
 
 
 def _build_summary(
@@ -123,6 +126,52 @@ def _build_teacher_workload(
             for teacher in schedule_input.teachers
         ],
     }
+
+
+def _build_reschedule_summary(
+    schedule_input: ScheduleInput,
+    result: ScheduleResult,
+) -> dict[str, object]:
+    context = schedule_input.reschedule_context
+    if context is None:
+        return {}
+
+    baseline_by_exam = {
+        assignment.exam_task_id: assignment
+        for assignment in context.baseline_assignments
+    }
+    result_by_exam = {
+        assignment.exam_task_id: assignment
+        for assignment in result.assignments
+    }
+    movable_exam_ids = set(context.movable_exam_task_ids)
+    retained_exam_ids = sorted(
+        exam_id
+        for exam_id, baseline in baseline_by_exam.items()
+        if _assignments_match(result_by_exam.get(exam_id), baseline)
+    )
+    changed_exam_ids = sorted(set(baseline_by_exam) - set(retained_exam_ids))
+
+    return {
+        "baseline_exam_count": len(baseline_by_exam),
+        "frozen_exam_task_ids": sorted(
+            set(baseline_by_exam) - movable_exam_ids
+        ),
+        "retained_exam_task_ids": retained_exam_ids,
+        "changed_exam_task_ids": changed_exam_ids,
+    }
+
+
+def _assignments_match(
+    assignment: ScheduledExam | None,
+    baseline: ScheduledExam,
+) -> bool:
+    return (
+        assignment is not None
+        and assignment.room_id == baseline.room_id
+        and assignment.time_slot_id == baseline.time_slot_id
+        and set(assignment.teacher_ids) == set(baseline.teacher_ids)
+    )
 
 
 def _average(values: list[float]) -> float:

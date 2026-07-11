@@ -57,13 +57,24 @@ def solve_schedule(schedule_input: ScheduleInput) -> ScheduleResult:
     fixed_assignment_conflicts = _fixed_assignment_conflicts(
         schedule_input, candidates_by_task
     )
-    if missing_candidate_conflicts or fixed_assignment_conflicts:
+    frozen_baseline_conflicts = _frozen_baseline_conflicts(
+        schedule_input, candidates_by_task
+    )
+    if (
+        missing_candidate_conflicts
+        or fixed_assignment_conflicts
+        or frozen_baseline_conflicts
+    ):
         return _build_result(
             schedule_input=schedule_input,
             status=SolveStatus.INFEASIBLE,
             started_at=started_at,
             attempted_assignments=attempted_assignments,
-            conflicts=missing_candidate_conflicts + fixed_assignment_conflicts,
+            conflicts=(
+                missing_candidate_conflicts
+                + fixed_assignment_conflicts
+                + frozen_baseline_conflicts
+            ),
         )
 
     model = cp_model.CpModel()
@@ -78,6 +89,7 @@ def solve_schedule(schedule_input: ScheduleInput) -> ScheduleResult:
     _add_room_time_constraints(model, variables)
     _add_student_group_constraints(schedule_input, model, variables)
     _add_fixed_assignment_constraints(schedule_input, model, variables)
+    _add_frozen_baseline_constraints(schedule_input, model, variables)
     objective_terms = _build_soft_objective_terms(schedule_input, model, variables)
     if objective_terms:
         model.Minimize(sum(objective_terms))
@@ -216,6 +228,40 @@ def _fixed_assignment_conflicts(
     return tuple(conflicts)
 
 
+def _frozen_baseline_conflicts(
+    schedule_input: ScheduleInput,
+    candidates_by_task: dict[str, tuple[_Candidate, ...]],
+) -> tuple[ConflictRecord, ...]:
+    context = schedule_input.reschedule_context
+    if context is None:
+        return ()
+
+    movable_exam_ids = set(context.movable_exam_task_ids)
+    conflicts = []
+    for baseline in context.baseline_assignments:
+        if baseline.exam_task_id in movable_exam_ids:
+            continue
+        candidate = _Candidate(
+            baseline.exam_task_id,
+            baseline.room_id,
+            baseline.time_slot_id,
+        )
+        if candidate in candidates_by_task.get(baseline.exam_task_id, ()):
+            continue
+        conflicts.append(
+            ConflictRecord(
+                type="reschedule_frozen_assignment_invalid",
+                severity=ConflictSeverity.ERROR,
+                affected_ids=(baseline.exam_task_id,),
+                message=(
+                    f"冻结考试 {baseline.exam_task_id} 的基准考场与时间已不满足当前约束。"
+                ),
+                suggestion="请恢复基准资源条件，或将该考试加入可移动范围后重试。",
+            )
+        )
+    return tuple(conflicts)
+
+
 def _add_exam_assignment_constraints(
     model: cp_model.CpModel,
     candidates_by_task: dict[str, tuple[_Candidate, ...]],
@@ -279,6 +325,28 @@ def _add_fixed_assignment_constraints(
             model.Add(variables[candidate] == 1)
 
 
+def _add_frozen_baseline_constraints(
+    schedule_input: ScheduleInput,
+    model: cp_model.CpModel,
+    variables: dict[_Candidate, cp_model.IntVar],
+) -> None:
+    context = schedule_input.reschedule_context
+    if context is None:
+        return
+
+    movable_exam_ids = set(context.movable_exam_task_ids)
+    for baseline in context.baseline_assignments:
+        if baseline.exam_task_id in movable_exam_ids:
+            continue
+        candidate = _Candidate(
+            baseline.exam_task_id,
+            baseline.room_id,
+            baseline.time_slot_id,
+        )
+        if candidate in variables:
+            model.Add(variables[candidate] == 1)
+
+
 def _build_soft_objective_terms(
     schedule_input: ScheduleInput,
     model: cp_model.CpModel,
@@ -288,6 +356,7 @@ def _build_soft_objective_terms(
         *_room_utilization_terms(schedule_input, variables),
         *_student_consecutive_exam_terms(schedule_input, model, variables),
         *_exam_distribution_balance_terms(schedule_input, model, variables),
+        *_reschedule_stability_terms(schedule_input, variables),
     ]
 
 
@@ -406,6 +475,33 @@ def _exam_distribution_balance_terms(
         model.Add(penalty_units * date_count >= scaled_excess)
         terms.append(penalty_units * weight)
 
+    return terms
+
+
+def _reschedule_stability_terms(
+    schedule_input: ScheduleInput,
+    variables: dict[_Candidate, cp_model.IntVar],
+) -> list:
+    context = schedule_input.reschedule_context
+    weight = schedule_input.constraint_profile.soft_weights.get(
+        "schedule_stability", 0
+    )
+    if context is None or weight <= 0:
+        return []
+
+    movable_exam_ids = set(context.movable_exam_task_ids)
+    terms = []
+    for baseline in context.baseline_assignments:
+        if baseline.exam_task_id not in movable_exam_ids:
+            continue
+        candidate = _Candidate(
+            baseline.exam_task_id,
+            baseline.room_id,
+            baseline.time_slot_id,
+        )
+        baseline_variable = variables.get(candidate)
+        if baseline_variable is not None:
+            terms.append((1 - baseline_variable) * weight)
     return terms
 
 

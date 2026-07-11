@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from examforge_scheduler.models import (
@@ -7,6 +9,7 @@ from examforge_scheduler.models import (
     ExamType,
     Room,
     RoomType,
+    RescheduleContext,
     ScheduledExam,
     ScheduleInput,
     StudentGroup,
@@ -150,6 +153,38 @@ def test_teacher_consecutive_invigilation_adds_weighted_penalty():
 
     assert item.penalty == 60
     assert "t1" in item.message
+
+
+def test_schedule_stability_penalizes_room_slot_and_teacher_changes():
+    data = make_schedule_input()
+    data = replace(
+        data,
+        exam_tasks=data.exam_tasks[:2],
+        constraint_profile=replace(
+            data.constraint_profile,
+            soft_weights={"schedule_stability": 10},
+        ),
+        reschedule_context=RescheduleContext(
+            baseline_assignments=(
+                ScheduledExam("e1", "r2", "s1", ("t1",)),
+                ScheduledExam("e2", "r2", "s2", ("t2",)),
+            ),
+            movable_exam_task_ids=("e1", "e2"),
+        ),
+    )
+
+    score = calculate_score(
+        data,
+        (
+            ScheduledExam("e1", "r1", "s1", ("t3",)),
+            ScheduledExam("e2", "r2", "s2", ("t2",)),
+        ),
+    )
+
+    item = _penalty(score, "schedule_stability")
+
+    assert item.penalty == 30
+    assert "e1" in item.message
 
 
 def test_room_utilization_penalizes_low_capacity_usage():

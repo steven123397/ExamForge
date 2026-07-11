@@ -29,6 +29,7 @@ def calculate_score(
         _student_consecutive_exam_penalty(assignments, task_by_id, slot_by_id, weights),
         _teacher_workload_balance_penalty(schedule_input, assignments, weights),
         _teacher_consecutive_invigilation_penalty(assignments, slot_by_id, weights),
+        _schedule_stability_penalty(schedule_input, assignments, weights),
         _room_utilization_penalty(assignments, task_by_id, room_by_id, weights),
         _exam_distribution_balance_penalty(schedule_input, assignments, slot_by_id, weights),
     )
@@ -148,6 +149,51 @@ def _teacher_consecutive_invigilation_penalty(
         rule="teacher_consecutive_invigilation",
         penalty=count * weight,
         message=f"教师 {teacher_ids} 存在 {count} 次连续监考",
+    )
+
+
+def _schedule_stability_penalty(
+    schedule_input: ScheduleInput,
+    assignments: tuple[ScheduledExam, ...],
+    weights: dict[str, int],
+) -> SoftPenaltyItem | None:
+    context = schedule_input.reschedule_context
+    weight = weights.get("schedule_stability", 0)
+    if context is None or weight <= 0:
+        return None
+
+    baseline_by_exam = {
+        assignment.exam_task_id: assignment
+        for assignment in context.baseline_assignments
+    }
+    penalty_units = 0
+    changed_exam_ids = []
+    for assignment in assignments:
+        baseline = baseline_by_exam.get(assignment.exam_task_id)
+        if baseline is None:
+            continue
+
+        assignment_units = 0
+        if (
+            assignment.room_id != baseline.room_id
+            or assignment.time_slot_id != baseline.time_slot_id
+        ):
+            assignment_units += 1
+        assignment_units += len(
+            set(assignment.teacher_ids) ^ set(baseline.teacher_ids)
+        )
+        if assignment_units > 0:
+            penalty_units += assignment_units
+            changed_exam_ids.append(assignment.exam_task_id)
+
+    if penalty_units == 0:
+        return None
+
+    affected_ids = ", ".join(sorted(changed_exam_ids))
+    return SoftPenaltyItem(
+        rule="schedule_stability",
+        penalty=penalty_units * weight,
+        message=f"考试 {affected_ids} 相对基准发生 {penalty_units} 项安排变化",
     )
 
 
