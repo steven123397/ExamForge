@@ -192,6 +192,80 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("passes reschedule context from schedule run requests to the scheduler", async () => {
+    const scheduler = new FakeScheduler();
+    const app = createApp({ scheduler });
+    const rescheduleContext = buildRescheduleContext();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+      payload: {
+        fixed_assignments: [],
+        reschedule_context: rescheduleContext,
+      },
+    });
+
+    assert.equal(response.statusCode, 201);
+    assert.deepEqual(scheduler.lastInput?.reschedule_context, rescheduleContext);
+    await app.close();
+  });
+
+  it("passes reschedule context from schedule job requests to the scheduler", async () => {
+    const scheduler = new FakeScheduler();
+    const app = createApp({ scheduler });
+    const rescheduleContext = buildRescheduleContext();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/schedule-jobs",
+      headers: operatorHeaders,
+      payload: {
+        fixed_assignments: [],
+        reschedule_context: rescheduleContext,
+      },
+    });
+    assert.equal(response.statusCode, 202);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.deepEqual(scheduler.lastInput?.reschedule_context, rescheduleContext);
+    await app.close();
+  });
+
+  it("rejects structurally invalid reschedule context requests", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+    const baseline = buildRescheduleContext().baseline_assignments[0];
+    const invalidContexts = [
+      {
+        baseline_assignments: [baseline, baseline],
+        movable_exam_task_ids: [baseline.exam_task_id],
+      },
+      {
+        baseline_assignments: [baseline],
+        movable_exam_task_ids: [baseline.exam_task_id, baseline.exam_task_id],
+      },
+      {
+        baseline_assignments: [baseline],
+        movable_exam_task_ids: ["e-not-in-baseline"],
+      },
+    ];
+
+    for (const rescheduleContext of invalidContexts) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/schedule-runs",
+        headers: operatorHeaders,
+        payload: { reschedule_context: rescheduleContext },
+      });
+
+      assert.equal(response.statusCode, 400);
+      assert.equal(response.json().error, "invalid_schedule_request");
+    }
+    await app.close();
+  });
+
   it("authenticates users with bearer tokens instead of trusting role headers", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
 
@@ -1226,6 +1300,20 @@ describe("ExamForge API", () => {
     await app.close();
   });
 });
+
+function buildRescheduleContext() {
+  return {
+    baseline_assignments: [
+      {
+        exam_task_id: "e-data-structures",
+        room_id: "r-101",
+        time_slot_id: "s-001",
+        teacher_ids: ["t-zhang"],
+      },
+    ],
+    movable_exam_task_ids: ["e-data-structures"],
+  };
+}
 
 async function waitFor(assertion: () => Promise<boolean>, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;

@@ -124,6 +124,8 @@ describe("PostgreSQL platform integration", () => {
     const repository = new PostgresPlatformRepository(dbClient);
     const referenceData = await repository.getReferenceData();
 
+    assert.equal(referenceData.scheduleInput.reschedule_context, null);
+
     const unavailableRows = await dbClient.db
       .select()
       .from(teacherUnavailableSlots)

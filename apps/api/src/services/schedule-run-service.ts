@@ -1,9 +1,13 @@
-import type { FixedAssignment, ScheduleInput } from "@examforge/shared";
+import type { ScheduleInput } from "@examforge/shared";
 import type { PlatformRepository } from "../repository.js";
 import type { SchedulerClient } from "../scheduler-client.js";
 
 export type DeferredTask = () => Promise<void>;
 export type DeferScheduleTask = (task: DeferredTask) => void;
+export type ScheduleRunOverrides = Pick<
+  ScheduleInput,
+  "fixed_assignments" | "reschedule_context"
+>;
 
 export class ScheduleRunService {
   constructor(
@@ -12,17 +16,17 @@ export class ScheduleRunService {
     private readonly defer: DeferScheduleTask = deferWithTimer,
   ) {}
 
-  async createScheduleRun(fixedAssignments: FixedAssignment[]) {
+  async createScheduleRun(overrides: ScheduleRunOverrides) {
     const referenceData = await this.repository.getReferenceData();
     const result = await this.scheduler.solve(
-      withFixedAssignments(referenceData.scheduleInput, fixedAssignments),
+      withScheduleOverrides(referenceData.scheduleInput, overrides),
     );
     return this.repository.createScheduleRun(result);
   }
 
-  async createScheduleJob(fixedAssignments: FixedAssignment[]) {
+  async createScheduleJob(overrides: ScheduleRunOverrides) {
     const job = await this.repository.createScheduleJob();
-    this.defer(() => this.executeScheduleJob(job.id, fixedAssignments));
+    this.defer(() => this.executeScheduleJob(job.id, overrides));
     return job;
   }
 
@@ -38,7 +42,7 @@ export class ScheduleRunService {
     return this.repository.recoverInterruptedScheduleJobs?.();
   }
 
-  private async executeScheduleJob(id: string, fixedAssignments: FixedAssignment[]) {
+  private async executeScheduleJob(id: string, overrides: ScheduleRunOverrides) {
     const current = await this.repository.getScheduleJob(id);
     if (!current) {
       return;
@@ -50,7 +54,7 @@ export class ScheduleRunService {
     try {
       const referenceData = await this.repository.getReferenceData();
       const result = await this.scheduler.solve(
-        withFixedAssignments(referenceData.scheduleInput, fixedAssignments),
+        withScheduleOverrides(referenceData.scheduleInput, overrides),
       );
       const response = await this.repository.createScheduleRun(result);
       await this.repository.updateScheduleJob(id, {
@@ -74,12 +78,12 @@ function deferWithTimer(task: DeferredTask) {
   }, 0);
 }
 
-function withFixedAssignments(
+function withScheduleOverrides(
   scheduleInput: ScheduleInput,
-  fixedAssignments: FixedAssignment[],
+  overrides: ScheduleRunOverrides,
 ): ScheduleInput {
   return {
     ...scheduleInput,
-    fixed_assignments: fixedAssignments,
+    ...overrides,
   };
 }

@@ -3,6 +3,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
   fixedAssignmentSchema,
+  rescheduleContextSchema,
   referenceRecordCreateSchemas,
   referenceRecordUpdateSchemas,
   referenceResourceSchema,
@@ -34,6 +35,7 @@ export interface AppOptions {
 
 const scheduleRequestSchema = z.object({
   fixed_assignments: z.array(fixedAssignmentSchema).default([]),
+  reschedule_context: rescheduleContextSchema.nullable().default(null),
 }).strict();
 
 export function createApp(options: AppOptions = {}) {
@@ -309,7 +311,7 @@ export function createApp(options: AppOptions = {}) {
         issues: parsed.error.issues,
       });
     }
-    const response = await scheduleRunService.createScheduleRun(parsed.data.fixed_assignments);
+    const response = await scheduleRunService.createScheduleRun(parsed.data);
     return reply.code(201).send(response);
   });
 
@@ -325,7 +327,7 @@ export function createApp(options: AppOptions = {}) {
         issues: parsed.error.issues,
       });
     }
-    const job = await scheduleRunService.createScheduleJob(parsed.data.fixed_assignments);
+    const job = await scheduleRunService.createScheduleJob(parsed.data);
     return reply.code(202).send({ job });
   });
 

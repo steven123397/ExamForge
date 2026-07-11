@@ -19,6 +19,48 @@ describe("PythonSchedulerClient", () => {
     assert.ok("report" in parsed);
   });
 
+  it("solves reschedule context through the Python CLI contract", async () => {
+    const client = new PythonSchedulerClient();
+    const baseline = await client.solve(demoScheduleInput);
+    assert.equal(baseline.statistics.status, "feasible");
+
+    const result = await client.solve({
+      ...demoScheduleInput,
+      constraint_profile: {
+        ...demoScheduleInput.constraint_profile,
+        soft_weights: {
+          ...demoScheduleInput.constraint_profile.soft_weights,
+          schedule_stability: 100,
+        },
+      },
+      reschedule_context: {
+        baseline_assignments: baseline.assignments,
+        movable_exam_task_ids: ["e-data-structures"],
+      },
+    });
+
+    assert.equal(result.statistics.status, "feasible");
+    assert.deepEqual(result.report?.reschedule, {
+      baseline_exam_count: demoScheduleInput.exam_tasks.length,
+      frozen_exam_task_ids: [
+        "e-ai",
+        "e-calculus",
+        "e-database",
+        "e-english",
+        "e-os",
+      ],
+      retained_exam_task_ids: [
+        "e-ai",
+        "e-calculus",
+        "e-data-structures",
+        "e-database",
+        "e-english",
+        "e-os",
+      ],
+      changed_exam_task_ids: [],
+    });
+  });
+
   it("adds scheduler command context when the process cannot start", async () => {
     const client = new PythonSchedulerClient("../scheduler", "definitely-missing-scheduler-executable");
 

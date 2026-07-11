@@ -14,6 +14,23 @@ const fixedAssignments: FixedAssignment[] = [
   },
 ];
 
+const rescheduleContext = {
+  baseline_assignments: [
+    {
+      exam_task_id: "e-data-structures",
+      room_id: "r-101",
+      time_slot_id: "s-001",
+      teacher_ids: ["t-zhang"],
+    },
+  ],
+  movable_exam_task_ids: ["e-data-structures"],
+};
+
+const overrides = {
+  fixed_assignments: fixedAssignments,
+  reschedule_context: rescheduleContext,
+};
+
 class RecordingScheduler implements SchedulerClient {
   lastInput: ScheduleInput | null = null;
 
@@ -29,18 +46,19 @@ class RecordingScheduler implements SchedulerClient {
 }
 
 describe("schedule run service", () => {
-  it("passes fixed assignments through synchronous schedule runs", async () => {
+  it("passes reschedule context through synchronous schedule runs", async () => {
     const repository = new InMemoryPlatformRepository();
     const scheduler = new RecordingScheduler();
     const service = new ScheduleRunService(repository, scheduler);
 
-    const response = await service.createScheduleRun(fixedAssignments);
+    const response = await service.createScheduleRun(overrides);
 
     assert.equal(response.run.assignmentCount, 1);
     assert.deepEqual(scheduler.lastInput?.fixed_assignments, fixedAssignments);
+    assert.deepEqual(scheduler.lastInput?.reschedule_context, rescheduleContext);
   });
 
-  it("passes fixed assignments through asynchronous schedule jobs", async () => {
+  it("passes reschedule context through asynchronous schedule jobs", async () => {
     const repository = new InMemoryPlatformRepository();
     const scheduler = new RecordingScheduler();
     let deferredTask: DeferredTask | null = null;
@@ -48,13 +66,14 @@ describe("schedule run service", () => {
       deferredTask = task;
     });
 
-    const job = await service.createScheduleJob(fixedAssignments);
+    const job = await service.createScheduleJob(overrides);
     assert.equal(job.status, "queued");
     await requireDeferredTask(deferredTask)();
 
     const completed = await repository.getScheduleJob(job.id);
     assert.equal(completed?.status, "completed");
     assert.deepEqual(scheduler.lastInput?.fixed_assignments, fixedAssignments);
+    assert.deepEqual(scheduler.lastInput?.reschedule_context, rescheduleContext);
   });
 
   it("marks asynchronous jobs as failed when the scheduler throws", async () => {
@@ -68,7 +87,10 @@ describe("schedule run service", () => {
       },
     );
 
-    const job = await service.createScheduleJob([]);
+    const job = await service.createScheduleJob({
+      fixed_assignments: [],
+      reschedule_context: null,
+    });
     await requireDeferredTask(deferredTask)();
 
     const failed = await repository.getScheduleJob(job.id);

@@ -183,6 +183,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         })),
         constraint_profile: batch.constraintProfile as ConstraintProfile,
         fixed_assignments: [],
+        reschedule_context: null,
       },
     };
   }
