@@ -1,4 +1,5 @@
 import random
+from dataclasses import dataclass
 
 from .models import (
     ConstraintProfile,
@@ -15,6 +16,30 @@ from .models import (
 
 
 DEFAULT_SEED = 20260705
+SCALE_ROOM_TYPES = (
+    RoomType.STANDARD,
+    RoomType.STANDARD,
+    RoomType.STANDARD,
+    RoomType.STANDARD,
+    RoomType.STANDARD,
+    RoomType.STANDARD,
+    RoomType.COMPUTER_LAB,
+    RoomType.COMPUTER_LAB,
+    RoomType.COMPUTER_LAB,
+    RoomType.LANGUAGE_LAB,
+    RoomType.LANGUAGE_LAB,
+    RoomType.LANGUAGE_LAB,
+)
+
+
+@dataclass(frozen=True)
+class _ScaleWitness:
+    exam_index: int
+    room: Room
+    slot: TimeSlot
+    expected_count: int
+    invigilator_count: int
+    department_id: str
 
 
 def generate_small_dataset(seed: int = DEFAULT_SEED) -> ScheduleInput:
@@ -44,6 +69,123 @@ def generate_medium_dataset(seed: int = DEFAULT_SEED) -> ScheduleInput:
         group_size_range=(24, 80),
         room_capacity_range=(70, 140),
         time_limit_seconds=30,
+    )
+
+
+def generate_scale_dataset(
+    exam_count: int,
+    seed: int = DEFAULT_SEED,
+) -> ScheduleInput:
+    if exam_count <= 0:
+        raise ValueError("exam_count must be positive")
+
+    rng = random.Random(seed)
+    departments = ("cs", "math", "physics", "english")
+    rooms = tuple(
+        Room(
+            id=f"scale-r{index:02d}",
+            name=f"Scale Room {index:02d}",
+            building_id=f"scale-b{((index - 1) % 3) + 1}",
+            capacity=90 + rng.randint(0, 20),
+            room_type=room_type,
+            equipment_tags=_equipment_for_room_type(room_type),
+        )
+        for index, room_type in enumerate(SCALE_ROOM_TYPES, start=1)
+    )
+    slot_count = (exam_count + len(rooms) - 1) // len(rooms)
+    time_slots = _build_time_slots(slot_count)
+
+    witness = tuple(
+        _build_scale_witness(rng, exam_index, rooms, time_slots, departments)
+        for exam_index in range(1, exam_count + 1)
+    )
+    student_groups = tuple(
+        StudentGroup(
+            id=f"scale-g{item.exam_index:04d}",
+            name=f"Scale Group {item.exam_index:04d}",
+            size=item.expected_count,
+            department_id=item.department_id,
+        )
+        for item in witness
+    )
+    courses = tuple(
+        Course(
+            id=f"scale-c{item.exam_index:04d}",
+            name=f"Scale Course {item.exam_index:04d}",
+            department_id=item.department_id,
+            exam_type=_exam_type_for_room_type(item.room.room_type),
+        )
+        for item in witness
+    )
+    exam_tasks = tuple(
+        ExamTask(
+            id=f"scale-e{item.exam_index:04d}",
+            course_id=f"scale-c{item.exam_index:04d}",
+            student_group_ids=(f"scale-g{item.exam_index:04d}",),
+            expected_count=item.expected_count,
+            duration_minutes=120,
+            required_room_type=item.room.room_type,
+            required_equipment_tags=_equipment_for_room_type(item.room.room_type),
+            allowed_slot_ids=(item.slot.id,),
+            invigilator_count=item.invigilator_count,
+        )
+        for item in witness
+    )
+    peak_invigilator_count = max(
+        sum(
+            item.invigilator_count
+            for item in witness
+            if item.slot.id == slot.id
+        )
+        for slot in time_slots
+    )
+    teachers = tuple(
+        Teacher(
+            id=f"scale-t{index:03d}",
+            name=f"Scale Teacher {index:03d}",
+            department_id=departments[(index - 1) % len(departments)],
+        )
+        for index in range(1, peak_invigilator_count + 3)
+    )
+    scale_profile = _default_constraint_profile()
+    scale_profile = ConstraintProfile(
+        hard_rules=scale_profile.hard_rules,
+        soft_weights={
+            **scale_profile.soft_weights,
+            "teacher_consecutive_invigilation": 0,
+        },
+        time_limit_seconds=scale_profile.time_limit_seconds,
+    )
+
+    return ScheduleInput(
+        student_groups=student_groups,
+        teachers=teachers,
+        courses=courses,
+        rooms=rooms,
+        time_slots=time_slots,
+        exam_tasks=exam_tasks,
+        constraint_profile=scale_profile,
+    )
+
+
+def _build_scale_witness(
+    rng: random.Random,
+    exam_index: int,
+    rooms: tuple[Room, ...],
+    time_slots: tuple[TimeSlot, ...],
+    departments: tuple[str, ...],
+) -> _ScaleWitness:
+    zero_based_index = exam_index - 1
+    room = rooms[zero_based_index % len(rooms)]
+    slot = time_slots[zero_based_index // len(rooms)]
+    expected_count = rng.randint(30, min(80, room.capacity))
+    return _ScaleWitness(
+        exam_index=exam_index,
+        room=room,
+        slot=slot,
+        expected_count=expected_count,
+        invigilator_count=1 if expected_count <= 60 else 2,
+        department_id=rng.choice(departments),
     )
 
 
@@ -356,6 +498,14 @@ def _room_type_for_exam_type(exam_type: ExamType) -> RoomType:
     if exam_type == ExamType.ORAL:
         return RoomType.LANGUAGE_LAB
     return RoomType.STANDARD
+
+
+def _exam_type_for_room_type(room_type: RoomType) -> ExamType:
+    if room_type == RoomType.COMPUTER_LAB:
+        return ExamType.COMPUTER
+    if room_type == RoomType.LANGUAGE_LAB:
+        return ExamType.ORAL
+    return ExamType.WRITTEN
 
 
 def _equipment_for_exam_type(exam_type: ExamType) -> tuple[str, ...]:

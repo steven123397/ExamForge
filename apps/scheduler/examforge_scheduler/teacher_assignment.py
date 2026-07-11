@@ -189,6 +189,7 @@ def _workload_balance_terms(
     )
     allowed_load = ceil(total_positions / len(teachers))
     max_load = model.NewIntVar(0, total_positions, "teacher_max_workload")
+    min_load = model.NewIntVar(0, total_positions, "teacher_min_workload")
     excess_terms = []
     for teacher in teachers:
         workload = model.NewIntVar(
@@ -202,6 +203,7 @@ def _workload_balance_terms(
             )
         )
         model.Add(max_load >= workload)
+        model.Add(min_load <= workload)
         excess = model.NewIntVar(
             0, total_positions, f"teacher_excess_workload_{teacher.id}"
         )
@@ -209,7 +211,13 @@ def _workload_balance_terms(
         excess_terms.append(excess)
 
     coefficient = weight * business_scale
-    return [max_load * coefficient, *(term * coefficient for term in excess_terms)]
+    load_spread = model.NewIntVar(0, total_positions, "teacher_workload_spread")
+    model.Add(load_spread == max_load - min_load)
+    return [
+        max_load * coefficient,
+        load_spread * coefficient,
+        *(term * coefficient for term in excess_terms),
+    ]
 
 
 def _consecutive_invigilation_terms(
@@ -227,22 +235,35 @@ def _consecutive_invigilation_terms(
         return []
 
     slots_by_id = {slot.id: slot for slot in schedule_input.time_slots}
+    assignments_by_slot: dict[str, list[ScheduledExam]] = {}
+    for assignment in assignments:
+        assignments_by_slot.setdefault(assignment.time_slot_id, []).append(assignment)
+    used_slot_ids = sorted(
+        assignments_by_slot,
+        key=lambda slot_id: slots_by_id[slot_id].period_index,
+    )
     consecutive_terms = []
-    for left_index, left in enumerate(assignments):
-        left_slot = slots_by_id[left.time_slot_id]
-        for right in assignments[left_index + 1 :]:
-            right_slot = slots_by_id[right.time_slot_id]
-            if abs(left_slot.period_index - right_slot.period_index) != 1:
+    for left_index, left_slot_id in enumerate(used_slot_ids):
+        left_slot = slots_by_id[left_slot_id]
+        for right_slot_id in used_slot_ids[left_index + 1 :]:
+            right_slot = slots_by_id[right_slot_id]
+            if right_slot.period_index - left_slot.period_index != 1:
                 continue
             for teacher in teachers:
                 pair = model.NewBoolVar(
-                    f"teacher_consecutive_{left.exam_task_id}_{right.exam_task_id}_{teacher.id}"
+                    f"teacher_consecutive_{left_slot_id}_{right_slot_id}_{teacher.id}"
                 )
-                left_variable = variables[(left.exam_task_id, teacher.id)]
-                right_variable = variables[(right.exam_task_id, teacher.id)]
-                model.Add(pair <= left_variable)
-                model.Add(pair <= right_variable)
-                model.Add(pair >= left_variable + right_variable - 1)
+                left_assigned = sum(
+                    variables[(assignment.exam_task_id, teacher.id)]
+                    for assignment in assignments_by_slot[left_slot_id]
+                )
+                right_assigned = sum(
+                    variables[(assignment.exam_task_id, teacher.id)]
+                    for assignment in assignments_by_slot[right_slot_id]
+                )
+                model.Add(pair <= left_assigned)
+                model.Add(pair <= right_assigned)
+                model.Add(pair >= left_assigned + right_assigned - 1)
                 consecutive_terms.append(pair * weight * business_scale)
     return consecutive_terms
 
@@ -252,13 +273,12 @@ def _tie_break_terms(
     teachers: tuple[Teacher, ...],
     variables: dict[tuple[str, str], cp_model.IntVar],
 ) -> list[tuple[cp_model.IntVar, int]]:
-    exam_count = len(assignments)
     return [
         (
             variables[(assignment.exam_task_id, teacher.id)],
-            (exam_count - exam_index) * (teacher_index + 1),
+            teacher_index + 1,
         )
-        for exam_index, assignment in enumerate(assignments)
+        for assignment in assignments
         for teacher_index, teacher in enumerate(teachers)
     ]
 
