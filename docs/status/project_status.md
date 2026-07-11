@@ -3,56 +3,43 @@
 ## 当前结论
 
 - 日期：2026-07-11。
-- 当前版本：第四版第一阶段已完成，提交为 `a591cf4 feat(第四版): 完成数据与服务边界治理`。
-- 当前活动计划：`docs/plan/第四版第二阶段计划.md`，聚焦教师二阶段优化、增量重排语义和 50/100/150 场规模验证。
-- 历史阶段、提交和验证明细统一维护在 `docs/plan/history_plan.md`。
-- 存留问题、代码审查发现和技术债统一维护在 `docs/status/code_review_status.md`。
+- 当前版本：第四版第二阶段已完成；实现提交为 `7c76ac6`、`cfd1800`、`bc386ac`、`b476d9a` 和 `62a5e1b`。
+- 当前没有活动计划；历史阶段与验证明细维护在 `docs/plan/history_plan.md`，审查问题维护在 `docs/status/code_review_status.md`。
 
 ## 当前实现基线
 
-### 调度器
+### 调度器与重排
 
-- `apps/scheduler` 使用 Python、OR-Tools CP-SAT 完成 room-slot 排考，具备预检、冲突解释、软约束目标、评分和报告整理。
-- shared 合同和调度器支持 `fixed_assignments`；非固定监考教师采用负载感知分配，尚未宣称全局最优。
-- API 通过 JSON stdin/stdout CLI 调用调度器，当前适合单机演示和契约测试。
+- room-slot 与教师分配采用顺序二阶段 CP-SAT；教师模型覆盖固定教师、不可用时间、同时间唯一、最大负载、负载极差和连续监考。
+- `reschedule_context` 已贯通 shared、API 同步/异步入口、Python CLI 和 solver；冻结考试保持 room、slot、teacher，可移动考试受稳定性目标影响。
+- 报告输出 frozen、retained 和 changed 摘要；根脚本提供固定 seed 的 50、100、150 场 benchmark。
 
-### 平台闭环
+### 平台与数据
 
-- Web、API、PostgreSQL 和调度器已形成“排考运行 → 草稿调整/锁定/再平衡 → 校验/对比 → 发布/废弃 → 查询/通知/导出”闭环。
-- Web 已按业务面拆分并使用 TanStack Query；API 使用 Fastify、演示 Bearer token 鉴权和内存/PostgreSQL 双仓储。
-- 排考、草稿和发布治理已进入独立 service/use-case 层，route 主要保留鉴权、参数解析和 HTTP 映射。
-
-### 数据与一致性
-
-- PostgreSQL 关联表是教师不可用、考试学生群体和监考教师的优先读路径，JSONB 暂作为兼容回退。
-- 迁移检查覆盖关键关联表、主键、外键和 JSONB 双向一致性。
-- 同一草稿的变更通过 PostgreSQL advisory lock 串行化，并用终态 CAS 防止并发重复发布、终态回退和终态后修改。
+- Web、API、PostgreSQL 和调度器已形成排考、草稿治理、发布、查询、通知和导出闭环。
+- 排考、草稿和发布治理进入独立 service/use-case 层；PostgreSQL 关联表优先读取，JSONB 暂作兼容回退。
+- 同一草稿通过 PostgreSQL advisory lock 串行化，并以终态 CAS 防止重复发布和终态后修改。
 
 ## 最新验证基线
 
-第四版第一阶段提交前已重新验证：
-
+- `npm run test:scheduler`：scheduler `73 passed`。
+- `npm run benchmark:scheduler`：50、100、150 场均为 `feasible`、零冲突；最新耗时为 305、437、732 ms，教师负载极差均为 1。
 - `npm run typecheck`：通过。
-- `LOG_LEVEL=silent npm test`：API `44 passed`。
-- `npm run test:scheduler`：scheduler `42 passed`。
+- `LOG_LEVEL=silent npm test`：API `48 passed`。
 - `npm run build`：通过。
-- `npm run test:postgres`：PostgreSQL 集成测试 `9 passed`。
-- `npm run test:migrations`：迁移与数据库 session 测试 `4 passed`。
-- 连续运行正式迁移入口：第二次返回 `applied: []`。
-- `git diff --check`：通过。
+- `TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres`：PostgreSQL `9 passed`。
 
-最近一次浏览器基线为第三版结束时 Playwright `2 passed`；第四版后续涉及 Web 或 CI 时必须重新取得 E2E 证据。
+最近一次浏览器基线仍为第三版结束时 Playwright `2 passed`；第四版第三阶段涉及演示体验时必须重新取得 E2E 证据。
 
 ## 当前边界
 
-- 鉴权仍为内置演示账号和 Bearer token，不是真实用户、会话或组织权限系统。
-- 异步作业状态已持久化，但执行仍由 API 进程内 `setTimeout()` 触发，不具备多实例队列、恢复执行、取消和重试语义。
-- 排考进度使用 HTTP 轮询，调度器仍为 CLI 子进程；真实队列、SSE/WebSocket 和 FastAPI 服务化继续暂缓。
-- JSONB 兼容字段尚未删除，后续需根据迁移和兼容窗口决定最终收敛方式。
+- 规模 profile 显式关闭连续监考软目标；该目标由专项测试覆盖，未取得大规模全局最优性能结论。
+- 固定 100 分制在大规模下会因累计软惩罚饱和到 0，暂不支持跨批次质量比较。
+- Web 草稿锁定尚未自动生成完整 `reschedule_context`；鉴权、异步执行、进度和 scheduler 部署仍是演示级边界。
+- JSONB 兼容字段尚未删除。
 
 ## 下一步
 
-1. 执行第四版第二阶段计划：教师二阶段 CP-SAT、50/100/150 场考试规模基准和增量重排语义。
-2. 执行第四版第三阶段：演示环境与体验增强。
-3. 执行第四版第四阶段：建立类型检查、测试、构建、PostgreSQL、迁移和 E2E 的 CI 质量门禁。
-4. 第四版全部阶段完成后执行一次全量代码审查，发现写入 `docs/status/code_review_status.md`，修复另建计划。
+1. 为第四版第三阶段编写演示环境与体验增强计划，并重新建立 Playwright E2E 证据。
+2. 第四版第四阶段建立类型检查、测试、构建、PostgreSQL、迁移和 E2E 的 CI 质量门禁。
+3. 第四版全部阶段完成后执行一次全量代码审查，发现写入 `docs/status/code_review_status.md`，修复另建计划。

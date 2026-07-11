@@ -149,3 +149,14 @@
 - 范围边界：保留 JSONB 兼容字段、演示 Bearer token、Python scheduler CLI、HTTP 轮询和 API 进程内 `setTimeout()` 作业执行；未引入真实队列、SSE/WebSocket、FastAPI scheduler、真实用户/会话、教师二阶段优化、规模基准或 Web 大改造。
 - 验证结果：`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `44` 个通过；`npm run build` 通过；`npm run test:scheduler` 通过，调度器测试结果为 `42 passed`；真实 PostgreSQL 集成测试结果为 `9 passed`；迁移与数据库 session 检查结果为 `4 passed`；正式迁移入口返回 `applied: []`；`git diff --check` 通过。
 - 后续影响：第四版第二阶段可以在数据读路径和 API 业务边界稳定的基础上推进教师分配优化、规模基准与增量重排语义；真实队列、实时进度和 scheduler 服务化仍按设计暂缓。
+
+## 2026-07-11 第四版第二阶段：算法升级与规模验证
+
+- 原计划：`docs/plan/第四版第二阶段计划.md`。
+- 完成提交：`7c76ac6 feat(第四版): 启动第二阶段并建立重排合同`、`cfd1800 feat(调度器): 添加二阶段教师分配优化`、`bc386ac feat(调度器): 添加增量重排稳定性`、`b476d9a feat(API): 贯通增量重排请求合同`、`62a5e1b feat(调度器): 建立规模基准验证`；均为本地提交，未 push。
+- 完成内容：新增 shared/Python `reschedule_context` 合同及 CLI 解析；以独立教师 CP-SAT 替换生产贪心路径，覆盖固定教师、不可用时间、同时间唯一、负载和连续监考目标；实现冻结 room-slot-teacher、可移动考试稳定性目标、稳定性评分与重排报告；同步和异步 API 统一透传重排覆盖对象；新增确定性 witness 规模生成器、benchmark JSON 入口和仓库脚本。
+- 算法优化：连续监考从“考试对 × 教师”收敛为“相邻时段对 × 教师”；教师负载目标加入最大负载、最小负载和极差，50、100、150 场最终极差均为 1。
+- 规模证据：固定 seed `20260711`、30 秒上限下，50、100、150 场均为 `feasible` 且冲突数为 0；收尾运行耗时分别为 305、437、732 ms，候选数分别为 228、456、684。环境和任务 5 原始输出见 `docs/background/第四版算法规模验证记录.md`。
+- 验证结果：`npm run test:scheduler` 为 `73 passed`；`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 为 API `48 passed`；`npm run build` 通过；真实 PostgreSQL 集成测试为 `9 passed`；`git diff --check` 通过。
+- 范围边界：规模 profile 显式关闭 `teacher_consecutive_invigilation`，该目标由专项测试覆盖；固定 100 分制在大规模下饱和到 0，尚未提供跨批次归一化评分；未改 Web 交互、数据库 schema、队列、实时进度、真实认证或 scheduler 部署形态。
+- 后续影响：第四版第三阶段转向演示环境和体验增强，第四阶段建立 CI 质量门禁；第四版全部阶段结束后再执行一次全量代码审查。
