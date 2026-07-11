@@ -70,14 +70,20 @@ export interface PlatformRepository {
     examTaskId: string,
     patch: Partial<ScheduleResult["assignments"][number]>,
   ): Promise<ScheduleDraftDetailResponse | "not_editable" | "assignment_locked" | null>;
-  validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null>;
+  validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
   compareScheduleDraft(id: string): Promise<ScheduleDraftComparisonResponse | null>;
   suggestScheduleDraftAssignment(
     id: string,
     examTaskId: string,
   ): Promise<ScheduleDraftAdjustmentSuggestionsResponse | null>;
-  lockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null>;
-  unlockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null>;
+  lockScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
+  unlockScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
   rebalanceScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
   publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null>;
   discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null>;
@@ -391,10 +397,13 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return detail;
   }
 
-  async validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null> {
+  async validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
     const current = this.drafts.get(id);
     if (!current) {
       return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_editable";
     }
     const conflicts = validateDraftAssignments(this.scheduleInput, current.assignments);
     const now = new Date().toISOString();
@@ -445,10 +454,16 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return buildDraftAdjustmentSuggestions(this.scheduleInput, this.withLocks(current), examTaskId);
   }
 
-  async lockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null> {
+  async lockScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
     const current = this.drafts.get(id);
     if (!current || !current.assignments.some((assignment) => assignment.exam_task_id === examTaskId)) {
       return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_editable";
     }
     const locks = this.draftLocks.get(id) ?? new Set<string>();
     locks.add(examTaskId);
@@ -457,10 +472,16 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return this.withLocks(current);
   }
 
-  async unlockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null> {
+  async unlockScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
     const current = this.drafts.get(id);
     if (!current || !current.assignments.some((assignment) => assignment.exam_task_id === examTaskId)) {
       return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_editable";
     }
     const locks = this.draftLocks.get(id) ?? new Set<string>();
     locks.delete(examTaskId);
@@ -520,6 +541,9 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     const current = await this.validateScheduleDraft(id);
     if (!current) {
       return null;
+    }
+    if (current === "not_editable") {
+      return "not_publishable";
     }
     if (current.conflicts.some((conflict) => conflict.severity === "error")) {
       return "conflict";

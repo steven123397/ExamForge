@@ -106,7 +106,7 @@
 ## 2026-07-07 第三版第二阶段：测试基线补强与 API service 提取
 
 - 原计划：`docs/plan/第三版第二阶段计划.md`
-- 完成提交：未提交；本轮按用户要求只保留本地工作区改动，未 push。
+- 完成提交：本次本地提交；按用户要求未 push。
 - 完成内容：新增 PostgreSQL 集成测试入口和根脚本，覆盖真实仓储的排考运行、草稿冲突阻断与修复发布、作业状态迁移和审计过滤；新增迁移从空库执行验证入口和 `migration-check`；新增 API 到 Python scheduler CLI 契约测试；提取已发布方案受众、通知预览、CSV 导出 service；新增审计过滤 service，并让内存仓储、PostgreSQL 仓储和 API 路由支持 `entityType`、`entityId`、`actor`、`since`、`until` 过滤。
 - 范围边界：未做软约束入 CP-SAT；未重构 JSONB 数组为关联表；未引入 Redis/BullMQ、SSE/WebSocket 或 FastAPI scheduler；未重设计 Web 交互。
 - 迁移与数据修复：新增 `0006_allow_conflicting_draft_assignments.sql`，移除草稿安排的 `(draft_id, room_id, time_slot_id)` 唯一约束，让草稿可以暂存冲突并由草稿校验逻辑展示和阻断发布；正式 `scheduled_exams` 的唯一约束保持不变。
@@ -131,3 +131,13 @@
 - 范围边界：未删除既有 JSONB 数组字段，未改变 Web/API 返回结构；未把教师分配纳入 CP-SAT 联合求解；未新增完整 `buildings` 主数据表、楼栋 UI、跨楼栋软约束、Redis/BullMQ、SSE/WebSocket、FastAPI scheduler、OpenAPI/SDK 或复杂权限矩阵。
 - 验证结果：`npm run test:scheduler` 通过，调度器测试结果为 `42 passed`；`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `30` 个通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres` 通过，PostgreSQL 集成测试结果为 `3 passed`；同测试库运行 `npm run test:migrations` 通过，迁移测试结果为 `1 passed`；`DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 通过且无待应用迁移；`git diff --check` 通过。
 - 后续影响：第三版设计中的选做内容已形成兼容式实现基线；后续如果继续企业化，应优先评估是否删除 JSONB 冗余字段、补楼栋主数据和跨楼栋约束，或将固定安排合同接入 Web 锁定考试与局部重排请求。
+
+## 2026-07-11 第四版第一阶段：数据与服务边界
+
+- 原计划：`docs/plan/第四版第一阶段计划.md`
+- 完成提交：未提交；本轮按用户要求只保留本地工作区改动，未 push。
+- 完成内容：PostgreSQL 调度输入、正式排考和草稿监考教师均采用关联表优先、JSONB 兼容回退；迁移检查覆盖关键关联表、主键、外键和 JSONB 双向一致性；API 新增排考运行、草稿治理和发布治理 service/use-case 层，route 主要保留鉴权、参数解析与 HTTP 错误映射；PostgreSQL 同一草稿的调整、校验、锁定、解锁、再平衡、发布和废弃通过 advisory lock 串行化，锁和业务 SQL 共用同一专用连接，异常时先排空已入队查询再解锁和释放连接，终态转换继续使用可编辑状态 CAS，避免连接池耗尽、连接复用污染、终态回退、终态后变更和并发重复发布。
+- 测试过程：先用真实 PostgreSQL 红灯复现正式排考详情仍读取 JSONB，并用迁移测试证明约束/双向一致性检查缺失；排考、草稿和发布 service 均先以模块不存在或业务短路缺失形成红灯；独立审查后再以红灯复现终态草稿可被重新校验、关联表多余行未被检测、发布或废弃完成后锁状态仍可变更、终态转换领先时校验仍返回成功，以及单连接池下草稿 mutation 无法完成和失败查询后的尾部查询未受控，随后完成修复和回归；另通过主动删除关联行证明调度输入、正式排考、教师已发布查询和草稿读路径会回退 JSONB 兼容字段。
+- 范围边界：保留 JSONB 兼容字段、演示 Bearer token、Python scheduler CLI、HTTP 轮询和 API 进程内 `setTimeout()` 作业执行；未引入真实队列、SSE/WebSocket、FastAPI scheduler、真实用户/会话、教师二阶段优化、规模基准或 Web 大改造。
+- 验证结果：`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `44` 个通过；`npm run build` 通过；`npm run test:scheduler` 通过，调度器测试结果为 `42 passed`；真实 PostgreSQL 集成测试结果为 `9 passed`；迁移与数据库 session 检查结果为 `4 passed`；正式迁移入口返回 `applied: []`；`git diff --check` 通过。
+- 后续影响：第四版第二阶段可以在数据读路径和 API 业务边界稳定的基础上推进教师分配优化、规模基准与增量重排语义；真实队列、实时进度和 scheduler 服务化仍按设计暂缓。

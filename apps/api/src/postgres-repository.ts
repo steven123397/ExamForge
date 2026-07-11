@@ -1,6 +1,7 @@
 import {
   auditEvents,
   conflictRecords,
+  createDbSession,
   courses,
   draftChangeEvents,
   draftConflictRecords,
@@ -50,7 +51,7 @@ import {
   type ScheduleRunSummary,
   type ScheduledExam,
 } from "@examforge/shared";
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import {
   buildDraftComparison,
@@ -62,6 +63,8 @@ import {
   validateReferenceRecord,
   type PlatformRepository,
 } from "./repository.js";
+
+const scheduleDraftLockNamespace = 20_260_711;
 
 type BatchRow = typeof examBatches.$inferSelect;
 type RunRow = typeof scheduleRuns.$inferSelect;
@@ -106,6 +109,8 @@ export class PostgresPlatformRepository implements PlatformRepository {
       roomRows,
       timeSlotRows,
       examTaskRows,
+      teacherUnavailableSlotRows,
+      examTaskStudentGroupRows,
     ] = await Promise.all([
       this.client.db.select().from(studentGroups),
       this.client.db.select().from(teachers),
@@ -113,7 +118,21 @@ export class PostgresPlatformRepository implements PlatformRepository {
       this.client.db.select().from(rooms),
       this.client.db.select().from(timeSlots).where(eq(timeSlots.batchId, batch.id)),
       this.client.db.select().from(examTasks).where(eq(examTasks.batchId, batch.id)),
+      this.client.db.select().from(teacherUnavailableSlots),
+      this.client.db.select().from(examTaskStudentGroups),
     ]);
+    const activeSlotIds = new Set(timeSlotRows.map((slot) => slot.id));
+    const activeTaskIds = new Set(examTaskRows.map((task) => task.id));
+    const unavailableSlotsByTeacher = groupRelationRows(
+      teacherUnavailableSlotRows.filter((row) => activeSlotIds.has(row.timeSlotId)),
+      "teacherId",
+      "timeSlotId",
+    );
+    const studentGroupsByExamTask = groupRelationRows(
+      examTaskStudentGroupRows.filter((row) => activeTaskIds.has(row.examTaskId)),
+      "examTaskId",
+      "studentGroupId",
+    );
 
     return {
       batch: this.toBatchSummary(batch),
@@ -128,7 +147,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
           id: teacher.id,
           name: teacher.name,
           department_id: teacher.departmentId,
-          unavailable_slot_ids: teacher.unavailableSlotIds,
+          unavailable_slot_ids: unavailableSlotsByTeacher.get(teacher.id) ?? teacher.unavailableSlotIds,
         })),
         courses: courseRows.map((course) => ({
           id: course.id,
@@ -154,7 +173,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         exam_tasks: examTaskRows.map((task) => ({
           id: task.id,
           course_id: task.courseId,
-          student_group_ids: task.studentGroupIds,
+          student_group_ids: studentGroupsByExamTask.get(task.id) ?? task.studentGroupIds,
           expected_count: task.expectedCount,
           duration_minutes: task.durationMinutes,
           required_room_type: task.requiredRoomType,
@@ -535,6 +554,25 @@ export class PostgresPlatformRepository implements PlatformRepository {
         .from(conflictRecords)
         .where(eq(conflictRecords.runId, id)),
     ]);
+    const invigilatorRows = assignmentRows.length > 0
+      ? await this.client.db
+        .select()
+        .from(scheduledExamInvigilators)
+        .where(inArray(
+          scheduledExamInvigilators.scheduledExamId,
+          assignmentRows.map((assignment) => assignment.id),
+        ))
+        .orderBy(
+          scheduledExamInvigilators.scheduledExamId,
+          scheduledExamInvigilators.position,
+        )
+      : [];
+    const teacherIdsByScheduledExam = groupRelationRows(
+      invigilatorRows,
+      "scheduledExamId",
+      "teacherId",
+      false,
+    );
 
     return {
       run: this.toRunSummary(run),
@@ -543,7 +581,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
           exam_task_id: assignment.examTaskId,
           room_id: assignment.roomId,
           time_slot_id: assignment.timeSlotId,
-          teacher_ids: assignment.teacherIds,
+          teacher_ids: teacherIdsByScheduledExam.get(assignment.id) ?? assignment.teacherIds,
         })),
         conflicts: conflictRows.map((conflict) => ({
           type: conflict.type,
@@ -709,6 +747,25 @@ export class PostgresPlatformRepository implements PlatformRepository {
         .where(eq(draftChangeEvents.draftId, id))
         .orderBy(desc(draftChangeEvents.createdAt)),
     ]);
+    const invigilatorRows = assignmentRows.length > 0
+      ? await this.client.db
+        .select()
+        .from(draftExamInvigilators)
+        .where(inArray(
+          draftExamInvigilators.draftScheduledExamId,
+          assignmentRows.map((assignment) => assignment.id),
+        ))
+        .orderBy(
+          draftExamInvigilators.draftScheduledExamId,
+          draftExamInvigilators.position,
+        )
+      : [];
+    const teacherIdsByDraftExam = groupRelationRows(
+      invigilatorRows,
+      "draftScheduledExamId",
+      "teacherId",
+      false,
+    );
 
     return {
       draft: this.toDraftSummary(draft),
@@ -716,7 +773,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         exam_task_id: assignment.examTaskId,
         room_id: assignment.roomId,
         time_slot_id: assignment.timeSlotId,
-        teacher_ids: assignment.teacherIds,
+        teacher_ids: teacherIdsByDraftExam.get(assignment.id) ?? assignment.teacherIds,
       })),
       conflicts: conflictRows.map((conflict) => ({
         type: conflict.type,
@@ -734,6 +791,16 @@ export class PostgresPlatformRepository implements PlatformRepository {
   }
 
   async updateScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+    patch: Partial<ScheduledExam>,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | "assignment_locked" | null> {
+    return this.withScheduleDraftLock(id, (repository) => (
+      repository.updateScheduleDraftAssignmentUnlocked(id, examTaskId, patch)
+    ));
+  }
+
+  private async updateScheduleDraftAssignmentUnlocked(
     id: string,
     examTaskId: string,
     patch: Partial<ScheduledExam>,
@@ -844,15 +911,39 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return this.getScheduleDraft(id);
   }
 
-  async validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null> {
+  async validateScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
+    return this.withScheduleDraftLock(id, (repository) => repository.validateScheduleDraftUnlocked(id));
+  }
+
+  private async validateScheduleDraftUnlocked(
+    id: string,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
     const current = await this.getScheduleDraft(id);
     if (!current) {
       return null;
     }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_editable";
+    }
     const referenceData = await this.getReferenceData();
     const conflicts = validateDraftAssignments(referenceData.scheduleInput, current.assignments);
     const updatedAt = new Date();
-    await this.client.db.transaction(async (tx) => {
+    const validated = await this.client.db.transaction(async (tx) => {
+      const [updatedDraft] = await tx.update(scheduleDrafts)
+        .set({
+          status: conflicts.length > 0 ? "blocked" : "validated",
+          score: scoreDraft(conflicts.length),
+          conflictCount: conflicts.length,
+          updatedAt,
+        })
+        .where(and(
+          eq(scheduleDrafts.id, id),
+          inArray(scheduleDrafts.status, ["editing", "validated", "blocked"]),
+        ))
+        .returning();
+      if (!updatedDraft) {
+        return false;
+      }
       await tx.delete(draftConflictRecords).where(eq(draftConflictRecords.draftId, id));
       if (conflicts.length > 0) {
         await tx.insert(draftConflictRecords).values(conflicts.map((conflict, index) => ({
@@ -865,14 +956,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
           suggestion: conflict.suggestion,
         })));
       }
-      await tx.update(scheduleDrafts)
-        .set({
-          status: conflicts.length > 0 ? "blocked" : "validated",
-          score: scoreDraft(conflicts.length),
-          conflictCount: conflicts.length,
-          updatedAt,
-        })
-        .where(eq(scheduleDrafts.id, id));
       await tx.insert(auditEvents).values({
         id: `audit-${randomUUID()}`,
         actor: "system",
@@ -881,7 +964,11 @@ export class PostgresPlatformRepository implements PlatformRepository {
         entityId: id,
         payload: { conflictCount: conflicts.length },
       });
+      return true;
     });
+    if (!validated) {
+      return this.getScheduleDraft(id);
+    }
     return this.getScheduleDraft(id);
   }
 
@@ -907,10 +994,25 @@ export class PostgresPlatformRepository implements PlatformRepository {
       : null;
   }
 
-  async lockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null> {
+  async lockScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
+    return this.withScheduleDraftLock(id, (repository) => (
+      repository.lockScheduleDraftAssignmentUnlocked(id, examTaskId)
+    ));
+  }
+
+  private async lockScheduleDraftAssignmentUnlocked(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
     const current = await this.getScheduleDraft(id);
     if (!current || !current.assignments.some((assignment) => assignment.exam_task_id === examTaskId)) {
       return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_editable";
     }
     const [updated] = await this.client.db.update(draftScheduledExams)
       .set({ locked: true, updatedAt: new Date() })
@@ -926,10 +1028,25 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return this.getScheduleDraft(id);
   }
 
-  async unlockScheduleDraftAssignment(id: string, examTaskId: string): Promise<ScheduleDraftDetailResponse | null> {
+  async unlockScheduleDraftAssignment(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
+    return this.withScheduleDraftLock(id, (repository) => (
+      repository.unlockScheduleDraftAssignmentUnlocked(id, examTaskId)
+    ));
+  }
+
+  private async unlockScheduleDraftAssignmentUnlocked(
+    id: string,
+    examTaskId: string,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
     const current = await this.getScheduleDraft(id);
     if (!current || !current.assignments.some((assignment) => assignment.exam_task_id === examTaskId)) {
       return null;
+    }
+    if (current.draft.status === "published" || current.draft.status === "discarded") {
+      return "not_editable";
     }
     const [updated] = await this.client.db.update(draftScheduledExams)
       .set({ locked: false, updatedAt: new Date() })
@@ -946,6 +1063,12 @@ export class PostgresPlatformRepository implements PlatformRepository {
   }
 
   async rebalanceScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
+    return this.withScheduleDraftLock(id, (repository) => repository.rebalanceScheduleDraftUnlocked(id));
+  }
+
+  private async rebalanceScheduleDraftUnlocked(
+    id: string,
+  ): Promise<ScheduleDraftDetailResponse | "not_editable" | null> {
     const current = await this.getScheduleDraft(id);
     if (!current) {
       return null;
@@ -970,7 +1093,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       if (!candidate) {
         continue;
       }
-      const updated = await this.updateScheduleDraftAssignment(id, assignment.exam_task_id, {
+      const updated = await this.updateScheduleDraftAssignmentUnlocked(id, assignment.exam_task_id, {
         room_id: candidate.assignment.room_id,
         time_slot_id: candidate.assignment.time_slot_id,
         teacher_ids: candidate.assignment.teacher_ids,
@@ -987,6 +1110,12 @@ export class PostgresPlatformRepository implements PlatformRepository {
   }
 
   async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {
+    return this.withScheduleDraftLock(id, (repository) => repository.publishScheduleDraftUnlocked(id));
+  }
+
+  private async publishScheduleDraftUnlocked(
+    id: string,
+  ): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {
     const existing = await this.getScheduleDraft(id);
     if (!existing) {
       return null;
@@ -994,9 +1123,12 @@ export class PostgresPlatformRepository implements PlatformRepository {
     if (existing.draft.status === "published" || existing.draft.status === "discarded") {
       return "not_publishable";
     }
-    const current = await this.validateScheduleDraft(id);
+    const current = await this.validateScheduleDraftUnlocked(id);
     if (!current) {
       return null;
+    }
+    if (current === "not_editable") {
+      return "not_publishable";
     }
     if (current.conflicts.some((conflict) => conflict.severity === "error")) {
       return "conflict";
@@ -1015,7 +1147,20 @@ export class PostgresPlatformRepository implements PlatformRepository {
       assignmentCount: current.assignments.length,
     };
 
-    await this.client.db.transaction(async (tx) => {
+    const publishedDraft = await this.client.db.transaction(async (tx) => {
+      const [claimedDraft] = await tx.update(scheduleDrafts)
+        .set({
+          status: "published",
+          updatedAt: createdAt,
+        })
+        .where(and(
+          eq(scheduleDrafts.id, id),
+          inArray(scheduleDrafts.status, ["editing", "validated", "blocked"]),
+        ))
+        .returning();
+      if (!claimedDraft) {
+        return null;
+      }
       await tx.insert(scheduleRuns).values({
         id: runId,
         batchId: batch.id,
@@ -1056,12 +1201,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
           publishedRunId: runId,
         })
         .where(eq(examBatches.id, batch.id));
-      await tx.update(scheduleDrafts)
-        .set({
-          status: "published",
-          updatedAt: createdAt,
-        })
-        .where(eq(scheduleDrafts.id, id));
       await tx.insert(auditEvents).values({
         id: `audit-${randomUUID()}`,
         actor: "system",
@@ -1074,7 +1213,11 @@ export class PostgresPlatformRepository implements PlatformRepository {
           score: current.draft.score,
         },
       });
+      return claimedDraft;
     });
+    if (!publishedDraft) {
+      return "not_publishable";
+    }
 
     const updatedBatch = {
       ...batch,
@@ -1094,6 +1237,12 @@ export class PostgresPlatformRepository implements PlatformRepository {
   }
 
   async discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null> {
+    return this.withScheduleDraftLock(id, (repository) => repository.discardScheduleDraftUnlocked(id));
+  }
+
+  private async discardScheduleDraftUnlocked(
+    id: string,
+  ): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null> {
     const current = await this.getScheduleDraft(id);
     if (!current) {
       return null;
@@ -1102,14 +1251,20 @@ export class PostgresPlatformRepository implements PlatformRepository {
       return "not_discardable";
     }
     const updatedAt = new Date();
-    const [updated] = await this.client.db.transaction(async (tx) => {
+    const updated = await this.client.db.transaction(async (tx) => {
       const [draft] = await tx.update(scheduleDrafts)
         .set({
           status: "discarded",
           updatedAt,
         })
-        .where(eq(scheduleDrafts.id, id))
+        .where(and(
+          eq(scheduleDrafts.id, id),
+          inArray(scheduleDrafts.status, ["editing", "validated", "blocked"]),
+        ))
         .returning();
+      if (!draft) {
+        return null;
+      }
       await tx.insert(auditEvents).values({
         id: `audit-${randomUUID()}`,
         actor: "system",
@@ -1122,9 +1277,9 @@ export class PostgresPlatformRepository implements PlatformRepository {
           assignmentCount: current.draft.assignmentCount,
         },
       });
-      return [draft];
+      return draft;
     });
-    return updated ? { draft: this.toDraftSummary(updated) } : null;
+    return updated ? { draft: this.toDraftSummary(updated) } : "not_discardable";
   }
 
   async listAuditEvents(filter: AuditEventFilter = {}): Promise<AuditEventListResponse> {
@@ -1313,6 +1468,39 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return run ? this.toRunSummary(run) : null;
   }
 
+  private async withScheduleDraftLock<T>(
+    id: string,
+    operation: (repository: PostgresPlatformRepository) => Promise<T>,
+  ): Promise<T> {
+    const connection = await this.client.pool.connect();
+    const session = createDbSession(connection);
+    const repository = new PostgresPlatformRepository({
+      ...this.client,
+      db: session.db,
+    });
+    let locked = false;
+    try {
+      await connection.query("SELECT pg_advisory_lock($1, hashtext($2))", [
+        scheduleDraftLockNamespace,
+        id,
+      ]);
+      locked = true;
+      return await operation(repository);
+    } finally {
+      try {
+        await session.drain();
+        if (locked) {
+          await connection.query("SELECT pg_advisory_unlock($1, hashtext($2))", [
+            scheduleDraftLockNamespace,
+            id,
+          ]);
+        }
+      } finally {
+        connection.release();
+      }
+    }
+  }
+
   private toBatchSummary(batch: BatchRow): ReferenceDataResponse["batch"] {
     return {
       id: batch.id,
@@ -1482,6 +1670,28 @@ export class PostgresPlatformRepository implements PlatformRepository {
     });
   }
 
+}
+
+function groupRelationRows<T, K extends keyof T, V extends keyof T>(
+  rows: T[],
+  keyField: K,
+  valueField: V,
+  sortValues = true,
+) {
+  const grouped = new Map<string, string[]>();
+  for (const row of rows) {
+    const key = String(row[keyField]);
+    const value = String(row[valueField]);
+    const values = grouped.get(key) ?? [];
+    values.push(value);
+    grouped.set(key, values);
+  }
+  if (sortValues) {
+    for (const values of grouped.values()) {
+      values.sort();
+    }
+  }
+  return grouped;
 }
 
 function omitReferenceId(record: ReferenceRecord): Partial<ReferenceRecord> {

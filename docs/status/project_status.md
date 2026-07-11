@@ -8,7 +8,7 @@
 
 ## 最新进展
 
-- 日期：2026-07-07
+- 日期：2026-07-11
 - 变更：Agent A 已完成调度器数据模型与测试数据生成器，并形成本地提交 `ff195cb feat(调度器): 添加数据模型与测试数据生成器`。
 - 变更：文档治理规则改为简化版单一事实源，完成计划统一沉淀到 `docs/plan/history_plan.md`，不使用专门归档目录。
 - 变更：Agent B、Agent C、Agent D 三条并行实现分支已合并到 `main`。
@@ -66,6 +66,11 @@
 - 变更：`packages/shared` 和 `apps/scheduler` 已新增 `fixed_assignments` 合同、`FixedAssignment` 模型、CLI 解析、固定 room-slot 约束、固定监考教师处理和不可行固定安排冲突；非固定监考教师分配已改为负载感知选择。
 - 变更：`packages/db` 已新增迁移 `0007_association_tables.sql`，建立 `exam_task_student_groups`、`scheduled_exam_invigilators`、`draft_exam_invigilators` 和 `teacher_unavailable_slots` 关联表；seed 和 PostgreSQL 仓储已在保持 JSONB 兼容字段的同时同步写入关联表。
 - 变更：API 基础数据校验已新增考场 `building_id` 小写 slug 语义约束，避免继续写入明显不可用的楼栋标识。
+- 变更：第四版第一阶段已完成并归入 `docs/plan/history_plan.md`，本阶段聚焦 PostgreSQL 关联表优先读、迁移完整性检查和 API service/use-case 边界。
+- 变更：PostgreSQL 正式排考与草稿监考教师读取已改为优先聚合 `scheduled_exam_invigilators` 和 `draft_exam_invigilators`，仅在对应安排没有关联行时回退 JSONB 兼容字段；教师不可用时间和考试学生群体继续保持关联表优先读取。
+- 变更：迁移检查已覆盖 4 张关联表、主键、外键和 JSONB 双向一致性，并新增主动删除外键、删除回填行和插入多余关联行的失败检测测试。
+- 变更：API 已新增 `schedule-run-service`、`draft-service` 和 `publication-service`。同步排考、单进程异步作业、草稿终态/锁定短路、发布/回滚、通知、受众查询、CSV 构建和下载审计编排已从 route 层迁入 service/use-case 层；route 保留鉴权、参数解析、HTTP 状态码和错误响应。
+- 变更：PostgreSQL 同一草稿的调整、校验、锁定、解锁、再平衡、发布和废弃已通过 advisory lock 串行化，锁和业务 SQL 共用同一专用连接，失败时先排空已入队查询再解锁和释放，终态转换继续使用可编辑状态 CAS；终态草稿不能再发生内容、校验或锁状态变更，同一草稿并发发布只有一个请求可以成功，单连接池也不会因二次借连接耗尽。
 - 验证：PostgreSQL 运行路径已完成真实验证，包括按顺序执行 `packages/db/drizzle/*.sql`、运行 `npm run seed --workspace @examforge/db`、API 带 `DATABASE_URL` 读取 dashboard、发起一次排考运行并写入 `schedule_runs`、`scheduled_exams` 和 `audit_events`。
 - 验证：当前全栈第一阶段验证包括 `apps/scheduler` 全量测试 `32 passed`、API 测试 `10 passed`、`npm run typecheck` 通过、`npm run build` 通过、`git diff --check` 通过。
 - 验证：真实 PostgreSQL API 路径已验证 `POST /api/schedule-runs`、`POST /api/schedule-runs/:id/publish`、`GET /api/published-schedule`、`POST /api/published-schedule/rollback` 和回滚后的 `404` 查询结果；数据库已写入对应 `schedule_run.created`、`schedule_run.published` 和 `schedule_run.rollback` 审计事件。
@@ -90,6 +95,8 @@
 - 验证：第三版第二阶段验证包括 `npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `29` 个通过；`npm run build` 通过；`npm run test:scheduler` 通过，调度器测试结果为 `34 passed`；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres` 通过，PostgreSQL 集成测试结果为 `3 passed`；同测试库运行 `npm run test:migrations` 通过，迁移测试结果为 `1 passed`；清空测试库后以 `DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 验证正式迁移入口通过并应用 `0000` 至 `0006`；`git diff --check` 通过。
 - 验证：第三版第三阶段先运行新增软约束目标红灯测试，`npm run test:scheduler` 预期失败为 `4 failed, 34 passed`；实现后 `npm run test:scheduler` 通过，调度器测试结果为 `38 passed`；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `29` 个通过；`npm run typecheck` 通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`。曾并行运行 `npm run build` 与 `npm run test:e2e` 导致 Next `.next` manifest 争用失败，串行重跑后两项均通过。
 - 验证：第三版第四阶段验证包括 `npm run test:scheduler` 通过，调度器测试结果为 `42 passed`；`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `30` 个通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres` 通过，PostgreSQL 集成测试结果为 `3 passed`；同测试库运行 `npm run test:migrations` 通过，迁移测试结果为 `1 passed`；`DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 通过且无待应用迁移；`git diff --check` 通过。
+- 验证：第四版第一阶段按 TDD 先确认正式排考详情仍读取 JSONB、迁移检查缺少约束与双向一致性结果、3 个 service 模块不存在及终态草稿可被重新校验的红灯；实现后 `npm run typecheck`、`LOG_LEVEL=silent npm test`、`npm run build`、`npm run test:scheduler` 和 `git diff --check` 均通过，API 测试结果为 `44` 个通过，调度器测试结果为 `42 passed`。
+- 验证：第四版第一阶段真实 PostgreSQL 集成测试通过，结果为 `9 passed`，覆盖关联表优先读取、JSONB 兼容回退、调度输入、正式排考监考、教师已发布查询、草稿详情/对比/发布、并发发布、终态转换与锁定/解锁/校验串行化、单连接池草稿 mutation、草稿冲突流程和异步作业持久化；迁移与数据库 session 检查结果为 `4 passed`，覆盖失败查询后的队列排空；正式迁移入口返回 `applied: []`，确认当前测试库无待应用迁移。
 
 ## 下一步
 
@@ -108,4 +115,5 @@
 - [x] 执行第三版第二阶段：补齐 PostgreSQL 集成测试、迁移验证、scheduler CLI 契约测试和 API service 提取。
 - [x] 执行第三版第三阶段：将软约束纳入 CP-SAT 优化目标，并补齐权重影响解选择的调度器测试。
 - [x] 执行第三版第四阶段：处理关联表重构、楼栋语义、教师分配增强和固定安排合同等选做内容。
+- [x] 执行第四版第一阶段：完成 PostgreSQL 关联表优先读、迁移完整性检查和排考/草稿/发布 service 提取。
 - [ ] 执行全量代码审查，并将审查发现写入 `docs/status/code_review_status.md`。

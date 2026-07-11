@@ -2,14 +2,11 @@ import cors from "@fastify/cors";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  fixedAssignmentSchema,
   referenceRecordCreateSchemas,
   referenceRecordUpdateSchemas,
   referenceResourceSchema,
   scheduledExamSchema,
-  type PublishedScheduleNotificationsResponse,
-  type PublishedScheduleAudienceResponse,
-  type PublishedScheduleResponse,
-  type ReferenceDataResponse,
   type ReferenceRecord,
   type ReferenceResource,
 } from "@examforge/shared";
@@ -26,16 +23,18 @@ import {
   AuditFilterValidationError,
   parseAuditEventFilter,
 } from "./services/audit-service.js";
-import {
-  buildPublishedScheduleAudience,
-  buildPublishedScheduleCsv,
-  buildPublishedScheduleNotifications,
-} from "./services/published-schedule-service.js";
+import { DraftService } from "./services/draft-service.js";
+import { PublicationService } from "./services/publication-service.js";
+import { ScheduleRunService } from "./services/schedule-run-service.js";
 
 export interface AppOptions {
   repository?: PlatformRepository;
   scheduler?: SchedulerClient;
 }
+
+const scheduleRequestSchema = z.object({
+  fixed_assignments: z.array(fixedAssignmentSchema).default([]),
+}).strict();
 
 export function createApp(options: AppOptions = {}) {
   const app = Fastify({
@@ -45,6 +44,9 @@ export function createApp(options: AppOptions = {}) {
   });
   const repository = options.repository ?? createPlatformRepository();
   const scheduler = options.scheduler ?? new PythonSchedulerClient();
+  const scheduleRunService = new ScheduleRunService(repository, scheduler);
+  const draftService = new DraftService(repository);
+  const publicationService = new PublicationService(repository);
 
   app.register(cors, {
     origin: true,
@@ -101,7 +103,7 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.addHook("onReady", async () => {
-    await repository.recoverInterruptedScheduleJobs?.();
+    await scheduleRunService.recoverInterruptedJobs();
   });
 
   app.get("/api/dashboard", async () => repository.getDashboard());
@@ -299,9 +301,15 @@ export function createApp(options: AppOptions = {}) {
     if (!requireRole(request, reply, ["admin", "operator"])) {
       return reply;
     }
-    const referenceData = await repository.getReferenceData();
-    const result = await scheduler.solve(referenceData.scheduleInput);
-    const response = await repository.createScheduleRun(result);
+    const parsed = parseScheduleRequest(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_schedule_request",
+        message: "Schedule request payload is invalid.",
+        issues: parsed.error.issues,
+      });
+    }
+    const response = await scheduleRunService.createScheduleRun(parsed.data.fixed_assignments);
     return reply.code(201).send(response);
   });
 
@@ -309,17 +317,22 @@ export function createApp(options: AppOptions = {}) {
     if (!requireRole(request, reply, ["admin", "operator"])) {
       return reply;
     }
-    const job = await repository.createScheduleJob();
-    setTimeout(() => {
-      void runScheduleJob(job.id);
-    }, 0);
+    const parsed = parseScheduleRequest(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_schedule_request",
+        message: "Schedule job payload is invalid.",
+        issues: parsed.error.issues,
+      });
+    }
+    const job = await scheduleRunService.createScheduleJob(parsed.data.fixed_assignments);
     return reply.code(202).send({ job });
   });
 
-  app.get("/api/schedule-jobs", async () => repository.listScheduleJobs());
+  app.get("/api/schedule-jobs", async () => scheduleRunService.listScheduleJobs());
 
   app.get<{ Params: { id: string } }>("/api/schedule-jobs/:id", async (request, reply) => {
-    const job = await repository.getScheduleJob(request.params.id);
+    const job = await scheduleRunService.getScheduleJob(request.params.id);
     if (!job) {
       return reply.code(404).send({
         error: "schedule_job_not_found",
@@ -337,7 +350,7 @@ export function createApp(options: AppOptions = {}) {
       if (!requireRole(request, reply, ["admin", "operator"])) {
         return reply;
       }
-      const draft = await repository.createScheduleDraftFromRun(request.params.id);
+      const draft = await draftService.createFromRun(request.params.id);
       if (!draft) {
         return reply.code(404).send({
           error: "schedule_run_not_found",
@@ -348,10 +361,10 @@ export function createApp(options: AppOptions = {}) {
     },
   );
 
-  app.get("/api/schedule-drafts", async () => repository.listScheduleDrafts());
+  app.get("/api/schedule-drafts", async () => draftService.list());
 
   app.get<{ Params: { id: string } }>("/api/schedule-drafts/:id", async (request, reply) => {
-    const draft = await repository.getScheduleDraft(request.params.id);
+    const draft = await draftService.get(request.params.id);
     if (!draft) {
       return reply.code(404).send({
         error: "schedule_draft_not_found",
@@ -380,7 +393,7 @@ export function createApp(options: AppOptions = {}) {
         });
       }
 
-      const draft = await repository.updateScheduleDraftAssignment(
+      const draft = await draftService.updateAssignment(
         request.params.id,
         request.params.examTaskId,
         parsed.data,
@@ -413,7 +426,13 @@ export function createApp(options: AppOptions = {}) {
       if (!requireRole(request, reply, ["admin", "operator"])) {
         return reply;
       }
-      const draft = await repository.validateScheduleDraft(request.params.id);
+      const draft = await draftService.validate(request.params.id);
+      if (draft === "not_editable") {
+        return reply.code(409).send({
+          error: "schedule_draft_not_editable",
+          message: "Schedule draft is already published or discarded.",
+        });
+      }
       if (!draft) {
         return reply.code(404).send({
           error: "schedule_draft_not_found",
@@ -425,7 +444,7 @@ export function createApp(options: AppOptions = {}) {
   );
 
   app.get<{ Params: { id: string } }>("/api/schedule-drafts/:id/compare", async (request, reply) => {
-    const comparison = await repository.compareScheduleDraft(request.params.id);
+    const comparison = await draftService.compare(request.params.id);
     if (!comparison) {
       return reply.code(404).send({
         error: "schedule_draft_not_found",
@@ -438,7 +457,7 @@ export function createApp(options: AppOptions = {}) {
   app.get<{ Params: { id: string; examTaskId: string } }>(
     "/api/schedule-drafts/:id/assignments/:examTaskId/suggestions",
     async (request, reply) => {
-      const suggestions = await repository.suggestScheduleDraftAssignment(
+      const suggestions = await draftService.suggestAssignment(
         request.params.id,
         request.params.examTaskId,
       );
@@ -458,7 +477,13 @@ export function createApp(options: AppOptions = {}) {
       if (!requireRole(request, reply, ["admin", "operator"])) {
         return reply;
       }
-      const draft = await repository.lockScheduleDraftAssignment(request.params.id, request.params.examTaskId);
+      const draft = await draftService.lockAssignment(request.params.id, request.params.examTaskId);
+      if (draft === "not_editable") {
+        return reply.code(409).send({
+          error: "schedule_draft_not_editable",
+          message: "Schedule draft is already published or discarded.",
+        });
+      }
       if (!draft) {
         return reply.code(404).send({
           error: "schedule_draft_assignment_not_found",
@@ -475,7 +500,13 @@ export function createApp(options: AppOptions = {}) {
       if (!requireRole(request, reply, ["admin", "operator"])) {
         return reply;
       }
-      const draft = await repository.unlockScheduleDraftAssignment(request.params.id, request.params.examTaskId);
+      const draft = await draftService.unlockAssignment(request.params.id, request.params.examTaskId);
+      if (draft === "not_editable") {
+        return reply.code(409).send({
+          error: "schedule_draft_not_editable",
+          message: "Schedule draft is already published or discarded.",
+        });
+      }
       if (!draft) {
         return reply.code(404).send({
           error: "schedule_draft_assignment_not_found",
@@ -492,7 +523,7 @@ export function createApp(options: AppOptions = {}) {
       if (!requireRole(request, reply, ["admin", "operator"])) {
         return reply;
       }
-      const draft = await repository.rebalanceScheduleDraft(request.params.id);
+      const draft = await draftService.rebalance(request.params.id);
       if (!draft) {
         return reply.code(404).send({
           error: "schedule_draft_not_found",
@@ -515,7 +546,7 @@ export function createApp(options: AppOptions = {}) {
       if (!requireRole(request, reply, ["admin"])) {
         return reply;
       }
-      const published = await repository.publishScheduleDraft(request.params.id);
+      const published = await draftService.publish(request.params.id);
       if (!published) {
         return reply.code(404).send({
           error: "schedule_draft_not_found",
@@ -544,7 +575,7 @@ export function createApp(options: AppOptions = {}) {
       if (!requireRole(request, reply, ["admin", "operator"])) {
         return reply;
       }
-      const discarded = await repository.discardScheduleDraft(request.params.id);
+      const discarded = await draftService.discard(request.params.id);
       if (!discarded) {
         return reply.code(404).send({
           error: "schedule_draft_not_found",
@@ -607,7 +638,7 @@ export function createApp(options: AppOptions = {}) {
       if (!requireRole(request, reply, ["admin"])) {
         return reply;
       }
-      const published = await repository.publishScheduleRun(request.params.id);
+      const published = await publicationService.publishRun(request.params.id);
       if (!published) {
         return reply.code(404).send({
           error: "schedule_run_not_found",
@@ -619,7 +650,7 @@ export function createApp(options: AppOptions = {}) {
   );
 
   app.get("/api/published-schedule", async (_request, reply) => {
-    const published = await repository.getPublishedSchedule();
+    const published = await publicationService.getPublishedSchedule();
     if (!published) {
       return reply.code(404).send({
         error: "published_schedule_not_found",
@@ -634,98 +665,69 @@ export function createApp(options: AppOptions = {}) {
       return reply;
     }
     const user = getRequestUser(request);
-    const [referenceData, published] = await Promise.all([
-      repository.getReferenceData(),
-      repository.getPublishedSchedule(),
-    ]);
-    if (!published) {
+    const exported = await publicationService.exportCsv(user?.username ?? "unknown");
+    if (!exported) {
       return reply.code(404).send({
         error: "published_schedule_not_found",
         message: "No schedule has been published.",
       });
     }
-    await repository.recordAuditEvent?.("published_schedule.exported", "schedule_run", published.run.id, {
-      batchId: published.batch.id,
-      format: "csv",
-    }, user?.username ?? "unknown");
     return reply
       .header("content-type", "text/csv; charset=utf-8")
-      .send(buildPublishedScheduleCsv(referenceData, published));
+      .send(exported.csv);
   });
 
   app.get("/api/published-schedule/notifications", async (_request, reply) => {
-    const [referenceData, published] = await Promise.all([
-      repository.getReferenceData(),
-      repository.getPublishedSchedule(),
-    ]);
-    if (!published) {
+    const notifications = await publicationService.getNotifications();
+    if (!notifications) {
       return reply.code(404).send({
         error: "published_schedule_not_found",
         message: "No schedule has been published.",
       });
     }
-    return buildPublishedScheduleNotifications(referenceData, published);
+    return notifications;
   });
 
   app.get<{ Params: { teacherId: string } }>(
     "/api/published-schedule/teachers/:teacherId",
     async (request, reply) => {
-      const [referenceData, published] = await Promise.all([
-        repository.getReferenceData(),
-        repository.getPublishedSchedule(),
-      ]);
-      if (!published) {
+      const result = await publicationService.getAudience("teacher", request.params.teacherId);
+      if (result.status === "not_published") {
         return reply.code(404).send({
           error: "published_schedule_not_found",
           message: "No schedule has been published.",
         });
       }
-
-      const response = buildPublishedScheduleAudience(
-        referenceData,
-        published,
-        "teacher",
-        request.params.teacherId,
-      );
-      if (!response) {
+      if (result.status === "viewer_not_found") {
         return reply.code(404).send({
           error: "published_schedule_viewer_not_found",
           message: `Teacher ${request.params.teacherId} does not exist.`,
         });
       }
-
-      return response;
+      return result.response;
     },
   );
 
   app.get<{ Params: { studentGroupId: string } }>(
     "/api/published-schedule/student-groups/:studentGroupId",
     async (request, reply) => {
-      const [referenceData, published] = await Promise.all([
-        repository.getReferenceData(),
-        repository.getPublishedSchedule(),
-      ]);
-      if (!published) {
+      const result = await publicationService.getAudience(
+        "student_group",
+        request.params.studentGroupId,
+      );
+      if (result.status === "not_published") {
         return reply.code(404).send({
           error: "published_schedule_not_found",
           message: "No schedule has been published.",
         });
       }
-
-      const response = buildPublishedScheduleAudience(
-        referenceData,
-        published,
-        "student_group",
-        request.params.studentGroupId,
-      );
-      if (!response) {
+      if (result.status === "viewer_not_found") {
         return reply.code(404).send({
           error: "published_schedule_viewer_not_found",
           message: `Student group ${request.params.studentGroupId} does not exist.`,
         });
       }
-
-      return response;
+      return result.response;
     },
   );
 
@@ -733,7 +735,7 @@ export function createApp(options: AppOptions = {}) {
     if (!requireRole(request, reply, ["admin"])) {
       return reply;
     }
-    return repository.rollbackPublishedSchedule();
+    return publicationService.rollback();
   });
 
   app.get<{ Params: { id: string } }>("/api/schedule-runs/:id", async (request, reply) => {
@@ -748,33 +750,10 @@ export function createApp(options: AppOptions = {}) {
   });
 
   return app;
+}
 
-  async function runScheduleJob(id: string) {
-    const current = await repository.getScheduleJob(id);
-    if (!current) {
-      return;
-    }
-    await repository.updateScheduleJob(id, {
-      status: "running",
-      progress: 35,
-    });
-    try {
-      const referenceData = await repository.getReferenceData();
-      const result = await scheduler.solve(referenceData.scheduleInput);
-      const response = await repository.createScheduleRun(result);
-      await repository.updateScheduleJob(id, {
-        status: "completed",
-        progress: 100,
-        runId: response.run.id,
-      });
-    } catch (error) {
-      await repository.updateScheduleJob(id, {
-        status: "failed",
-        progress: 100,
-        error: error instanceof Error ? error.message : "Schedule job failed.",
-      });
-    }
-  }
+function parseScheduleRequest(body: unknown) {
+  return scheduleRequestSchema.safeParse(body ?? {});
 }
 
 type ExamForgeRole = "admin" | "operator" | "viewer";

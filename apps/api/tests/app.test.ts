@@ -138,6 +138,60 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("passes fixed assignments from schedule run requests to the scheduler", async () => {
+    const scheduler = new FakeScheduler();
+    const fixedAssignments = [
+      {
+        exam_task_id: "e-data-structures",
+        room_id: "r-101",
+        time_slot_id: "s-001",
+        teacher_ids: ["t-zhang"],
+      },
+    ];
+    const app = createApp({ scheduler });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+      payload: {
+        fixed_assignments: fixedAssignments,
+      },
+    });
+
+    assert.equal(response.statusCode, 201);
+    assert.deepEqual(scheduler.lastInput?.fixed_assignments, fixedAssignments);
+    await app.close();
+  });
+
+  it("passes fixed assignments from schedule job requests to the scheduler", async () => {
+    const scheduler = new FakeScheduler();
+    const fixedAssignments = [
+      {
+        exam_task_id: "e-data-structures",
+        room_id: "r-101",
+        time_slot_id: "s-001",
+        teacher_ids: ["t-zhang"],
+      },
+    ];
+    const app = createApp({ scheduler });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/schedule-jobs",
+      headers: operatorHeaders,
+      payload: {
+        fixed_assignments: fixedAssignments,
+      },
+    });
+    assert.equal(response.statusCode, 202);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.deepEqual(scheduler.lastInput?.fixed_assignments, fixedAssignments);
+    await app.close();
+  });
+
   it("authenticates users with bearer tokens instead of trusting role headers", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
 
@@ -709,6 +763,20 @@ describe("ExamForge API", () => {
     });
     assert.equal(publishedResponse.statusCode, 200);
     assert.equal(publishedResponse.json().run.id, publishResponse.json().run.id);
+
+    for (const path of [
+      `/api/schedule-drafts/${createdDraft.draft.id}/validate`,
+      `/api/schedule-drafts/${createdDraft.draft.id}/assignments/e-data-structures/lock`,
+      `/api/schedule-drafts/${createdDraft.draft.id}/assignments/e-data-structures/unlock`,
+    ]) {
+      const terminalMutation = await app.inject({
+        method: "POST",
+        url: path,
+        headers: operatorHeaders,
+      });
+      assert.equal(terminalMutation.statusCode, 409);
+      assert.equal(terminalMutation.json().error, "schedule_draft_not_editable");
+    }
 
     await app.close();
   });
