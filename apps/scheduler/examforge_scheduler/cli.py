@@ -12,9 +12,11 @@ from .models import (
     ExamTask,
     ExamType,
     FixedAssignment,
+    RescheduleContext,
     Room,
     RoomType,
     ScheduleInput,
+    ScheduledExam,
     Teacher,
     TimeSlot,
     StudentGroup,
@@ -82,6 +84,26 @@ def _solve_with_report(schedule_input: ScheduleInput) -> dict[str, Any]:
 
 
 def _schedule_input_from_json(payload: dict[str, Any]) -> ScheduleInput:
+    reschedule_payload = payload.get("reschedule_context")
+    reschedule_context = (
+        None
+        if reschedule_payload is None
+        else RescheduleContext(
+            baseline_assignments=tuple(
+                ScheduledExam(
+                    exam_task_id=item["exam_task_id"],
+                    room_id=item["room_id"],
+                    time_slot_id=item["time_slot_id"],
+                    teacher_ids=tuple(item.get("teacher_ids", ())),
+                )
+                for item in reschedule_payload["baseline_assignments"]
+            ),
+            movable_exam_task_ids=tuple(
+                reschedule_payload.get("movable_exam_task_ids", ())
+            ),
+        )
+    )
+
     return ScheduleInput(
         student_groups=tuple(
             StudentGroup(
@@ -159,6 +181,7 @@ def _schedule_input_from_json(payload: dict[str, Any]) -> ScheduleInput:
             )
             for item in payload.get("fixed_assignments", ())
         ),
+        reschedule_context=reschedule_context,
     )
 
 

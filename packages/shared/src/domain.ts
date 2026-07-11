@@ -78,6 +78,52 @@ export const fixedAssignmentSchema = z.object({
   teacher_ids: z.array(z.string()).default([]),
 });
 
+export const scheduledExamSchema = z.object({
+  exam_task_id: z.string(),
+  room_id: z.string(),
+  time_slot_id: z.string(),
+  teacher_ids: z.array(z.string()).default([]),
+});
+
+export const rescheduleContextSchema = z
+  .object({
+    baseline_assignments: z.array(scheduledExamSchema).min(1),
+    movable_exam_task_ids: z.array(z.string()).default([]),
+  })
+  .superRefine((context, refinementContext) => {
+    const baselineExamTaskIds = new Set<string>();
+    for (const [index, assignment] of context.baseline_assignments.entries()) {
+      if (baselineExamTaskIds.has(assignment.exam_task_id)) {
+        refinementContext.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["baseline_assignments", index, "exam_task_id"],
+          message: `duplicate baseline exam_task_id ${assignment.exam_task_id}`,
+        });
+      }
+      baselineExamTaskIds.add(assignment.exam_task_id);
+    }
+
+    const movableExamTaskIds = new Set<string>();
+    for (const [index, examTaskId] of context.movable_exam_task_ids.entries()) {
+      if (movableExamTaskIds.has(examTaskId)) {
+        refinementContext.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["movable_exam_task_ids", index],
+          message: `duplicate movable exam_task_id ${examTaskId}`,
+        });
+      }
+      movableExamTaskIds.add(examTaskId);
+
+      if (!baselineExamTaskIds.has(examTaskId)) {
+        refinementContext.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["movable_exam_task_ids", index],
+          message: `movable exam_task_id ${examTaskId} is not in baseline_assignments`,
+        });
+      }
+    }
+  });
+
 export const scheduleInputSchema = z.object({
   student_groups: z.array(studentGroupSchema),
   teachers: z.array(teacherSchema),
@@ -87,13 +133,7 @@ export const scheduleInputSchema = z.object({
   exam_tasks: z.array(examTaskSchema),
   constraint_profile: constraintProfileSchema,
   fixed_assignments: z.array(fixedAssignmentSchema).default([]),
-});
-
-export const scheduledExamSchema = z.object({
-  exam_task_id: z.string(),
-  room_id: z.string(),
-  time_slot_id: z.string(),
-  teacher_ids: z.array(z.string()).default([]),
+  reschedule_context: rescheduleContextSchema.nullable().default(null),
 });
 
 export const conflictRecordSchema = z.object({
@@ -170,6 +210,7 @@ export type TimeSlot = z.infer<typeof timeSlotSchema>;
 export type ExamTask = z.infer<typeof examTaskSchema>;
 export type ConstraintProfile = z.infer<typeof constraintProfileSchema>;
 export type FixedAssignment = z.infer<typeof fixedAssignmentSchema>;
+export type RescheduleContext = z.infer<typeof rescheduleContextSchema>;
 export type ScheduleInput = z.infer<typeof scheduleInputSchema>;
 export type ScheduledExam = z.infer<typeof scheduledExamSchema>;
 export type ConflictRecord = z.infer<typeof conflictRecordSchema>;

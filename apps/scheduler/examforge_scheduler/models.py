@@ -98,6 +98,12 @@ class ScheduledExam:
 
 
 @dataclass(frozen=True)
+class RescheduleContext:
+    baseline_assignments: tuple[ScheduledExam, ...]
+    movable_exam_task_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class FixedAssignment:
     exam_task_id: str
     room_id: str
@@ -148,6 +154,7 @@ class ScheduleInput:
     exam_tasks: tuple[ExamTask, ...]
     constraint_profile: ConstraintProfile
     fixed_assignments: tuple[FixedAssignment, ...] = ()
+    reschedule_context: RescheduleContext | None = None
 
 
 @dataclass(frozen=True)
@@ -263,7 +270,115 @@ def validate_schedule_input(schedule_input: ScheduleInput) -> tuple[str, ...]:
                     f"references missing teacher_id {teacher_id}"
                 )
 
+    if schedule_input.reschedule_context is not None:
+        _validate_reschedule_context(
+            errors,
+            schedule_input,
+            task_ids,
+            room_ids,
+            slot_ids,
+            teacher_ids,
+        )
+
     return tuple(errors)
+
+
+def _validate_reschedule_context(
+    errors: list[str],
+    schedule_input: ScheduleInput,
+    task_ids: set[str],
+    room_ids: set[str],
+    slot_ids: set[str],
+    teacher_ids: set[str],
+) -> None:
+    context = schedule_input.reschedule_context
+    if context is None:
+        return
+
+    if not context.baseline_assignments:
+        errors.append(
+            "reschedule_context baseline_assignments must not be empty"
+        )
+
+    baseline_by_task_id: dict[str, ScheduledExam] = {}
+    for assignment in context.baseline_assignments:
+        if assignment.exam_task_id in baseline_by_task_id:
+            errors.append(
+                "reschedule_context baseline_assignments references duplicate "
+                f"exam_task_id {assignment.exam_task_id}"
+            )
+        else:
+            baseline_by_task_id[assignment.exam_task_id] = assignment
+
+        if assignment.exam_task_id not in task_ids:
+            errors.append(
+                "reschedule_context baseline_assignment references missing "
+                f"exam_task_id {assignment.exam_task_id}"
+            )
+        if assignment.room_id not in room_ids:
+            errors.append(
+                "reschedule_context baseline_assignment "
+                f"{assignment.exam_task_id} references missing room_id "
+                f"{assignment.room_id}"
+            )
+        if assignment.time_slot_id not in slot_ids:
+            errors.append(
+                "reschedule_context baseline_assignment "
+                f"{assignment.exam_task_id} references missing time_slot_id "
+                f"{assignment.time_slot_id}"
+            )
+        for teacher_id in assignment.teacher_ids:
+            if teacher_id not in teacher_ids:
+                errors.append(
+                    "reschedule_context baseline_assignment "
+                    f"{assignment.exam_task_id} references missing teacher_id "
+                    f"{teacher_id}"
+                )
+
+    for task in schedule_input.exam_tasks:
+        if task.id not in baseline_by_task_id:
+            errors.append(
+                "reschedule_context baseline_assignments missing exam_task_id "
+                f"{task.id}"
+            )
+
+    movable_task_ids: set[str] = set()
+    for task_id in context.movable_exam_task_ids:
+        if task_id in movable_task_ids:
+            errors.append(
+                "reschedule_context movable_exam_task_ids contains duplicate "
+                f"exam_task_id {task_id}"
+            )
+        movable_task_ids.add(task_id)
+        if task_id not in baseline_by_task_id:
+            errors.append(
+                "reschedule_context movable_exam_task_ids references missing "
+                f"baseline exam_task_id {task_id}"
+            )
+
+    for fixed_assignment in schedule_input.fixed_assignments:
+        baseline_assignment = baseline_by_task_id.get(fixed_assignment.exam_task_id)
+        if (
+            baseline_assignment is None
+            or fixed_assignment.exam_task_id in movable_task_ids
+        ):
+            continue
+
+        conflicting_fields: list[str] = []
+        if fixed_assignment.room_id != baseline_assignment.room_id:
+            conflicting_fields.append("room_id")
+        if fixed_assignment.time_slot_id != baseline_assignment.time_slot_id:
+            conflicting_fields.append("time_slot_id")
+        if fixed_assignment.teacher_ids and set(fixed_assignment.teacher_ids) != set(
+            baseline_assignment.teacher_ids
+        ):
+            conflicting_fields.append("teacher_ids")
+        if conflicting_fields:
+            errors.append(
+                f"reschedule_context frozen exam_task_id {fixed_assignment.exam_task_id} "
+                "conflicts with fixed_assignment fields "
+                f"{', '.join(conflicting_fields)}"
+            )
 
 
 def _validate_entity_ids(errors: list[str], entity_name: str, ids: object) -> None:

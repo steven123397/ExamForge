@@ -132,10 +132,18 @@
 - 验证结果：`npm run test:scheduler` 通过，调度器测试结果为 `42 passed`；`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 通过，API 测试结果为 `30` 个通过；`npm run build` 通过；`npm run test:e2e` 通过，Playwright 结果为 `2 passed`；`TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres` 通过，PostgreSQL 集成测试结果为 `3 passed`；同测试库运行 `npm run test:migrations` 通过，迁移测试结果为 `1 passed`；`DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate` 通过且无待应用迁移；`git diff --check` 通过。
 - 后续影响：第三版设计中的选做内容已形成兼容式实现基线；后续如果继续企业化，应优先评估是否删除 JSONB 冗余字段、补楼栋主数据和跨楼栋约束，或将固定安排合同接入 Web 锁定考试与局部重排请求。
 
+## 2026-07-08 第三版完成后全量代码审查
+
+- 原计划：`docs/plan/全量代码审查计划.md`
+- 执行证据：`docs/status/code_review_status.md` 的 2026-07-08 审查记录；主要修复提交为 `5bd4395 fix(审查): 修复第四阶段全量审查问题`，CR-018、CR-019 的后续修复和真实库补强进入 `a591cf4 feat(第四版): 完成数据与服务边界治理`。
+- 完成内容：覆盖 scheduler、API/service/repository、数据库迁移与共享合同、Web 运营台、工程验证和文档治理；复核 CR-002、CR-003、CR-007、CR-008，新增并处理 CR-014 至 CR-019。
+- 验证结果：审查时 `npm run test:scheduler`、`LOG_LEVEL=silent npm test`、`npm run typecheck`、`npm run build` 和 `npm run test:e2e` 通过；当时真实 PostgreSQL 因本机服务未启动而阻塞，后续第四版第一阶段已补充 PostgreSQL `9 passed`、迁移与数据库 session `4 passed` 以及迁移幂等证据。
+- 后续影响：全量代码审查改为每个大版本全部阶段完成后执行一次；阶段内继续使用 TDD、最窄回归和必要的独立复核，不重复维护整版审查计划。
+
 ## 2026-07-11 第四版第一阶段：数据与服务边界
 
 - 原计划：`docs/plan/第四版第一阶段计划.md`
-- 完成提交：未提交；本轮按用户要求只保留本地工作区改动，未 push。
+- 完成提交：`a591cf4 feat(第四版): 完成数据与服务边界治理`；未 push。
 - 完成内容：PostgreSQL 调度输入、正式排考和草稿监考教师均采用关联表优先、JSONB 兼容回退；迁移检查覆盖关键关联表、主键、外键和 JSONB 双向一致性；API 新增排考运行、草稿治理和发布治理 service/use-case 层，route 主要保留鉴权、参数解析与 HTTP 错误映射；PostgreSQL 同一草稿的调整、校验、锁定、解锁、再平衡、发布和废弃通过 advisory lock 串行化，锁和业务 SQL 共用同一专用连接，异常时先排空已入队查询再解锁和释放连接，终态转换继续使用可编辑状态 CAS，避免连接池耗尽、连接复用污染、终态回退、终态后变更和并发重复发布。
 - 测试过程：先用真实 PostgreSQL 红灯复现正式排考详情仍读取 JSONB，并用迁移测试证明约束/双向一致性检查缺失；排考、草稿和发布 service 均先以模块不存在或业务短路缺失形成红灯；独立审查后再以红灯复现终态草稿可被重新校验、关联表多余行未被检测、发布或废弃完成后锁状态仍可变更、终态转换领先时校验仍返回成功，以及单连接池下草稿 mutation 无法完成和失败查询后的尾部查询未受控，随后完成修复和回归；另通过主动删除关联行证明调度输入、正式排考、教师已发布查询和草稿读路径会回退 JSONB 兼容字段。
 - 范围边界：保留 JSONB 兼容字段、演示 Bearer token、Python scheduler CLI、HTTP 轮询和 API 进程内 `setTimeout()` 作业执行；未引入真实队列、SSE/WebSocket、FastAPI scheduler、真实用户/会话、教师二阶段优化、规模基准或 Web 大改造。

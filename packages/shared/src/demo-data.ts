@@ -133,4 +133,5 @@ export const demoScheduleInput: ScheduleInput = {
     time_limit_seconds: 10,
   },
   fixed_assignments: [],
+  reschedule_context: null,
 };
