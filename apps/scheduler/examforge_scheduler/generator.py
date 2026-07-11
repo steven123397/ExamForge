@@ -389,6 +389,7 @@ def _default_constraint_profile(time_limit_seconds: int = 30) -> ConstraintProfi
         soft_weights={
             "student_consecutive_exam": 80,
             "teacher_workload_balance": 70,
+            "teacher_consecutive_invigilation": 60,
             "room_utilization": 30,
             "exam_distribution_balance": 50,
         },

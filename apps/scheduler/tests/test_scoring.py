@@ -134,6 +134,24 @@ def test_teacher_workload_balance_penalizes_assignments_above_average():
     assert "t1" in item.message
 
 
+def test_teacher_consecutive_invigilation_adds_weighted_penalty():
+    data = make_schedule_input()
+    data.constraint_profile.soft_weights["teacher_consecutive_invigilation"] = 60
+
+    score = calculate_score(
+        data,
+        (
+            ScheduledExam("e1", "r2", "s1", ("t1",)),
+            ScheduledExam("e2", "r2", "s2", ("t1",)),
+        ),
+    )
+
+    item = _penalty(score, "teacher_consecutive_invigilation")
+
+    assert item.penalty == 60
+    assert "t1" in item.message
+
+
 def test_room_utilization_penalizes_low_capacity_usage():
     data = make_schedule_input()
     score = calculate_score(data, (ScheduledExam("e1", "r1", "s1", ("t1",)),))

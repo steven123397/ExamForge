@@ -28,6 +28,7 @@ def calculate_score(
     penalty_items = (
         _student_consecutive_exam_penalty(assignments, task_by_id, slot_by_id, weights),
         _teacher_workload_balance_penalty(schedule_input, assignments, weights),
+        _teacher_consecutive_invigilation_penalty(assignments, slot_by_id, weights),
         _room_utilization_penalty(assignments, task_by_id, room_by_id, weights),
         _exam_distribution_balance_penalty(schedule_input, assignments, slot_by_id, weights),
     )
@@ -111,6 +112,42 @@ def _teacher_workload_balance_penalty(
         rule="teacher_workload_balance",
         penalty=excess_count * weight,
         message=f"教师 {teacher_ids} 监考工作量高于平均水平 {average:.2f}",
+    )
+
+
+def _teacher_consecutive_invigilation_penalty(
+    assignments: tuple[ScheduledExam, ...],
+    slot_by_id: dict[str, TimeSlot],
+    weights: dict[str, int],
+) -> SoftPenaltyItem | None:
+    weight = weights.get("teacher_consecutive_invigilation", 0)
+    if weight <= 0:
+        return None
+
+    teacher_slots: dict[str, list[TimeSlot]] = defaultdict(list)
+    for assignment in assignments:
+        slot = slot_by_id.get(assignment.time_slot_id)
+        if slot is None:
+            continue
+        for teacher_id in assignment.teacher_ids:
+            teacher_slots[teacher_id].append(slot)
+
+    consecutive_teachers: list[str] = []
+    for teacher_id, slots in teacher_slots.items():
+        ordered_slots = sorted(slots, key=lambda slot: slot.period_index)
+        for previous, current in zip(ordered_slots, ordered_slots[1:]):
+            if current.period_index - previous.period_index == 1:
+                consecutive_teachers.append(teacher_id)
+
+    if not consecutive_teachers:
+        return None
+
+    count = len(consecutive_teachers)
+    teacher_ids = ", ".join(sorted(set(consecutive_teachers)))
+    return SoftPenaltyItem(
+        rule="teacher_consecutive_invigilation",
+        penalty=count * weight,
+        message=f"教师 {teacher_ids} 存在 {count} 次连续监考",
     )
 
 
