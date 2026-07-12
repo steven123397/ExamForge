@@ -76,10 +76,17 @@ test("方案工作台支持建议应用和矩阵拖拽调整", async ({ page, re
 test("运营台支持异步排考作业和发布通知预览", async ({ page, request }) => {
   await page.goto("/");
 
+  const createJobResponsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+      && response.url().endsWith("/api/schedule-jobs")
+  ));
   await page.getByTestId("schedule-job-create").click();
+  const createJobResponse = await createJobResponsePromise;
+  expect(createJobResponse.status()).toBe(202);
+  const createdJob = await createJobResponse.json() as { job: { id: string } };
   await expect(page.getByTestId("schedule-job-panel")).toContainText(/queued|running|completed/);
 
-  const completedRunId = await waitForCompletedJob(request);
+  const completedRunId = await waitForCompletedJob(request, createdJob.job.id);
 
   const publishResponse = await request.post(`${apiBase}/api/schedule-runs/${completedRunId}/publish`, {
     headers: adminHeaders,
@@ -195,19 +202,21 @@ async function findEmptyDestination(
   throw new Error("No empty matrix destination is available.");
 }
 
-async function waitForCompletedJob(request: APIRequestContext) {
+async function waitForCompletedJob(request: APIRequestContext, jobId: string) {
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 8_000) {
-    const jobsResponse = await request.get(`${apiBase}/api/schedule-jobs`);
-    expect(jobsResponse.ok()).toBeTruthy();
-    const payload = await jobsResponse.json() as {
-      jobs: Array<{ status: string; runId: string | null }>;
+  while (Date.now() - startedAt < 30_000) {
+    const jobResponse = await request.get(`${apiBase}/api/schedule-jobs/${jobId}`);
+    expect(jobResponse.ok()).toBeTruthy();
+    const payload = await jobResponse.json() as {
+      job: { status: string; runId: string | null; error: string | null };
     };
-    const runId = payload.jobs.find((job) => job.status === "completed" && job.runId)?.runId;
-    if (runId) {
-      return runId;
+    if (payload.job.status === "completed" && payload.job.runId) {
+      return payload.job.runId;
+    }
+    if (payload.job.status === "failed") {
+      throw new Error(`Schedule job ${jobId} failed: ${payload.job.error ?? "unknown error"}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  throw new Error("No completed schedule job was observed.");
+  throw new Error(`Schedule job ${jobId} did not complete within 30 seconds.`);
 }
