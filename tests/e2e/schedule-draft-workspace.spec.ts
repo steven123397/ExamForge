@@ -91,6 +91,66 @@ test("运营台支持异步排考作业和发布通知预览", async ({ page, re
   await expect(page.getByTestId("published-notification-list")).toContainText("考试安排已发布");
 });
 
+test("草稿锁定可生成增量重排版本并展示稳定性摘要", async ({ page, request }) => {
+  const runResponse = await request.post(`${apiBase}/api/schedule-runs`, {
+    headers: operatorHeaders,
+  });
+  expect(runResponse.ok()).toBeTruthy();
+  const run = await runResponse.json() as { run: { id: string } };
+  const draftResponse = await request.post(`${apiBase}/api/schedule-runs/${run.run.id}/drafts`, {
+    headers: operatorHeaders,
+  });
+  expect(draftResponse.ok()).toBeTruthy();
+  const draft = await draftResponse.json() as {
+    draft: { id: string };
+    assignments: Array<{
+      exam_task_id: string;
+      room_id: string;
+      time_slot_id: string;
+      teacher_ids: string[];
+    }>;
+  };
+  const lockedAssignment = draft.assignments[0];
+
+  await page.goto("/");
+  await page.getByTestId(`draft-row-${draft.draft.id}`).click();
+  await expect(page.locator(`[data-exam-task-id="${lockedAssignment.exam_task_id}"]`)).toBeVisible();
+  await page.getByTestId("draft-lock-assignment").click();
+  await expect(page.getByTestId("draft-lock-state")).toContainText("已锁定");
+
+  const responsePromise = page.waitForResponse((response) => (
+    response.request().method() === "POST"
+      && response.url().endsWith(`/api/schedule-drafts/${draft.draft.id}/reschedule`)
+  ));
+  await page.getByTestId("draft-reschedule").click();
+  const rescheduleResponse = await responsePromise;
+  expect(rescheduleResponse.status()).toBe(201);
+  const rescheduled = await rescheduleResponse.json() as {
+    sourceDraftId: string;
+    result: { assignments: typeof draft.assignments };
+    reschedule: {
+      frozen_exam_task_ids: string[];
+      retained_exam_task_ids: string[];
+      changed_exam_task_ids: string[];
+    };
+  };
+
+  expect(rescheduled.sourceDraftId).toBe(draft.draft.id);
+  expect(rescheduled.reschedule.frozen_exam_task_ids).toContain(lockedAssignment.exam_task_id);
+  expect(rescheduled.result.assignments.find((assignment) => (
+    assignment.exam_task_id === lockedAssignment.exam_task_id
+  ))).toEqual(lockedAssignment);
+  await expect(page.getByTestId("draft-reschedule-frozen")).toHaveText("1");
+  await expect(page.getByTestId("draft-reschedule-summary")).toContainText("保留");
+  await expect(page.getByTestId("draft-reschedule-summary")).toContainText("变化");
+
+  const sourceDraft = await readDraft(request, draft.draft.id);
+  expect(sourceDraft.lockedExamTaskIds).toContain(lockedAssignment.exam_task_id);
+  expect(sourceDraft.assignments.find((assignment) => (
+    assignment.exam_task_id === lockedAssignment.exam_task_id
+  ))).toEqual(lockedAssignment);
+});
+
 async function readDraft(
   request: APIRequestContext,
   draftId: string,
@@ -98,7 +158,13 @@ async function readDraft(
   const response = await request.get(`${apiBase}/api/schedule-drafts/${draftId}`);
   expect(response.ok()).toBeTruthy();
   return await response.json() as {
-    assignments: Array<{ exam_task_id: string; room_id: string; time_slot_id: string }>;
+    assignments: Array<{
+      exam_task_id: string;
+      room_id: string;
+      time_slot_id: string;
+      teacher_ids: string[];
+    }>;
+    lockedExamTaskIds?: string[];
   };
 }
 

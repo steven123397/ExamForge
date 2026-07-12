@@ -25,6 +25,7 @@ import type {
   ScheduleRunComparisonResponse,
   ScheduleDraftComparisonResponse,
   ScheduleDraftDetailResponse,
+  ScheduleDraftRescheduleResponse,
   ScheduleRunResponse,
   ScheduledExam,
 } from "@examforge/shared";
@@ -51,6 +52,7 @@ export function OperationsConsole() {
   const [currentDraft, setCurrentDraft] = useState<ScheduleDraftDetailResponse | null>(null);
   const [draftComparison, setDraftComparison] = useState<ScheduleDraftComparisonResponse | null>(null);
   const [draftSuggestions, setDraftSuggestions] = useState<ScheduleDraftAdjustmentSuggestionsResponse | null>(null);
+  const [draftReschedule, setDraftReschedule] = useState<ScheduleDraftRescheduleResponse | null>(null);
   const [selectedDraftAssignmentId, setSelectedDraftAssignmentId] = useState("");
   const [draftForm, setDraftForm] = useState<DraftAssignmentForm>({
     room_id: "",
@@ -64,6 +66,7 @@ export function OperationsConsole() {
   const [compareState, setCompareState] = useState<LoadState>("idle");
   const [draftState, setDraftState] = useState<LoadState>("idle");
   const [suggestionState, setSuggestionState] = useState<LoadState>("idle");
+  const [rescheduleState, setRescheduleState] = useState<LoadState>("idle");
   const [publishState, setPublishState] = useState<LoadState>("idle");
   const [queryState, setQueryState] = useState<LoadState>("idle");
   const [jobState, setJobState] = useState<LoadState>("idle");
@@ -247,6 +250,8 @@ export function OperationsConsole() {
 
   async function createDraftFromRun(id: string) {
     setDraftState("loading");
+    setDraftReschedule(null);
+    setRescheduleState("idle");
     setError(null);
     try {
       const payload = await apiClient.createDraftFromRun(id, role);
@@ -263,6 +268,8 @@ export function OperationsConsole() {
 
   async function loadDraft(id: string) {
     setDraftState("loading");
+    setDraftReschedule(null);
+    setRescheduleState("idle");
     setError(null);
     try {
       const payload = await apiClient.getScheduleDraft(id);
@@ -318,6 +325,8 @@ export function OperationsConsole() {
       return;
     }
     setDraftState("loading");
+    setDraftReschedule(null);
+    setRescheduleState("idle");
     setError(null);
     try {
       const payload = await apiClient.updateScheduleDraftAssignment(
@@ -366,11 +375,33 @@ export function OperationsConsole() {
     await mutateDraft(() => apiClient.rebalanceScheduleDraft(currentDraft.draft.id, role), "局部再平衡失败");
   }
 
+  async function rescheduleDraft() {
+    if (!currentDraft) {
+      return;
+    }
+    setRescheduleState("loading");
+    setDraftReschedule(null);
+    setError(null);
+    try {
+      const payload = await apiClient.rescheduleScheduleDraft(currentDraft.draft.id, role);
+      setLatestRun(payload);
+      setDraftReschedule(payload);
+      await refreshDashboard();
+      await loadOperationalHistory();
+      setRescheduleState("ready");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "增量重排失败");
+      setRescheduleState("error");
+    }
+  }
+
   async function mutateDraft(
     mutation: () => Promise<ScheduleDraftDetailResponse>,
     message: string,
   ) {
     setDraftState("loading");
+    setDraftReschedule(null);
+    setRescheduleState("idle");
     setError(null);
     try {
       const payload = await mutation();
@@ -400,6 +431,8 @@ export function OperationsConsole() {
       return;
     }
     setDraftState("loading");
+    setDraftReschedule(null);
+    setRescheduleState("idle");
     setError(null);
     try {
       const payload = await apiClient.publishScheduleDraft(currentDraft.draft.id, role);
@@ -421,6 +454,8 @@ export function OperationsConsole() {
       return;
     }
     setDraftState("loading");
+    setDraftReschedule(null);
+    setRescheduleState("idle");
     setError(null);
     try {
       const payload = await apiClient.discardScheduleDraft(currentDraft.draft.id, role);
@@ -751,11 +786,13 @@ export function OperationsConsole() {
             draft={currentDraft}
             comparison={draftComparison}
             suggestions={draftSuggestions}
+            reschedule={draftReschedule}
             referenceData={referenceData}
             selectedAssignmentId={selectedDraftAssignmentId}
             draftForm={draftForm}
             draftState={draftState}
             suggestionState={suggestionState}
+            rescheduleState={rescheduleState}
             onCreateDraft={createDraftFromRun}
             onLoadDraft={loadDraft}
             onSelectAssignment={setSelectedDraftAssignmentId}
@@ -766,6 +803,7 @@ export function OperationsConsole() {
             onLockAssignment={lockDraftAssignment}
             onUnlockAssignment={unlockDraftAssignment}
             onRebalanceDraft={rebalanceDraft}
+            onRescheduleDraft={rescheduleDraft}
             onPublishDraft={publishDraft}
             onDiscardDraft={discardDraft}
           />

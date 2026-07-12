@@ -1,6 +1,7 @@
 import {
   ClipboardList,
   Lock,
+  RefreshCw,
   RotateCcw,
   Save,
   ShieldCheck,
@@ -13,6 +14,7 @@ import type {
   ScheduleDraftAdjustmentSuggestionsResponse,
   ScheduleDraftComparisonResponse,
   ScheduleDraftDetailResponse,
+  ScheduleDraftRescheduleResponse,
   ScheduleDraftSummary,
   ScheduleRunSummary,
   ScheduledExam,
@@ -31,11 +33,13 @@ export function DraftWorkspace({
   draft,
   comparison,
   suggestions,
+  reschedule,
   referenceData,
   selectedAssignmentId,
   draftForm,
   draftState,
   suggestionState,
+  rescheduleState,
   onCreateDraft,
   onLoadDraft,
   onSelectAssignment,
@@ -46,6 +50,7 @@ export function DraftWorkspace({
   onLockAssignment,
   onUnlockAssignment,
   onRebalanceDraft,
+  onRescheduleDraft,
   onPublishDraft,
   onDiscardDraft,
 }: {
@@ -54,11 +59,13 @@ export function DraftWorkspace({
   draft: ScheduleDraftDetailResponse | null;
   comparison: ScheduleDraftComparisonResponse | null;
   suggestions: ScheduleDraftAdjustmentSuggestionsResponse | null;
+  reschedule: ScheduleDraftRescheduleResponse | null;
   referenceData: ReferenceDataResponse | null;
   selectedAssignmentId: string;
   draftForm: DraftAssignmentForm;
   draftState: LoadState;
   suggestionState: LoadState;
+  rescheduleState: LoadState;
   onCreateDraft(id: string): Promise<void>;
   onLoadDraft(id: string): Promise<void>;
   onSelectAssignment(id: string): void;
@@ -69,6 +76,7 @@ export function DraftWorkspace({
   onLockAssignment(): Promise<void>;
   onUnlockAssignment(): Promise<void>;
   onRebalanceDraft(): Promise<void>;
+  onRescheduleDraft(): Promise<void>;
   onPublishDraft(): Promise<void>;
   onDiscardDraft(): Promise<void>;
 }) {
@@ -80,6 +88,8 @@ export function DraftWorkspace({
   const draftLocked = draft?.draft.status === "published" || draft?.draft.status === "discarded";
   const assignmentLocked = Boolean(selectedAssignmentId && draft?.lockedExamTaskIds?.includes(selectedAssignmentId));
   const canPublishDraft = draft?.draft.status === "validated" && draft.draft.conflictCount === 0;
+  const draftBusy = draftState === "loading" || rescheduleState === "loading";
+  const currentReschedule = reschedule?.sourceDraftId === draft?.draft.id ? reschedule : null;
 
   useEffect(() => {
     setSourceRunId((current) => current || runs[0]?.id || "");
@@ -111,7 +121,7 @@ export function DraftWorkspace({
           <button
             type="button"
             className="secondary-button"
-            disabled={!sourceRunId || draftState === "loading"}
+            disabled={!sourceRunId || draftBusy}
             onClick={() => onCreateDraft(sourceRunId)}
           >
             <ClipboardList size={16} />
@@ -139,31 +149,63 @@ export function DraftWorkspace({
 
       <div className="draft-main">
         <div className="draft-summary">
-          <div><span>状态</span><strong>{draft?.draft.status ?? "未选择"}</strong></div>
-          <div><span>评分</span><strong>{draft?.draft.score ?? "--"}</strong></div>
-          <div><span>冲突</span><strong>{draft?.draft.conflictCount ?? "--"}</strong></div>
-          <div><span>安排</span><strong>{draft?.draft.assignmentCount ?? "--"}</strong></div>
-          <div><span>锁定</span><strong>{draft?.lockedExamTaskIds?.length ?? 0}</strong></div>
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={!draft || draftLocked || draftState === "loading"}
-            onClick={onRebalanceDraft}
-            data-testid="draft-rebalance"
-          >
-            <RotateCcw size={17} />
-            局部再平衡
-          </button>
-          <button
-            type="button"
-            className="primary-button"
-            disabled={!canPublishDraft || draftState === "loading"}
-            onClick={onPublishDraft}
-          >
-            <ShieldCheck size={17} />
-            发布草稿
-          </button>
+          <div className="draft-summary-metrics">
+            <div><span>状态</span><strong>{draft?.draft.status ?? "未选择"}</strong></div>
+            <div><span>评分</span><strong>{draft?.draft.score ?? "--"}</strong></div>
+            <div><span>冲突</span><strong>{draft?.draft.conflictCount ?? "--"}</strong></div>
+            <div><span>安排</span><strong>{draft?.draft.assignmentCount ?? "--"}</strong></div>
+            <div><span>锁定</span><strong>{draft?.lockedExamTaskIds?.length ?? 0}</strong></div>
+          </div>
+          <div className="draft-summary-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={!draft || draftLocked || draftBusy}
+              onClick={onRebalanceDraft}
+              data-testid="draft-rebalance"
+            >
+              <RotateCcw size={17} />
+              局部再平衡
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={!draft || draftLocked || draftBusy}
+              onClick={onRescheduleDraft}
+              data-testid="draft-reschedule"
+            >
+              <RefreshCw size={17} />
+              {rescheduleState === "loading" ? "正在重排" : "生成重排版本"}
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={!canPublishDraft || draftBusy}
+              onClick={onPublishDraft}
+            >
+              <ShieldCheck size={17} />
+              发布草稿
+            </button>
+          </div>
         </div>
+
+        {currentReschedule ? (
+          <div
+            className="draft-reschedule-summary"
+            data-testid="draft-reschedule-summary"
+            aria-live="polite"
+          >
+            <div>
+              <span>增量重排结果</span>
+              <strong>{currentReschedule.run.id.slice(0, 18)}</strong>
+            </div>
+            <dl>
+              <div><dt>冻结</dt><dd data-testid="draft-reschedule-frozen">{currentReschedule.reschedule.frozen_exam_task_ids.length}</dd></div>
+              <div><dt>保留</dt><dd data-testid="draft-reschedule-retained">{currentReschedule.reschedule.retained_exam_task_ids.length}</dd></div>
+              <div><dt>变化</dt><dd data-testid="draft-reschedule-changed">{currentReschedule.reschedule.changed_exam_task_ids.length}</dd></div>
+            </dl>
+          </div>
+        ) : null}
 
         <div className="draft-confirmation">
           <div className="confirmation-metrics">
@@ -195,7 +237,7 @@ export function DraftWorkspace({
             <button
               type="button"
               className="danger-button"
-              disabled={!draft || draftLocked || draftState === "loading"}
+              disabled={!draft || draftLocked || draftBusy}
               onClick={onDiscardDraft}
             >
               废弃草稿
@@ -266,7 +308,7 @@ export function DraftWorkspace({
             <button
               type="button"
               className="secondary-button"
-              disabled={draftState === "loading" || draftLocked || assignmentLocked}
+              disabled={draftBusy || draftLocked || assignmentLocked}
               onClick={onSaveAdjustment}
             >
               <Save size={16} />
@@ -276,7 +318,7 @@ export function DraftWorkspace({
               <button
                 type="button"
                 className="secondary-button"
-                disabled={draftState === "loading" || draftLocked || assignmentLocked}
+                disabled={draftBusy || draftLocked || assignmentLocked}
                 onClick={onLockAssignment}
                 data-testid="draft-lock-assignment"
               >
@@ -286,7 +328,7 @@ export function DraftWorkspace({
               <button
                 type="button"
                 className="secondary-button"
-                disabled={draftState === "loading" || draftLocked || !assignmentLocked}
+                disabled={draftBusy || draftLocked || !assignmentLocked}
                 onClick={onUnlockAssignment}
                 data-testid="draft-unlock-assignment"
               >
@@ -301,7 +343,7 @@ export function DraftWorkspace({
         <DraftSuggestions
           suggestions={suggestions}
           suggestionState={suggestionState}
-          draftState={draftState}
+          draftState={draftBusy ? "loading" : draftState}
           draftLocked={draftLocked}
           rooms={lookups.rooms}
           slots={lookups.slots}

@@ -785,6 +785,7 @@ th {
 .draft-inspector,
 .draft-summary,
 .draft-confirmation,
+.draft-reschedule-summary,
 .suggestion-panel,
 .draft-events {
   border: 1px solid var(--line);
@@ -862,14 +863,21 @@ th {
 
 .draft-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(82px, 1fr)) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   padding: 12px;
   margin-bottom: 12px;
 }
 
-.draft-summary div {
+.draft-summary-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(72px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.draft-summary-metrics > div {
   min-width: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -877,10 +885,62 @@ th {
   padding: 10px;
 }
 
-.draft-summary strong {
+.draft-summary-metrics strong {
   display: block;
   margin-top: 5px;
   overflow-wrap: anywhere;
+}
+
+.draft-summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.draft-reschedule-summary {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(260px, 0.8fr);
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  margin-bottom: 12px;
+  border-left: 3px solid var(--teal);
+}
+
+.draft-reschedule-summary > div span,
+.draft-reschedule-summary dt {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.draft-reschedule-summary > div strong {
+  display: block;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+
+.draft-reschedule-summary dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.draft-reschedule-summary dl div {
+  min-width: 0;
+  padding: 8px 10px;
+  border-left: 1px solid var(--line);
+}
+
+.draft-reschedule-summary dd {
+  margin: 4px 0 0;
+  color: var(--teal);
+  font-size: 20px;
+  font-weight: 800;
 }
 
 .draft-confirmation {
@@ -1488,6 +1548,9 @@ th {
     .schedule-card dl,
     .draft-workspace,
     .draft-summary,
+    .draft-summary-metrics,
+    .draft-reschedule-summary,
+    .draft-reschedule-summary dl,
     .draft-confirmation,
     .confirmation-metrics,
     .slot-toggle-grid,
@@ -1501,6 +1564,11 @@ th {
   .teacher-toolbar,
   .action-row,
   .topbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .draft-summary-actions {
     align-items: stretch;
     flex-direction: column;
   }

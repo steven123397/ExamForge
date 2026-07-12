@@ -15,6 +15,7 @@ import type {
   ScheduleDraftDiscardResponse,
   ScheduleDraftListResponse,
   ScheduleDraftPublishResponse,
+  ScheduleDraftRescheduleResponse,
   ScheduleJobListResponse,
   ScheduleJobResponse,
   ScheduleRollbackResponse,
@@ -238,6 +239,13 @@ export const apiClient = {
   rebalanceScheduleDraft(draftId: string, role: WorkspaceRole) {
     return requestJson<ScheduleDraftDetailResponse>(
       `/api/schedule-drafts/${encodeURIComponent(draftId)}/rebalance`,
+      jsonInit(role, "POST"),
+    );
+  },
+
+  rescheduleScheduleDraft(draftId: string, role: WorkspaceRole) {
+    return requestJson<ScheduleDraftRescheduleResponse>(
+      `/api/schedule-drafts/${encodeURIComponent(draftId)}/reschedule`,
       jsonInit(role, "POST"),
     );
   },
