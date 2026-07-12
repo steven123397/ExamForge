@@ -160,3 +160,14 @@
 - 验证结果：`npm run test:scheduler` 为 `73 passed`；`npm run typecheck` 通过；`LOG_LEVEL=silent npm test` 为 API `48 passed`；`npm run build` 通过；真实 PostgreSQL 集成测试为 `9 passed`；`git diff --check` 通过。
 - 范围边界：规模 profile 显式关闭 `teacher_consecutive_invigilation`，该目标由专项测试覆盖；固定 100 分制在大规模下饱和到 0，尚未提供跨批次归一化评分；未改 Web 交互、数据库 schema、队列、实时进度、真实认证或 scheduler 部署形态。
 - 后续影响：第四版第三阶段转向演示环境和体验增强，第四阶段建立 CI 质量门禁；第四版全部阶段结束后再执行一次全量代码审查。
+
+## 2026-07-12 第四版第三阶段：演示环境与体验增强
+
+- 原计划：`docs/plan/第四版第三阶段计划.md`。
+- 完成提交：`1284b66 feat(第四版): 建立草稿增量重排合同（任务 1/6）`、`95bac27 feat(Web): 接入草稿增量重排体验（任务 2/6）`、`cbd6912 feat(部署): 建立全栈演示基线（任务 3/6）`、`0d6e166 test(E2E): 建立双模式演示验收（任务 4/6）`；运行手册与阶段收尾见本条记录所在提交，均为本地提交，未 push。
+- 完成内容：API service 将草稿基准安排与锁定集合转换为调度器级 `reschedule_context`，创建独立运行并返回 frozen、retained、changed 摘要；Web 草稿工作台新增生成重排版本入口和稳定性摘要，保持来源草稿不变；新增 `/ready` 仓储就绪检查和 PostgreSQL 真实查询。
+- 演示环境：API 镜像内置 Node.js、Python 3.12、uv 和 scheduler 环境；Compose 按 PostgreSQL、迁移、seed、API、Web 顺序启动；新增 `demo:up`、`demo:down`、`demo:reset`、`demo:smoke`，并以独立命名卷隔离历史 PostgreSQL 数据。
+- 浏览器证据：Playwright 显式区分自启内存服务与外部 Compose 服务，默认不复用未知旧服务；异步作业场景绑定自己创建的 `jobId`；`test:e2e:demo` 从空卷运行 smoke 和全部浏览器场景，默认通过 trap 清理容器、网络和演示卷。
+- 验证结果：`npm run typecheck`、`npm run build` 通过；`LOG_LEVEL=silent npm test` 为 `54 passed`；`npm run test:scheduler` 为 `73 passed`；真实 PostgreSQL 集成为 `9 passed`，迁移测试为 `4 passed`，正式迁移入口从空 schema 应用 `0000` 至 `0007`；本地与 Compose Playwright 均为 `3 passed`；demo smoke 返回 `storage=postgres`、6 条安排、硬冲突 0，并证明 API 重启后运行记录仍可读取；`git diff --check` 通过。
+- 范围边界：保留演示 Bearer token、API 进程内异步作业、HTTP 轮询和 scheduler JSON CLI；未引入真实认证、持久化队列、SSE/WebSocket、独立 scheduler 服务或 CI；JSONB 兼容字段和跨批次评分边界保持不变。
+- 后续影响：第四版第四阶段只建立类型检查、测试、构建、PostgreSQL、迁移和 E2E 的 CI 质量门禁；第四版全部阶段完成后再执行一次全量代码审查。
