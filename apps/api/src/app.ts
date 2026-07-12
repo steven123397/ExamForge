@@ -59,6 +59,25 @@ export function createApp(options: AppOptions = {}) {
     service: "examforge-api",
   }));
 
+  app.get("/ready", async (_request, reply) => {
+    try {
+      await repository.checkReadiness();
+      return {
+        ok: true,
+        service: "examforge-api",
+        storage: repository.storageMode,
+      };
+    } catch {
+      app.log.warn("Repository readiness check failed.");
+      return reply.code(503).send({
+        ok: false,
+        service: "examforge-api",
+        storage: repository.storageMode,
+        error: "dependency_unavailable",
+      });
+    }
+  });
+
   app.post("/api/auth/login", async (request, reply) => {
     const parsed = z.object({
       username: z.string().min(1),

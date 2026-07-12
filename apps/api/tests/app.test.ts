@@ -132,6 +132,47 @@ class DraftWorkflowScheduler implements SchedulerClient {
 }
 
 describe("ExamForge API", () => {
+  it("reports process health and repository readiness separately", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const healthResponse = await app.inject({ method: "GET", url: "/health" });
+    assert.equal(healthResponse.statusCode, 200);
+    assert.deepEqual(healthResponse.json(), {
+      ok: true,
+      service: "examforge-api",
+    });
+
+    const readyResponse = await app.inject({ method: "GET", url: "/ready" });
+    assert.equal(readyResponse.statusCode, 200);
+    assert.deepEqual(readyResponse.json(), {
+      ok: true,
+      service: "examforge-api",
+      storage: "memory",
+    });
+    await app.close();
+  });
+
+  it("returns 503 readiness without exposing dependency error details", async () => {
+    const repository = new InMemoryPlatformRepository();
+    Object.defineProperty(repository, "storageMode", { value: "postgres" });
+    (repository as unknown as { checkReadiness: () => Promise<void> }).checkReadiness = async () => {
+      throw new Error("postgres://user:secret@database/examforge");
+    };
+    const app = createApp({ repository, scheduler: new FakeScheduler() });
+
+    const response = await app.inject({ method: "GET", url: "/ready" });
+
+    assert.equal(response.statusCode, 503);
+    assert.deepEqual(response.json(), {
+      ok: false,
+      service: "examforge-api",
+      storage: "postgres",
+      error: "dependency_unavailable",
+    });
+    assert.doesNotMatch(response.body, /secret/);
+    await app.close();
+  });
+
   it("returns dashboard data", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
 
@@ -512,6 +553,7 @@ describe("ExamForge API", () => {
       scheduler,
       repository: {
         ...repository,
+        checkReadiness: () => repository.checkReadiness(),
         getDashboard: () => repository.getDashboard(),
         getReferenceData: async () => referenceData,
         createReferenceRecord: (resource, record) => repository.createReferenceRecord(resource, record),

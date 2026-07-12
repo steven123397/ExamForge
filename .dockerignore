@@ -1,0 +1,16 @@
+.git/
+.codegraph/
+.env*
+!.env.example
+**/node_modules/
+**/.next/
+**/dist/
+**/.venv/
+**/.pytest_cache/
+**/__pycache__/
+coverage/
+test-results/
+playwright-report/
+docs/
+tests/
+*.log

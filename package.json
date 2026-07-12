@@ -17,6 +17,10 @@
     "db:check-migrations": "npm run check:migrations --workspace @examforge/db",
     "test:scheduler": "cd apps/scheduler && uv run --python 3.12 --extra dev python -m pytest -q",
     "benchmark:scheduler": "cd apps/scheduler && uv run --python 3.12 --extra dev python -m examforge_scheduler.benchmark --sizes 50 100 150 --seed 20260711 --time-limit 30",
+    "demo:up": "bash scripts/demo-up.sh",
+    "demo:down": "bash scripts/demo-down.sh",
+    "demo:reset": "bash scripts/demo-reset.sh",
+    "demo:smoke": "node scripts/demo-smoke.mjs",
     "test:e2e": "playwright test",
     "typecheck": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run typecheck --workspace @examforge/db && npm run typecheck --workspace @examforge/api && npm run typecheck --workspace @examforge/web"
   },

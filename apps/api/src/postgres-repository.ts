@@ -80,6 +80,8 @@ type DraftChangeEventRow = typeof draftChangeEvents.$inferSelect;
 type ScheduleJobRow = typeof scheduleJobs.$inferSelect;
 
 export class PostgresPlatformRepository implements PlatformRepository {
+  readonly storageMode = "postgres" as const;
+
   constructor(private readonly client: ExamForgeDbClient) {}
 
   async getDashboard(): Promise<DashboardResponse> {
@@ -1442,6 +1444,10 @@ export class PostgresPlatformRepository implements PlatformRepository {
 
   async close(): Promise<void> {
     await this.client.close();
+  }
+
+  async checkReadiness(): Promise<void> {
+    await this.client.pool.query("SELECT 1");
   }
 
   private async getActiveBatch(): Promise<BatchRow> {

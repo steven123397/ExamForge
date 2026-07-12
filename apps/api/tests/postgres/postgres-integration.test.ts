@@ -56,6 +56,14 @@ describe("PostgreSQL platform integration", () => {
       scheduler: new PostgresDraftScheduler(),
     });
 
+    const readinessResponse = await app.inject({ method: "GET", url: "/ready" });
+    assert.equal(readinessResponse.statusCode, 200);
+    assert.deepEqual(readinessResponse.json(), {
+      ok: true,
+      service: "examforge-api",
+      storage: "postgres",
+    });
+
     const dashboardResponse = await app.inject({ method: "GET", url: "/api/dashboard" });
     assert.equal(dashboardResponse.statusCode, 200);
     assert.equal(dashboardResponse.json().metrics.examTaskCount, 6);

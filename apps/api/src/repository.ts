@@ -31,6 +31,8 @@ import {
 import { randomUUID } from "node:crypto";
 
 export interface PlatformRepository {
+  readonly storageMode: "memory" | "postgres";
+  checkReadiness(): Promise<void>;
   getDashboard(): Promise<DashboardResponse>;
   getReferenceData(): Promise<ReferenceDataResponse>;
   createReferenceRecord(resource: ReferenceResource, record: ReferenceRecord): Promise<ReferenceRecord>;
@@ -106,6 +108,7 @@ export class ReferenceIntegrityError extends Error {
 }
 
 export class InMemoryPlatformRepository implements PlatformRepository {
+  readonly storageMode = "memory" as const;
   private runs = new Map<string, ScheduleRunResponse>();
   private drafts = new Map<string, ScheduleDraftDetailResponse>();
   private draftLocks = new Map<string, Set<string>>();
@@ -114,6 +117,8 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   private batch = structuredClone(demoBatch);
   private publishedRunId: string | null = null;
   private scheduleInput = structuredClone(demoScheduleInput);
+
+  async checkReadiness(): Promise<void> {}
 
   async getDashboard(): Promise<DashboardResponse> {
     const latestRun = Array.from(this.runs.values()).at(-1)?.run ?? null;
