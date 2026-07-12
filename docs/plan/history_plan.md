@@ -171,3 +171,14 @@
 - 验证结果：`npm run typecheck`、`npm run build` 通过；`LOG_LEVEL=silent npm test` 为 `54 passed`；`npm run test:scheduler` 为 `73 passed`；真实 PostgreSQL 集成为 `9 passed`，迁移测试为 `4 passed`，正式迁移入口从空 schema 应用 `0000` 至 `0007`；本地与 Compose Playwright 均为 `3 passed`；demo smoke 返回 `storage=postgres`、6 条安排、硬冲突 0，并证明 API 重启后运行记录仍可读取；`git diff --check` 通过。
 - 范围边界：保留演示 Bearer token、API 进程内异步作业、HTTP 轮询和 scheduler JSON CLI；未引入真实认证、持久化队列、SSE/WebSocket、独立 scheduler 服务或 CI；JSONB 兼容字段和跨批次评分边界保持不变。
 - 后续影响：第四版第四阶段只建立类型检查、测试、构建、PostgreSQL、迁移和 E2E 的 CI 质量门禁；第四版全部阶段完成后再执行一次全量代码审查。
+
+## 2026-07-12 第四版第四阶段：CI 质量门禁与交付收尾
+
+- 原计划：`docs/plan/第四版第四阶段计划.md`。
+- 完成提交：`533619d ci(第四版): 建立自动质量门禁`；阶段文档收尾见本条记录所在提交。
+- 托管证据：[GitHub Actions CI #1](https://github.com/steven123397/ExamForge/actions/runs/29181104234) 在提交 `533619d` 上完成，快速门禁、PostgreSQL 与迁移门禁、Compose 与 Playwright 门禁均成功。
+- 完成内容：新增 `scripts/ci/check-repository.mjs` 和 7 个临时 Git 仓库测试场景，检查禁止跟踪产物、中文 Conventional Commits、实际提交区间与空白错误；新增 `.github/workflows/ci.yml`，全部 `push`、PR 和手动触发运行快速门禁，`main` 的 `push` 与手动触发在快速门禁后并行运行 PostgreSQL 和完整演示门禁。
+- 工程治理：工作流固定官方 action 发布 SHA，使用 `contents: read`、分支级并发取消和作业超时；PostgreSQL 门禁使用干净 PostgreSQL 16 service；完整演示以 run ID 隔离 Compose project，失败时收集 7 天诊断产物并清理容器、网络和卷；scheduler 验证增加 `uv --frozen` 锁文件约束。
+- 本地验证：`npm run test:ci` 为 `7 passed`；`npm run check:ci`、`actionlint 1.7.12 .github/workflows/ci.yml`、`npm run typecheck` 和 `npm run build` 通过；API 为 `54 passed`，scheduler 为 `73 passed`；迁移测试为 `4 passed`，8 个迁移首次全部应用、第二次应用数为 0，正式迁移入口返回 `applied: []`，PostgreSQL 集成为 `9 passed`；隔离 Compose smoke 返回 `storage=postgres`、6 条安排和硬冲突 0，Playwright 为 `3 passed`。
+- 范围边界：未引入自动发布、镜像推送、生产部署、远端 secrets 或分支保护；CR-002、CR-003、CR-007、CR-008 保持原状态，Bearer token、进程内异步作业、HTTP 轮询、scheduler CLI、JSONB 兼容字段和跨批次评分边界未改变。
+- 后续影响：第四版四个阶段全部完成；下一步按大版本节奏执行一次全量代码审查，发现写入 `docs/status/code_review_status.md`，修复另建活动计划。

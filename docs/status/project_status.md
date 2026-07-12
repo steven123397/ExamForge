@@ -3,8 +3,8 @@
 ## 当前结论
 
 - 日期：2026-07-12。
-- 当前版本：第四版第四阶段已完成本地实现与等价验证，CI 工作流、治理脚本和文档见包含本状态更新的提交；GitHub 托管运行尚未执行。
-- 活动计划仍为 `docs/plan/第四版第四阶段计划.md`。取得真实 GitHub Actions 成功证据后才能完成阶段归档；历史阶段与验证明细维护在 `docs/plan/history_plan.md`，审查问题维护在 `docs/status/code_review_status.md`。
+- 当前版本：第四版四个阶段全部完成；第四阶段实现提交为 `533619d`，文档收尾见包含本状态更新的提交。
+- 当前没有活动计划；历史阶段与验证明细维护在 `docs/plan/history_plan.md`，审查问题维护在 `docs/status/code_review_status.md`。
 
 ## 当前实现基线
 
@@ -32,6 +32,7 @@
 
 - `npm run test:ci`：CI 治理脚本 `7 passed`；`npm run check:ci` 在当前仓库通过。
 - `actionlint 1.7.12 .github/workflows/ci.yml`：工作流 YAML、表达式和作业依赖静态检查通过。
+- [GitHub Actions CI #1](https://github.com/steven123397/ExamForge/actions/runs/29181104234)：提交 `533619d` 的快速、PostgreSQL 与迁移、Compose 与 Playwright 三类托管门禁均成功。
 - `npm run test:scheduler`：scheduler `73 passed`。
 - `npm run benchmark:scheduler`：50、100、150 场均为 `feasible`、零冲突；最新耗时为 305、437、732 ms，教师负载极差均为 1。
 - `npm run typecheck`：通过。
@@ -47,9 +48,8 @@
 - 固定 100 分制在大规模下会因累计软惩罚饱和到 0，暂不支持跨批次质量比较。
 - Bearer token 鉴权、API 进程内异步执行、HTTP 轮询和 scheduler JSON CLI 仍是演示级边界；本阶段只把 CLI 运行环境封装进 API 镜像，没有引入独立 scheduler 服务。
 - JSONB 兼容字段尚未删除。
-- CI 配置与本地等价验证已经建立，但工作流尚未 push，当前没有 GitHub 托管 runner 的成功记录，也未配置分支保护。
+- CI 已取得 GitHub 托管 runner 成功记录；当前没有配置分支保护，也未引入发布、镜像推送或生产部署流水线。
 
 ## 下一步
 
-1. 在取得 push 授权后获取快速、PostgreSQL 和 Compose/Playwright 三类 GitHub Actions 托管运行证据，再归档 `docs/plan/第四版第四阶段计划.md`。
-2. 第四版全部阶段完成后执行一次全量代码审查，发现写入 `docs/status/code_review_status.md`，修复另建计划。
+1. 执行第四版完成后的全量代码审查，发现写入 `docs/status/code_review_status.md`，修复另建计划。
