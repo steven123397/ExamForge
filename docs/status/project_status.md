@@ -3,8 +3,8 @@
 ## 当前结论
 
 - 日期：2026-07-12。
-- 当前版本：第四版第三阶段已完成；本阶段实现提交为 `1284b66`、`95bac27`、`cbd6912` 和 `0d6e166`，文档与收尾见包含本状态更新的提交。
-- 当前没有活动计划；历史阶段与验证明细维护在 `docs/plan/history_plan.md`，审查问题维护在 `docs/status/code_review_status.md`。
+- 当前版本：第四版第四阶段已完成本地实现与等价验证，CI 工作流、治理脚本和文档见包含本状态更新的提交；GitHub 托管运行尚未执行。
+- 活动计划仍为 `docs/plan/第四版第四阶段计划.md`。取得真实 GitHub Actions 成功证据后才能完成阶段归档；历史阶段与验证明细维护在 `docs/plan/history_plan.md`，审查问题维护在 `docs/status/code_review_status.md`。
 
 ## 当前实现基线
 
@@ -22,17 +22,24 @@
 - 同一草稿通过 PostgreSQL advisory lock 串行化，并以终态 CAS 防止重复发布和终态后修改。
 - Compose 已覆盖 PostgreSQL、迁移、seed、API、容器内 scheduler 和 Web；`/health` 与真实仓储 `/ready` 分离，完整演示支持一键启动、重置、烟测和清理。
 
+### CI 与交付
+
+- `.github/workflows/ci.yml` 建立快速、PostgreSQL 和 Compose/Playwright 三层门禁；快速门禁覆盖全部 `push`、PR 和手动触发，完整门禁覆盖 `main` 与手动触发。
+- 治理脚本检查禁止跟踪的产物、中文 Conventional Commits 和真实提交区间空白错误，并通过 7 个临时 Git 仓库场景验证规则行为。
+- 工作流固定官方 action 发布 SHA，使用只读权限、分支级并发取消和作业超时；E2E 失败时收集 Compose 与 Playwright 诊断，保留 7 天后自动过期。
+
 ## 最新验证基线
 
+- `npm run test:ci`：CI 治理脚本 `7 passed`；`npm run check:ci` 在当前仓库通过。
+- `actionlint 1.7.12 .github/workflows/ci.yml`：工作流 YAML、表达式和作业依赖静态检查通过。
 - `npm run test:scheduler`：scheduler `73 passed`。
 - `npm run benchmark:scheduler`：50、100、150 场均为 `feasible`、零冲突；最新耗时为 305、437、732 ms，教师负载极差均为 1。
 - `npm run typecheck`：通过。
 - `LOG_LEVEL=silent npm test`：API `54 passed`。
 - `npm run build`：通过。
-- `TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres`：PostgreSQL `9 passed`。
-- `TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:migrations`：迁移测试 `4 passed`；空 schema 正式迁移入口应用 `0000` 至 `0007`。
+- 隔离 PostgreSQL 16 验证：迁移测试 `4 passed`；8 个迁移首次全部应用、第二次应用数为 0，关键表、约束和关联表回填检查无缺失；正式迁移入口返回 `applied: []`；集成测试 `9 passed`。
 - `npm run test:e2e`：本地自启内存服务 Playwright `3 passed`，默认不复用未知旧服务。
-- `npm run test:e2e:demo`：真实 Compose/PostgreSQL Playwright `3 passed`；前置 smoke 为 `storage=postgres`、6 条安排、硬冲突 0，并通过 API 重启持久化检查。
+- 隔离 `npm run test:e2e:demo`：Node.js 22 镜像从干净依赖完成构建，真实 Compose/PostgreSQL Playwright `3 passed`；前置 smoke 为 `storage=postgres`、6 条安排、硬冲突 0，并通过 API 重启持久化检查；测试项目容器、网络和卷已清理。
 
 ## 当前边界
 
@@ -40,9 +47,9 @@
 - 固定 100 分制在大规模下会因累计软惩罚饱和到 0，暂不支持跨批次质量比较。
 - Bearer token 鉴权、API 进程内异步执行、HTTP 轮询和 scheduler JSON CLI 仍是演示级边界；本阶段只把 CLI 运行环境封装进 API 镜像，没有引入独立 scheduler 服务。
 - JSONB 兼容字段尚未删除。
-- CI 质量门禁尚未建立，当前验证入口仍由开发者本地执行。
+- CI 配置与本地等价验证已经建立，但工作流尚未 push，当前没有 GitHub 托管 runner 的成功记录，也未配置分支保护。
 
 ## 下一步
 
-1. 为第四版第四阶段编写计划，建立类型检查、测试、构建、PostgreSQL、迁移和 E2E 的 CI 质量门禁。
+1. 在取得 push 授权后获取快速、PostgreSQL 和 Compose/Playwright 三类 GitHub Actions 托管运行证据，再归档 `docs/plan/第四版第四阶段计划.md`。
 2. 第四版全部阶段完成后执行一次全量代码审查，发现写入 `docs/status/code_review_status.md`，修复另建计划。

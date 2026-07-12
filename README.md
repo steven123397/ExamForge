@@ -36,6 +36,8 @@ npm run dev
 常用验证命令：
 
 ```bash
+npm run test:ci
+npm run check:ci
 npm run test:scheduler
 npm run typecheck
 npm test
@@ -43,7 +45,36 @@ npm run build
 npm run test:e2e
 ```
 
+`test:ci` 使用临时 Git 仓库验证治理脚本；`check:ci` 检查禁止跟踪的产物、中文 Conventional Commits 格式和提交区间空白错误。GitHub Actions 会为 `push` 或 PR 显式传入提交区间，本地直接运行时默认检查最近一次提交及当前工作树。
+
 `npm run test:e2e` 会自行启动内存 API 和 Web，默认拒绝复用 3000 端口上的未知服务。仅在明确需要时设置 `E2E_REUSE_EXISTING_SERVERS=1`。
+
+## CI 质量门禁
+
+`.github/workflows/ci.yml` 按成本分为三类作业：
+
+- 快速门禁：所有 `push`、PR 和手动触发均运行仓库治理检查、类型检查、API 测试、scheduler 测试和生产构建。
+- PostgreSQL 与迁移门禁：仅在 `main` 的 `push` 和手动触发时运行，覆盖 PostgreSQL 16、空库迁移、迁移幂等、schema 检查和真实仓储集成测试。
+- Compose 与 Playwright 门禁：仅在 `main` 的 `push` 和手动触发时运行，从空卷完成迁移、seed、smoke、API 重启持久化和浏览器主链。
+
+完整门禁会在快速门禁通过后并行执行。同一分支的新运行会取消旧运行；工作流只授予 `contents: read` 权限。E2E 失败时上传 Compose 日志、Playwright trace 和测试结果，保留 7 天。
+
+本地复现 PostgreSQL 门禁：
+
+```bash
+TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:migrations
+TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:check-migrations
+DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run db:migrate
+TEST_DATABASE_URL=postgres://examforge:examforge@localhost:5432/examforge_test npm run test:postgres
+```
+
+本地复现完整演示门禁：
+
+```bash
+npm run test:e2e:demo
+```
+
+GitHub Actions 的手动运行入口位于仓库 Actions 页的 `CI` 工作流。工作流只使用演示测试凭据，不需要生产 secrets，也不会发布镜像或自动部署。
 
 ## 完整 Compose 演示
 

@@ -24,9 +24,10 @@
 ## 计划文档
 
 - `docs/plan/README.md`：计划文档模板和生命周期规则。
+- `docs/plan/第四版第四阶段计划.md`：CI 质量门禁、真实 PostgreSQL、完整 Compose E2E 和第四版交付收尾计划。
 - `docs/plan/history_plan.md`：已完成计划的历史摘要。
 
-当前没有活动计划。第三版完成后的全量代码审查、第四版第一至第三阶段及此前计划均已完成并归入 `history_plan.md`。
+当前活动计划为第四版第四阶段。第三版完成后的全量代码审查、第四版第一至第三阶段及此前计划均已完成并归入 `history_plan.md`。
 
 ## 状态文档
 
