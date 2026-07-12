@@ -59,7 +59,40 @@ class FakeScheduler implements SchedulerClient {
 }
 
 class DraftWorkflowScheduler implements SchedulerClient {
+  lastInput: ScheduleInput | null = null;
+
   async solve(input: ScheduleInput): Promise<ScheduleResult> {
+    this.lastInput = structuredClone(input);
+    if (input.reschedule_context) {
+      const baseline = input.reschedule_context.baseline_assignments;
+      const movable = new Set(input.reschedule_context.movable_exam_task_ids);
+      const examIds = baseline.map((assignment) => assignment.exam_task_id).sort();
+      return {
+        assignments: structuredClone(baseline),
+        conflicts: [],
+        score: {
+          total_score: 96,
+          hard_violation_count: 0,
+          soft_penalty_items: [],
+        },
+        statistics: {
+          status: "feasible",
+          elapsed_ms: 20,
+          exam_count: baseline.length,
+          room_count: input.rooms.length,
+          slot_count: input.time_slots.length,
+          attempted_assignments: baseline.length,
+        },
+        report: {
+          reschedule: {
+            baseline_exam_count: baseline.length,
+            frozen_exam_task_ids: examIds.filter((examTaskId) => !movable.has(examTaskId)),
+            retained_exam_task_ids: examIds,
+            changed_exam_task_ids: [],
+          },
+        },
+      };
+    }
     return {
       assignments: [
         {
@@ -1207,6 +1240,102 @@ describe("ExamForge API", () => {
     assert.equal(unlockResponse.statusCode, 200);
     assert.deepEqual(unlockResponse.json().lockedExamTaskIds, []);
 
+    await app.close();
+  });
+
+  it("creates a reschedule run from draft locks without mutating the source draft", async () => {
+    const scheduler = new DraftWorkflowScheduler();
+    const app = createApp({ scheduler });
+    const runResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+    });
+    const run = runResponse.json();
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${run.run.id}/drafts`,
+      headers: operatorHeaders,
+    });
+    const draft = draftResponse.json();
+    await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-data-structures/lock`,
+      headers: operatorHeaders,
+    });
+    const beforeResponse = await app.inject({
+      method: "GET",
+      url: `/api/schedule-drafts/${draft.draft.id}`,
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/reschedule`,
+      headers: operatorHeaders,
+    });
+
+    assert.equal(response.statusCode, 201);
+    assert.equal(response.json().sourceDraftId, draft.draft.id);
+    assert.deepEqual(response.json().reschedule.frozen_exam_task_ids, ["e-data-structures"]);
+    assert.deepEqual(
+      scheduler.lastInput?.reschedule_context?.movable_exam_task_ids,
+      ["e-database"],
+    );
+    const afterResponse = await app.inject({
+      method: "GET",
+      url: `/api/schedule-drafts/${draft.draft.id}`,
+    });
+    assert.deepEqual(afterResponse.json(), beforeResponse.json());
+
+    const viewerResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/reschedule`,
+      headers: viewerHeaders,
+    });
+    assert.equal(viewerResponse.statusCode, 403);
+
+    const adminResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/reschedule`,
+      headers: adminHeaders,
+    });
+    assert.equal(adminResponse.statusCode, 201);
+    await app.close();
+  });
+
+  it("returns explicit errors when a draft reschedule source is missing or terminal", async () => {
+    const app = createApp({ scheduler: new DraftWorkflowScheduler() });
+    const missingResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-drafts/draft-missing/reschedule",
+      headers: operatorHeaders,
+    });
+    assert.equal(missingResponse.statusCode, 404);
+    assert.equal(missingResponse.json().error, "schedule_draft_not_found");
+
+    for (const terminalAction of ["publish", "discard"] as const) {
+      const runResponse = await app.inject({ method: "POST", url: "/api/schedule-runs", headers: operatorHeaders });
+      const draftResponse = await app.inject({
+        method: "POST",
+        url: `/api/schedule-runs/${runResponse.json().run.id}/drafts`,
+        headers: operatorHeaders,
+      });
+      const draftId = draftResponse.json().draft.id;
+      const terminalResponse = await app.inject({
+        method: "POST",
+        url: `/api/schedule-drafts/${draftId}/${terminalAction}`,
+        headers: terminalAction === "publish" ? adminHeaders : operatorHeaders,
+      });
+      assert.equal(terminalResponse.statusCode, 200);
+
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/schedule-drafts/${draftId}/reschedule`,
+        headers: operatorHeaders,
+      });
+      assert.equal(response.statusCode, 409);
+      assert.equal(response.json().error, "schedule_draft_not_editable");
+    }
     await app.close();
   });
 

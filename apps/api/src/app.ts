@@ -376,6 +376,29 @@ export function createApp(options: AppOptions = {}) {
     return draft;
   });
 
+  app.post<{ Params: { id: string } }>(
+    "/api/schedule-drafts/:id/reschedule",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
+      const response = await scheduleRunService.createScheduleRunFromDraft(request.params.id);
+      if (!response) {
+        return reply.code(404).send({
+          error: "schedule_draft_not_found",
+          message: `Schedule draft ${request.params.id} does not exist.`,
+        });
+      }
+      if (response === "not_editable") {
+        return reply.code(409).send({
+          error: "schedule_draft_not_editable",
+          message: "Schedule draft is already published or discarded.",
+        });
+      }
+      return reply.code(201).send(response);
+    },
+  );
+
   app.patch<{ Params: { id: string; examTaskId: string } }>(
     "/api/schedule-drafts/:id/assignments/:examTaskId",
     async (request, reply) => {

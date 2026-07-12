@@ -167,6 +167,13 @@ export const solverStatisticsSchema = z.object({
 
 export const scheduleReportSchema = z.record(z.unknown());
 
+export const rescheduleReportSchema = z.object({
+  baseline_exam_count: z.number().int().nonnegative(),
+  frozen_exam_task_ids: z.array(z.string()),
+  retained_exam_task_ids: z.array(z.string()),
+  changed_exam_task_ids: z.array(z.string()),
+});
+
 export const scheduleResultSchema = z.object({
   assignments: z.array(scheduledExamSchema),
   conflicts: z.array(conflictRecordSchema),
@@ -218,6 +225,7 @@ export type SoftPenaltyItem = z.infer<typeof softPenaltyItemSchema>;
 export type ScoreBreakdown = z.infer<typeof scoreBreakdownSchema>;
 export type SolverStatistics = z.infer<typeof solverStatisticsSchema>;
 export type ScheduleResult = z.infer<typeof scheduleResultSchema>;
+export type RescheduleReport = z.infer<typeof rescheduleReportSchema>;
 export type ReferenceResource = z.infer<typeof referenceResourceSchema>;
 export type ReferenceRecord =
   | StudentGroup
@@ -276,6 +284,11 @@ export interface ReferenceDeleteResponse {
 export interface ScheduleRunResponse {
   run: ScheduleRunSummary;
   result: ScheduleResult;
+}
+
+export interface ScheduleDraftRescheduleResponse extends ScheduleRunResponse {
+  sourceDraftId: string;
+  reschedule: RescheduleReport;
 }
 
 export interface ScheduleRunListResponse {

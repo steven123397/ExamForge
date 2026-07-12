@@ -2,9 +2,9 @@
 
 ## 当前结论
 
-- 日期：2026-07-11。
+- 日期：2026-07-12。
 - 当前版本：第四版第二阶段已完成；实现提交为 `7c76ac6`、`cfd1800`、`bc386ac`、`b476d9a` 和 `62a5e1b`。
-- 当前没有活动计划；历史阶段与验证明细维护在 `docs/plan/history_plan.md`，审查问题维护在 `docs/status/code_review_status.md`。
+- 当前活动计划为 `docs/plan/第四版第三阶段计划.md`，实施范围是草稿增量重排 Web 闭环、完整 Compose 演示栈和 Playwright 证据重建；历史阶段与验证明细维护在 `docs/plan/history_plan.md`，审查问题维护在 `docs/status/code_review_status.md`。
 
 ## 当前实现基线
 
@@ -40,6 +40,6 @@
 
 ## 下一步
 
-1. 为第四版第三阶段编写演示环境与体验增强计划，并重新建立 Playwright E2E 证据。
+1. 按 `docs/plan/第四版第三阶段计划.md` 实施演示环境与体验增强，并重新建立本地及真实 Compose/PostgreSQL Playwright E2E 证据。
 2. 第四版第四阶段建立类型检查、测试、构建、PostgreSQL、迁移和 E2E 的 CI 质量门禁。
 3. 第四版全部阶段完成后执行一次全量代码审查，发现写入 `docs/status/code_review_status.md`，修复另建计划。

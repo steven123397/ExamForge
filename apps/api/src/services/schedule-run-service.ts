@@ -1,4 +1,8 @@
-import type { ScheduleInput } from "@examforge/shared";
+import {
+  rescheduleReportSchema,
+  type ScheduleDraftRescheduleResponse,
+  type ScheduleInput,
+} from "@examforge/shared";
 import type { PlatformRepository } from "../repository.js";
 import type { SchedulerClient } from "../scheduler-client.js";
 
@@ -22,6 +26,40 @@ export class ScheduleRunService {
       withScheduleOverrides(referenceData.scheduleInput, overrides),
     );
     return this.repository.createScheduleRun(result);
+  }
+
+  async createScheduleRunFromDraft(
+    draftId: string,
+  ): Promise<ScheduleDraftRescheduleResponse | "not_editable" | null> {
+    const draft = await this.repository.getScheduleDraft(draftId);
+    if (!draft) {
+      return null;
+    }
+    if (draft.draft.status === "published" || draft.draft.status === "discarded") {
+      return "not_editable";
+    }
+
+    const baselineAssignments = structuredClone(draft.assignments)
+      .sort((left, right) => left.exam_task_id.localeCompare(right.exam_task_id));
+    const lockedExamTaskIds = new Set(draft.lockedExamTaskIds ?? []);
+    const referenceData = await this.repository.getReferenceData();
+    const result = await this.scheduler.solve({
+      ...referenceData.scheduleInput,
+      fixed_assignments: [],
+      reschedule_context: {
+        baseline_assignments: baselineAssignments,
+        movable_exam_task_ids: baselineAssignments
+          .map((assignment) => assignment.exam_task_id)
+          .filter((examTaskId) => !lockedExamTaskIds.has(examTaskId)),
+      },
+    });
+    const reschedule = rescheduleReportSchema.parse(result.report?.reschedule);
+    const response = await this.repository.createScheduleRun(result);
+    return {
+      sourceDraftId: draftId,
+      ...response,
+      reschedule,
+    };
   }
 
   async createScheduleJob(overrides: ScheduleRunOverrides) {
