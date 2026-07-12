@@ -63,7 +63,6 @@ export async function seedDemoData(client: ExamForgeDbClient): Promise<void> {
           id: teacher.id,
           name: teacher.name,
           departmentId: teacher.department_id,
-          unavailableSlotIds: teacher.unavailable_slot_ids,
         })),
       )
       .onConflictDoNothing();
@@ -115,7 +114,6 @@ export async function seedDemoData(client: ExamForgeDbClient): Promise<void> {
           id: task.id,
           batchId: demoBatch.id,
           courseId: task.course_id,
-          studentGroupIds: task.student_group_ids,
           expectedCount: task.expected_count,
           durationMinutes: task.duration_minutes,
           requiredRoomType: task.required_room_type,

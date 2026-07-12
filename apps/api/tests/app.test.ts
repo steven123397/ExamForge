@@ -11,13 +11,52 @@ import {
   type ScheduleInput,
   type ScheduleResult,
 } from "@examforge/shared";
-import { createApp } from "../src/app.js";
-import { InMemoryPlatformRepository } from "../src/repository.js";
+import { createApp as createProductionApp, type AppOptions } from "../src/app.js";
+import { InMemoryPlatformRepository, type PlatformRepository } from "../src/repository.js";
+import { hashSessionToken } from "../src/auth/security.js";
 import type { SchedulerClient } from "../src/scheduler-client.js";
+import {
+  buildCompleteScheduleResult,
+  buildTestAuthUsers,
+  testAuthHeaders,
+  testSessionTokens,
+} from "./test-fixtures.js";
 
-const adminHeaders = { authorization: "Bearer examforge-admin-token" };
-const operatorHeaders = { authorization: "Bearer examforge-operator-token" };
-const viewerHeaders = { authorization: "Bearer examforge-viewer-token" };
+const adminHeaders = testAuthHeaders.admin;
+const operatorHeaders = testAuthHeaders.operator;
+const viewerHeaders = testAuthHeaders.student;
+const testAuthUsers = await buildTestAuthUsers();
+const seededRepositories = new WeakSet<PlatformRepository>();
+
+function createApp(options: AppOptions = {}) {
+  const repository = options.repository ?? new InMemoryPlatformRepository({ authUsers: testAuthUsers });
+  seedRepositorySessions(repository);
+  return createProductionApp({ ...options, repository });
+}
+
+function seedRepositorySessions(repository: PlatformRepository) {
+  if (seededRepositories.has(repository)) {
+    return;
+  }
+  seededRepositories.add(repository);
+  if (repository.storageMode === "memory") {
+    for (const user of testAuthUsers) {
+      void repository.createAuthUser(user).catch(() => undefined);
+    }
+  }
+  const createdAt = "2026-07-12T00:00:00.000Z";
+  for (const role of ["admin", "operator", "teacher", "student"] as const) {
+    void repository.createAuthSession({
+      id: `test-${role}-session`,
+      userId: `user-${role}`,
+      tokenDigest: hashSessionToken(testSessionTokens[role]),
+      createdAt,
+      expiresAt: "2099-07-12T00:00:00.000Z",
+      userAgent: "ExamForge test fixture",
+      ipAddress: "127.0.0.1",
+    });
+  }
+}
 
 class FakeScheduler implements SchedulerClient {
   lastInput: ScheduleInput | null = null;
@@ -26,35 +65,54 @@ class FakeScheduler implements SchedulerClient {
   async solve(input: ScheduleInput): Promise<ScheduleResult> {
     this.lastInput = input;
     this.calls += 1;
+    const result = buildCompleteScheduleResult(input);
     return {
-      assignments: [
-        {
-          exam_task_id: input.exam_tasks[0].id,
-          room_id: input.rooms[0].id,
-          time_slot_id: input.time_slots[0].id,
-          teacher_ids: [input.teachers[0].id],
-        },
-      ],
+      ...result,
+      score: {
+        ...result.score,
+        total_score: 90 + this.calls,
+      },
+      statistics: {
+        ...result.statistics,
+        elapsed_ms: 18,
+        attempted_assignments: 42,
+      },
+    };
+  }
+}
+
+class IncompleteScheduler implements SchedulerClient {
+  async solve(input: ScheduleInput): Promise<ScheduleResult> {
+    return {
+      assignments: [],
       conflicts: [],
       score: {
-        total_score: 90 + this.calls,
-        hard_violation_count: 0,
+        total_score: 0,
+        hard_violation_count: 1,
         soft_penalty_items: [],
       },
       statistics: {
-        status: "feasible",
-        elapsed_ms: 18,
+        status: "infeasible",
+        elapsed_ms: 1,
         exam_count: input.exam_tasks.length,
         room_count: input.rooms.length,
         slot_count: input.time_slots.length,
-        attempted_assignments: 42,
+        attempted_assignments: 0,
       },
       report: {
         summary: {
-          status: "feasible",
+          status: "infeasible",
         },
       },
     };
+  }
+}
+
+class DuplicateAssignmentScheduler implements SchedulerClient {
+  async solve(input: ScheduleInput): Promise<ScheduleResult> {
+    const result = buildCompleteScheduleResult(input);
+    result.assignments.push(structuredClone(result.assignments[0]));
+    return result;
   }
 }
 
@@ -93,41 +151,7 @@ class DraftWorkflowScheduler implements SchedulerClient {
         },
       };
     }
-    return {
-      assignments: [
-        {
-          exam_task_id: "e-data-structures",
-          room_id: "r-101",
-          time_slot_id: "s-001",
-          teacher_ids: [input.teachers[0].id],
-        },
-        {
-          exam_task_id: "e-database",
-          room_id: "r-lab-1",
-          time_slot_id: "s-003",
-          teacher_ids: [input.teachers[1].id],
-        },
-      ],
-      conflicts: [],
-      score: {
-        total_score: 94,
-        hard_violation_count: 0,
-        soft_penalty_items: [],
-      },
-      statistics: {
-        status: "feasible",
-        elapsed_ms: 22,
-        exam_count: input.exam_tasks.length,
-        room_count: input.rooms.length,
-        slot_count: input.time_slots.length,
-        attempted_assignments: 12,
-      },
-      report: {
-        summary: {
-          status: "feasible",
-        },
-      },
-    };
+    return buildCompleteScheduleResult(input);
   }
 }
 
@@ -179,6 +203,7 @@ describe("ExamForge API", () => {
     const response = await app.inject({
       method: "GET",
       url: "/api/dashboard",
+      headers: viewerHeaders,
     });
 
     assert.equal(response.statusCode, 200);
@@ -205,6 +230,7 @@ describe("ExamForge API", () => {
     const readResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-runs/${created.run.id}`,
+      headers: viewerHeaders,
     });
 
     assert.equal(readResponse.statusCode, 200);
@@ -340,26 +366,33 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
-  it("authenticates users with bearer tokens instead of trusting role headers", async () => {
+  it("authenticates users with server sessions instead of trusting bearer or role headers", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
 
     const loginResponse = await app.inject({
       method: "POST",
       url: "/api/auth/login",
+      headers: { origin: "http://localhost:3000" },
       payload: {
         username: "operator",
-        password: "operator",
+        password: "operator-password",
       },
     });
     assert.equal(loginResponse.statusCode, 200);
-    assert.equal(loginResponse.json().user.role, "operator");
-    assert.ok(loginResponse.json().token);
+    assert.deepEqual(loginResponse.json().user.roles, ["operator"]);
+    assert.ok(loginResponse.headers["set-cookie"]?.includes("HttpOnly"));
+    assert.equal(loginResponse.json().token, undefined);
+    assert.equal(loginResponse.body.includes("passwordHash"), false);
+    const setCookie = loginResponse.headers["set-cookie"];
+    const cookie = (Array.isArray(setCookie) ? setCookie[0] : setCookie)?.split(";")[0];
+    assert.ok(cookie);
 
     const authenticatedResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
       headers: {
-        authorization: `Bearer ${loginResponse.json().token}`,
+        origin: "http://localhost:3000",
+        cookie,
       },
     });
     assert.equal(authenticatedResponse.statusCode, 201);
@@ -367,29 +400,136 @@ describe("ExamForge API", () => {
     const missingRoleResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
+      headers: { origin: "http://localhost:3000" },
     });
-    assert.equal(missingRoleResponse.statusCode, 403);
-    assert.equal(missingRoleResponse.json().error, "permission_denied");
+    assert.equal(missingRoleResponse.statusCode, 401);
+    assert.equal(missingRoleResponse.json().error, "not_authenticated");
 
     const invalidRoleResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
       headers: {
+        origin: "http://localhost:3000",
         authorization: "Bearer invalid-token",
       },
     });
-    assert.equal(invalidRoleResponse.statusCode, 403);
-    assert.equal(invalidRoleResponse.json().error, "permission_denied");
+    assert.equal(invalidRoleResponse.statusCode, 401);
+    assert.equal(invalidRoleResponse.json().error, "not_authenticated");
 
     const forgedRoleHeaderResponse = await app.inject({
       method: "POST",
       url: "/api/schedule-runs",
       headers: {
+        origin: "http://localhost:3000",
         "x-examforge-role": "admin",
       },
     });
-    assert.equal(forgedRoleHeaderResponse.statusCode, 403);
-    assert.equal(forgedRoleHeaderResponse.json().error, "permission_denied");
+    assert.equal(forgedRoleHeaderResponse.statusCode, 401);
+    assert.equal(forgedRoleHeaderResponse.json().error, "not_authenticated");
+
+    await app.close();
+  });
+
+  it("rejects wrong passwords, disabled accounts, untrusted origins and revoked session replay", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+    const login = (username: string, password: string) => app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: "http://localhost:3000" },
+      payload: { username, password },
+    });
+
+    assert.equal((await login("operator", "wrong-password")).statusCode, 401);
+    assert.equal((await login("disabled", "disabled-password")).statusCode, 403);
+
+    const untrusted = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: { ...operatorHeaders, origin: "https://attacker.example" },
+    });
+    assert.equal(untrusted.statusCode, 403);
+    assert.equal(untrusted.json().error, "untrusted_origin");
+
+    const teacherDenied = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: testAuthHeaders.teacher,
+    });
+    assert.equal(teacherDenied.statusCode, 403);
+    assert.equal(teacherDenied.json().error, "permission_denied");
+
+    const logout = await app.inject({
+      method: "POST",
+      url: "/api/auth/logout",
+      headers: operatorHeaders,
+    });
+    assert.equal(logout.statusCode, 204);
+    assert.match(String(logout.headers["set-cookie"]), /Max-Age=0/);
+    const replay = await app.inject({
+      method: "GET",
+      url: "/api/auth/me",
+      headers: operatorHeaders,
+    });
+    assert.equal(replay.statusCode, 401);
+
+    await app.close();
+  });
+
+  it("protects internal reads with session authentication", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+    const internalPaths = [
+      "/api/dashboard",
+      "/api/reference-data",
+      "/api/schedule-jobs",
+      "/api/schedule-jobs/missing-job",
+      "/api/schedule-runs",
+      "/api/schedule-runs/missing-run",
+      "/api/schedule-runs/compare?baseId=missing-a&targetId=missing-b",
+      "/api/schedule-drafts",
+      "/api/schedule-drafts/missing-draft",
+      "/api/schedule-drafts/missing-draft/compare",
+      "/api/schedule-drafts/missing-draft/assignments/missing-exam/suggestions",
+      "/api/audit-events",
+    ];
+
+    for (const path of internalPaths) {
+      for (const headers of [undefined, { authorization: "Bearer forged-token" }]) {
+        const response = await app.inject({ method: "GET", url: path, headers });
+        assert.equal(response.statusCode, 401, `${path} must reject unauthenticated reads`);
+        assert.equal(response.json().error, "not_authenticated");
+      }
+
+      const viewerResponse = await app.inject({
+        method: "GET",
+        url: path,
+        headers: viewerHeaders,
+      });
+      assert.notEqual(viewerResponse.statusCode, 401, `${path} must accept student authentication`);
+      assert.notEqual(viewerResponse.statusCode, 403, `${path} must allow student reads`);
+    }
+
+    await app.close();
+  });
+
+  it("keeps published audience reads anonymous while protecting CSV export", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+    for (const path of [
+      "/api/published-schedule",
+      "/api/published-schedule/notifications",
+      "/api/published-schedule/teachers/t-zhang",
+      "/api/published-schedule/student-groups/g-cs-2301",
+    ]) {
+      const response = await app.inject({ method: "GET", url: path });
+      assert.equal(response.statusCode, 404);
+      assert.notEqual(response.json().error, "not_authenticated");
+    }
+
+    const exportResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/export.csv",
+    });
+    assert.equal(exportResponse.statusCode, 401);
+    assert.equal(exportResponse.json().error, "not_authenticated");
 
     await app.close();
   });
@@ -413,6 +553,7 @@ describe("ExamForge API", () => {
     const listResponse = await app.inject({
       method: "GET",
       url: "/api/schedule-runs",
+      headers: viewerHeaders,
     });
     assert.equal(listResponse.statusCode, 200);
     assert.deepEqual(
@@ -423,6 +564,7 @@ describe("ExamForge API", () => {
     const auditResponse = await app.inject({
       method: "GET",
       url: "/api/audit-events",
+      headers: viewerHeaders,
     });
     assert.equal(auditResponse.statusCode, 200);
     assert.equal(auditResponse.json().events.length, 2);
@@ -430,17 +572,21 @@ describe("ExamForge API", () => {
 
     const filteredAuditResponse = await app.inject({
       method: "GET",
-      url: `/api/audit-events?entityType=schedule_run&entityId=${first.run.id}&actor=system`,
+      url: `/api/audit-events?entityType=schedule_run&entityId=${first.run.id}&actor=operator`,
+      headers: viewerHeaders,
     });
     assert.equal(filteredAuditResponse.statusCode, 200);
     assert.deepEqual(
       filteredAuditResponse.json().events.map((event: { entityId: string }) => event.entityId),
       [first.run.id],
     );
+    assert.equal(filteredAuditResponse.json().events[0].actorUserId, "user-operator");
+    assert.deepEqual(filteredAuditResponse.json().events[0].actorRoles, ["operator"]);
 
     const invalidAuditFilterResponse = await app.inject({
       method: "GET",
       url: "/api/audit-events?since=not-a-date",
+      headers: viewerHeaders,
     });
     assert.equal(invalidAuditFilterResponse.statusCode, 400);
     assert.equal(invalidAuditFilterResponse.json().error, "invalid_audit_filter");
@@ -448,6 +594,7 @@ describe("ExamForge API", () => {
     const compareResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-runs/compare?baseId=${first.run.id}&targetId=${second.run.id}`,
+      headers: viewerHeaders,
     });
     assert.equal(compareResponse.statusCode, 200);
     assert.equal(compareResponse.json().baseRun.id, first.run.id);
@@ -500,11 +647,106 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("rejects publishing an infeasible schedule run", async () => {
+    const app = createApp({ scheduler: new IncompleteScheduler() });
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+    });
+    assert.equal(createResponse.statusCode, 201);
+    const created = createResponse.json();
+
+    const publishResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${created.run.id}/publish`,
+      headers: adminHeaders,
+    });
+    assert.equal(publishResponse.statusCode, 409);
+    assert.equal(publishResponse.json().error, "schedule_run_not_publishable");
+
+    const publishedResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule",
+    });
+    assert.equal(publishedResponse.statusCode, 404);
+
+    await app.close();
+  });
+
+  it("blocks drafts that omit exam task assignments", async () => {
+    const app = createApp({ scheduler: new IncompleteScheduler() });
+
+    const runResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+    });
+    const run = runResponse.json();
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${run.run.id}/drafts`,
+      headers: operatorHeaders,
+    });
+    assert.equal(draftResponse.statusCode, 201);
+    const draft = draftResponse.json();
+    assert.equal(draft.draft.status, "blocked");
+    assert.equal(
+      draft.conflicts.filter((conflict: { type: string }) => (
+        conflict.type === "exam_task_unassigned"
+      )).length,
+      6,
+    );
+
+    const publishResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-drafts/${draft.draft.id}/publish`,
+      headers: adminHeaders,
+    });
+    assert.equal(publishResponse.statusCode, 409);
+    assert.equal(publishResponse.json().error, "schedule_draft_has_conflicts");
+
+    await app.close();
+  });
+
+  it("rejects duplicate exam task assignments from runs and drafts", async () => {
+    const app = createApp({ scheduler: new DuplicateAssignmentScheduler() });
+
+    const runResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+    });
+    const run = runResponse.json();
+    const runPublishResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${run.run.id}/publish`,
+      headers: adminHeaders,
+    });
+    assert.equal(runPublishResponse.statusCode, 409);
+    assert.equal(runPublishResponse.json().error, "schedule_run_not_publishable");
+
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${run.run.id}/drafts`,
+      headers: operatorHeaders,
+    });
+    assert.equal(draftResponse.statusCode, 201);
+    assert.equal(draftResponse.json().draft.status, "blocked");
+    assert.ok(draftResponse.json().conflicts.some((conflict: { type: string }) => (
+      conflict.type === "exam_task_duplicate_assignment"
+    )));
+
+    await app.close();
+  });
+
   it("queries published schedules by teacher and student group", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
     const referenceResponse = await app.inject({
       method: "GET",
       url: "/api/reference-data",
+      headers: viewerHeaders,
     });
     const referenceData = referenceResponse.json();
     const teacher = referenceData.scheduleInput.teachers[0];
@@ -528,7 +770,7 @@ describe("ExamForge API", () => {
     });
     assert.equal(teacherResponse.statusCode, 200);
     assert.equal(teacherResponse.json().viewer.id, teacher.id);
-    assert.equal(teacherResponse.json().assignments.length, 1);
+    assert.ok(teacherResponse.json().assignments.length > 0);
     assert.equal(teacherResponse.json().assignments[0].teachers[0].id, teacher.id);
 
     const studentResponse = await app.inject({
@@ -537,7 +779,7 @@ describe("ExamForge API", () => {
     });
     assert.equal(studentResponse.statusCode, 200);
     assert.equal(studentResponse.json().viewer.id, studentGroup.id);
-    assert.equal(studentResponse.json().assignments.length, 1);
+    assert.ok(studentResponse.json().assignments.length > 0);
     assert.equal(studentResponse.json().assignments[0].studentGroups[0].id, studentGroup.id);
 
     await app.close();
@@ -582,10 +824,16 @@ describe("ExamForge API", () => {
         rebalanceScheduleDraft: (id) => repository.rebalanceScheduleDraft(id),
         publishScheduleDraft: (id) => repository.publishScheduleDraft(id),
         discardScheduleDraft: (id) => repository.discardScheduleDraft(id),
-        createScheduleJob: () => repository.createScheduleJob(),
+        createScheduleJob: (command) => repository.createScheduleJob(command),
         listScheduleJobs: () => repository.listScheduleJobs(),
         getScheduleJob: (id) => repository.getScheduleJob(id),
-        updateScheduleJob: (id, patch) => repository.updateScheduleJob(id, patch),
+        transitionScheduleJob: (id, command) => repository.transitionScheduleJob(id, command),
+        completeScheduleJob: (id, result) => repository.completeScheduleJob(id, result),
+        createAuthUser: (command) => repository.createAuthUser(command),
+        findAuthUserByUsername: (username) => repository.findAuthUserByUsername(username),
+        createAuthSession: (command) => repository.createAuthSession(command),
+        findAuthSessionByTokenDigest: (digest) => repository.findAuthSessionByTokenDigest(digest),
+        revokeAuthSession: (id, revokedAt) => repository.revokeAuthSession(id, revokedAt),
       },
     });
 
@@ -635,6 +883,7 @@ describe("ExamForge API", () => {
     const referenceResponse = await app.inject({
       method: "GET",
       url: "/api/reference-data",
+      headers: viewerHeaders,
     });
     const courses = referenceResponse.json().scheduleInput.courses;
     assert.ok(courses.some((course: { id: string; name: string }) => (
@@ -703,6 +952,7 @@ describe("ExamForge API", () => {
     const referenceResponse = await app.inject({
       method: "GET",
       url: "/api/reference-data",
+      headers: viewerHeaders,
     });
     const slots = referenceResponse.json().scheduleInput.time_slots;
     assert.ok(slots.some((slot: { id: string; date: string }) => (
@@ -818,6 +1068,55 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("rejects teacher unavailable slots that do not exist", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/teachers/t-zhang/unavailable-slots",
+      headers: operatorHeaders,
+      payload: {
+        unavailable_slot_ids: ["missing-slot"],
+      },
+    });
+
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().error, "reference_integrity_violation");
+    assert.deepEqual(response.json().issues, ["Time slot missing-slot does not exist."]);
+
+    await app.close();
+  });
+
+  it("does not expose PostgreSQL integrity error details", async () => {
+    const repository = new InMemoryPlatformRepository();
+    repository.updateReferenceRecord = async () => {
+      const cause = Object.assign(new Error("foreign key violation"), { code: "23503" });
+      throw Object.assign(
+        new Error("Failed query: insert into teacher_unavailable_slots values ($1, $2)"),
+        { cause },
+      );
+    };
+    const app = createApp({ repository, scheduler: new FakeScheduler() });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/teachers/t-zhang/unavailable-slots",
+      headers: operatorHeaders,
+      payload: {
+        unavailable_slot_ids: ["s-001"],
+      },
+    });
+
+    assert.equal(response.statusCode, 409);
+    assert.deepEqual(response.json(), {
+      error: "data_integrity_violation",
+      message: "The request conflicts with persisted data integrity constraints.",
+    });
+    assert.doesNotMatch(response.body, /Failed query|teacher_unavailable_slots|foreign key/i);
+
+    await app.close();
+  });
+
   it("creates, adjusts, validates, and publishes a schedule draft", async () => {
     const app = createApp({ scheduler: new DraftWorkflowScheduler() });
 
@@ -838,12 +1137,13 @@ describe("ExamForge API", () => {
     const createdDraft = draftResponse.json();
     assert.equal(createdDraft.draft.sourceRunId, run.run.id);
     assert.equal(createdDraft.draft.status, "validated");
-    assert.equal(createdDraft.assignments.length, 2);
+    assert.equal(createdDraft.assignments.length, 6);
     assert.equal(createdDraft.conflicts.length, 0);
 
     const listResponse = await app.inject({
       method: "GET",
       url: "/api/schedule-drafts",
+      headers: viewerHeaders,
     });
     assert.equal(listResponse.statusCode, 200);
     assert.deepEqual(
@@ -903,7 +1203,7 @@ describe("ExamForge API", () => {
     });
     assert.equal(publishResponse.statusCode, 200);
     assert.equal(publishResponse.json().batch.status, "published");
-    assert.equal(publishResponse.json().result.assignments.length, 2);
+    assert.equal(publishResponse.json().result.assignments.length, 6);
     assert.equal(publishResponse.json().result.assignments[1].room_id, "r-lab-2");
 
     const publishedResponse = await app.inject({
@@ -970,6 +1270,45 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
+  it("blocks draft assignments that reference missing time slots", async () => {
+    const repository = new InMemoryPlatformRepository();
+    const referenceData = structuredClone(await repository.getReferenceData());
+    referenceData.scheduleInput.exam_tasks = referenceData.scheduleInput.exam_tasks.map((task) => (
+      task.id === "e-data-structures"
+        ? { ...task, allowed_slot_ids: [] }
+        : task
+    ));
+    (repository as unknown as { scheduleInput: ScheduleInput }).scheduleInput = referenceData.scheduleInput;
+    const app = createApp({ scheduler: new DraftWorkflowScheduler(), repository });
+
+    const runResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+    });
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${runResponse.json().run.id}/drafts`,
+      headers: operatorHeaders,
+    });
+    const updateResponse = await app.inject({
+      method: "PATCH",
+      url: `/api/schedule-drafts/${draftResponse.json().draft.id}/assignments/e-data-structures`,
+      headers: operatorHeaders,
+      payload: {
+        time_slot_id: "missing-slot",
+      },
+    });
+
+    assert.equal(updateResponse.statusCode, 200);
+    assert.equal(updateResponse.json().draft.status, "blocked");
+    assert.ok(updateResponse.json().conflicts.some((conflict: { type: string }) => (
+      conflict.type === "time_slot_not_found"
+    )));
+
+    await app.close();
+  });
+
   it("compares a draft against source and published versions, then discards it", async () => {
     const app = createApp({ scheduler: new DraftWorkflowScheduler() });
 
@@ -1012,6 +1351,7 @@ describe("ExamForge API", () => {
     const compareResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}/compare`,
+      headers: viewerHeaders,
     });
     assert.equal(compareResponse.statusCode, 200);
     const comparison = compareResponse.json();
@@ -1052,6 +1392,7 @@ describe("ExamForge API", () => {
     const auditResponse = await app.inject({
       method: "GET",
       url: "/api/audit-events",
+      headers: viewerHeaders,
     });
     assert.equal(auditResponse.statusCode, 200);
     assert.ok(auditResponse.json().events.some((event: { action: string }) => (
@@ -1091,6 +1432,7 @@ describe("ExamForge API", () => {
     const suggestionsResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database/suggestions`,
+      headers: viewerHeaders,
     });
 
     assert.equal(suggestionsResponse.statusCode, 200);
@@ -1137,25 +1479,60 @@ describe("ExamForge API", () => {
       const response = await app.inject({
         method: "GET",
         url: `/api/schedule-jobs/${created.job.id}`,
+        headers: viewerHeaders,
       });
       const payload = response.json();
-      return payload.job.status === "completed" && payload.job.runId;
+      return payload.job.status === "succeeded" && payload.job.runId;
     });
 
     const jobResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-jobs/${created.job.id}`,
+      headers: viewerHeaders,
     });
     assert.equal(jobResponse.statusCode, 200);
-    assert.equal(jobResponse.json().job.status, "completed");
+    assert.equal(jobResponse.json().job.status, "succeeded");
     assert.equal(jobResponse.json().job.progress, 100);
 
     const runResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-runs/${jobResponse.json().job.runId}`,
+      headers: viewerHeaders,
     });
     assert.equal(runResponse.statusCode, 200);
 
+    await app.close();
+  });
+
+  it("rejects an idempotency key reused for a different schedule request", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+    const headers = {
+      ...operatorHeaders,
+      "idempotency-key": "api-conflicting-job-request",
+    };
+    const first = await app.inject({
+      method: "POST",
+      url: "/api/schedule-jobs",
+      headers,
+      payload: {},
+    });
+    const conflicting = await app.inject({
+      method: "POST",
+      url: "/api/schedule-jobs",
+      headers,
+      payload: {
+        fixed_assignments: [{
+          exam_task_id: "e-data-structures",
+          room_id: "r-101",
+          time_slot_id: "s-001",
+          teacher_ids: ["t-zhang"],
+        }],
+      },
+    });
+
+    assert.equal(first.statusCode, 202);
+    assert.equal(conflicting.statusCode, 409);
+    assert.equal(conflicting.json().error, "schedule_job_idempotency_conflict");
     await app.close();
   });
 
@@ -1175,8 +1552,9 @@ describe("ExamForge API", () => {
       const response = await firstApp.inject({
         method: "GET",
         url: `/api/schedule-jobs/${created.job.id}`,
+        headers: viewerHeaders,
       });
-      return response.json().job.status === "completed";
+      return response.json().job.status === "succeeded";
     });
     await firstApp.close();
 
@@ -1184,9 +1562,10 @@ describe("ExamForge API", () => {
     const restoredResponse = await secondApp.inject({
       method: "GET",
       url: `/api/schedule-jobs/${created.job.id}`,
+      headers: viewerHeaders,
     });
     assert.equal(restoredResponse.statusCode, 200);
-    assert.equal(restoredResponse.json().job.status, "completed");
+    assert.equal(restoredResponse.json().job.status, "succeeded");
     assert.ok(restoredResponse.json().job.runId);
 
     await secondApp.close();
@@ -1194,10 +1573,20 @@ describe("ExamForge API", () => {
 
   it("marks interrupted asynchronous schedule jobs as failed on startup", async () => {
     const repository = new InMemoryPlatformRepository();
-    const queuedJob = await repository.createScheduleJob();
-    const runningJob = await repository.createScheduleJob();
-    await repository.updateScheduleJob(runningJob.id, {
-      status: "running",
+    const queuedJob = await repository.createScheduleJob({
+      batchId: "batch-2026-spring-final",
+      idempotencyKey: "recovery-queued-job",
+      requestDigest: "a".repeat(64),
+      traceId: "trace-recovery-queued",
+    });
+    const runningJob = await repository.createScheduleJob({
+      batchId: "batch-2026-spring-final",
+      idempotencyKey: "recovery-running-job",
+      requestDigest: "b".repeat(64),
+      traceId: "trace-recovery-running",
+    });
+    await repository.transitionScheduleJob(runningJob.job.id, {
+      to: "running",
       progress: 35,
     });
 
@@ -1207,17 +1596,18 @@ describe("ExamForge API", () => {
     const response = await app.inject({
       method: "GET",
       url: "/api/schedule-jobs",
+      headers: viewerHeaders,
     });
     assert.equal(response.statusCode, 200);
     const jobs = response.json().jobs;
-    const restoredQueuedJob = jobs.find((job: { id: string }) => job.id === queuedJob.id);
-    const restoredRunningJob = jobs.find((job: { id: string }) => job.id === runningJob.id);
+    const restoredQueuedJob = jobs.find((job: { id: string }) => job.id === queuedJob.job.id);
+    const restoredRunningJob = jobs.find((job: { id: string }) => job.id === runningJob.job.id);
     assert.equal(restoredQueuedJob.status, "failed");
     assert.equal(restoredQueuedJob.progress, 100);
-    assert.match(restoredQueuedJob.error, /interrupted/i);
+    assert.match(restoredQueuedJob.error.message, /interrupted/i);
     assert.equal(restoredRunningJob.status, "failed");
     assert.equal(restoredRunningJob.progress, 100);
-    assert.match(restoredRunningJob.error, /interrupted/i);
+    assert.match(restoredRunningJob.error.message, /interrupted/i);
 
     await app.close();
   });
@@ -1308,6 +1698,7 @@ describe("ExamForge API", () => {
     const beforeResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}`,
+      headers: viewerHeaders,
     });
 
     const response = await app.inject({
@@ -1321,11 +1712,12 @@ describe("ExamForge API", () => {
     assert.deepEqual(response.json().reschedule.frozen_exam_task_ids, ["e-data-structures"]);
     assert.deepEqual(
       scheduler.lastInput?.reschedule_context?.movable_exam_task_ids,
-      ["e-database"],
+      ["e-ai", "e-calculus", "e-database", "e-english", "e-os"],
     );
     const afterResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}`,
+      headers: viewerHeaders,
     });
     assert.deepEqual(afterResponse.json(), beforeResponse.json());
 
@@ -1431,11 +1823,12 @@ describe("ExamForge API", () => {
       headers: operatorHeaders,
     });
     const created = createResponse.json();
-    await app.inject({
+    const publishResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-runs/${created.run.id}/publish`,
       headers: adminHeaders,
     });
+    assert.equal(publishResponse.statusCode, 200);
 
     const notificationsResponse = await app.inject({
       method: "GET",
@@ -1449,7 +1842,7 @@ describe("ExamForge API", () => {
       method: "GET",
       url: "/api/published-schedule/export.csv",
     });
-    assert.equal(unauthenticatedExportResponse.statusCode, 403);
+    assert.equal(unauthenticatedExportResponse.statusCode, 401);
 
     const exportResponse = await app.inject({
       method: "GET",
@@ -1462,7 +1855,7 @@ describe("ExamForge API", () => {
 
     const auditResponse = await app.inject({
       method: "GET",
-      url: `/api/audit-events?entityType=schedule_run&entityId=${created.run.id}&actor=viewer`,
+      url: `/api/audit-events?entityType=schedule_run&entityId=${created.run.id}&actor=student`,
       headers: adminHeaders,
     });
     assert.equal(auditResponse.statusCode, 200);

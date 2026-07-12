@@ -9,6 +9,7 @@ from .models import (
     ScheduledExam,
     Teacher,
 )
+from .time_slots import are_consecutive_time_slots
 
 
 def assign_teachers(
@@ -240,14 +241,17 @@ def _consecutive_invigilation_terms(
         assignments_by_slot.setdefault(assignment.time_slot_id, []).append(assignment)
     used_slot_ids = sorted(
         assignments_by_slot,
-        key=lambda slot_id: slots_by_id[slot_id].period_index,
+        key=lambda slot_id: (
+            slots_by_id[slot_id].date,
+            slots_by_id[slot_id].period_index,
+        ),
     )
     consecutive_terms = []
     for left_index, left_slot_id in enumerate(used_slot_ids):
         left_slot = slots_by_id[left_slot_id]
         for right_slot_id in used_slot_ids[left_index + 1 :]:
             right_slot = slots_by_id[right_slot_id]
-            if right_slot.period_index - left_slot.period_index != 1:
+            if not are_consecutive_time_slots(left_slot, right_slot):
                 continue
             for teacher in teachers:
                 pair = model.NewBoolVar(

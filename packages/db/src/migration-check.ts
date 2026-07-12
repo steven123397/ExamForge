@@ -13,10 +13,52 @@ export const criticalMigrationTables = [
   "draft_exam_invigilators",
   "teacher_unavailable_slots",
   "schedule_jobs",
+  "schedule_job_attempts",
+  "schedule_job_events",
+  "outbox_events",
   "audit_events",
+  "users",
+  "roles",
+  "user_roles",
+  "sessions",
 ];
 
 const criticalMigrationConstraints = [
+  {
+    id: "users.username_unique",
+    tableName: "users",
+    definition: "UNIQUE (username)",
+  },
+  {
+    id: "user_roles.primary_key",
+    tableName: "user_roles",
+    definition: "PRIMARY KEY (user_id, role_id)",
+  },
+  {
+    id: "sessions.token_digest_unique",
+    tableName: "sessions",
+    definition: "UNIQUE (token_digest)",
+  },
+  {
+    id: "schedule_jobs.idempotency_key_unique",
+    tableName: "schedule_jobs",
+    definition: "UNIQUE (idempotency_key)",
+  },
+  {
+    id: "schedule_job_attempts.job_foreign_key",
+    tableName: "schedule_job_attempts",
+    definition: "FOREIGN KEY (job_id) REFERENCES schedule_jobs(id) ON DELETE CASCADE",
+  },
+  {
+    id: "schedule_job_events.job_foreign_key",
+    tableName: "schedule_job_events",
+    definition: "FOREIGN KEY (job_id) REFERENCES schedule_jobs(id) ON DELETE CASCADE",
+  },
+  {
+    id: "outbox_events.event_foreign_key",
+    tableName: "outbox_events",
+    definition: "FOREIGN KEY (event_id) REFERENCES schedule_job_events(id) ON DELETE CASCADE",
+  },
   {
     id: "exam_task_student_groups.primary_key",
     tableName: "exam_task_student_groups",
@@ -79,73 +121,11 @@ const criticalMigrationConstraints = [
   },
 ] as const;
 
-const associationBackfillChecks = [
-  {
-    id: "exam_task_student_groups",
-    sql: `
-      WITH expected AS (
-        SELECT task.id AS exam_task_id, group_id.value AS student_group_id
-        FROM exam_tasks AS task
-        CROSS JOIN LATERAL jsonb_array_elements_text(task.student_group_ids) AS group_id(value)
-      ), mismatches AS (
-        (SELECT * FROM expected EXCEPT SELECT exam_task_id, student_group_id FROM exam_task_student_groups)
-        UNION ALL
-        (SELECT exam_task_id, student_group_id FROM exam_task_student_groups EXCEPT SELECT * FROM expected)
-      )
-      SELECT COUNT(*)::integer AS count FROM mismatches
-    `,
-  },
-  {
-    id: "scheduled_exam_invigilators",
-    sql: `
-      WITH expected AS (
-        SELECT scheduled_exam.id AS scheduled_exam_id,
-          teacher_id.position::integer AS position,
-          teacher_id.value AS teacher_id
-        FROM scheduled_exams AS scheduled_exam
-        CROSS JOIN LATERAL jsonb_array_elements_text(scheduled_exam.teacher_ids)
-          WITH ORDINALITY AS teacher_id(value, position)
-      ), mismatches AS (
-        (SELECT * FROM expected EXCEPT SELECT scheduled_exam_id, position, teacher_id FROM scheduled_exam_invigilators)
-        UNION ALL
-        (SELECT scheduled_exam_id, position, teacher_id FROM scheduled_exam_invigilators EXCEPT SELECT * FROM expected)
-      )
-      SELECT COUNT(*)::integer AS count FROM mismatches
-    `,
-  },
-  {
-    id: "draft_exam_invigilators",
-    sql: `
-      WITH expected AS (
-        SELECT scheduled_exam.id AS draft_scheduled_exam_id,
-          teacher_id.position::integer AS position,
-          teacher_id.value AS teacher_id
-        FROM draft_scheduled_exams AS scheduled_exam
-        CROSS JOIN LATERAL jsonb_array_elements_text(scheduled_exam.teacher_ids)
-          WITH ORDINALITY AS teacher_id(value, position)
-      ), mismatches AS (
-        (SELECT * FROM expected EXCEPT SELECT draft_scheduled_exam_id, position, teacher_id FROM draft_exam_invigilators)
-        UNION ALL
-        (SELECT draft_scheduled_exam_id, position, teacher_id FROM draft_exam_invigilators EXCEPT SELECT * FROM expected)
-      )
-      SELECT COUNT(*)::integer AS count FROM mismatches
-    `,
-  },
-  {
-    id: "teacher_unavailable_slots",
-    sql: `
-      WITH expected AS (
-        SELECT teacher.id AS teacher_id, slot_id.value AS time_slot_id
-        FROM teachers AS teacher
-        CROSS JOIN LATERAL jsonb_array_elements_text(teacher.unavailable_slot_ids) AS slot_id(value)
-      ), mismatches AS (
-        (SELECT * FROM expected EXCEPT SELECT teacher_id, time_slot_id FROM teacher_unavailable_slots)
-        UNION ALL
-        (SELECT teacher_id, time_slot_id FROM teacher_unavailable_slots EXCEPT SELECT * FROM expected)
-      )
-      SELECT COUNT(*)::integer AS count FROM mismatches
-    `,
-  },
+const legacyRelationColumns = [
+  ["exam_tasks", "student_group_ids"],
+  ["scheduled_exams", "teacher_ids"],
+  ["draft_scheduled_exams", "teacher_ids"],
+  ["teachers", "unavailable_slot_ids"],
 ] as const;
 
 export interface MigrationCheckResult {
@@ -157,6 +137,8 @@ export interface MigrationCheckResult {
   checkedConstraints: string[];
   missingConstraints: string[];
   backfillMismatches: string[];
+  legacyRelationColumns: string[];
+  scheduleJobStatuses: string[];
 }
 
 export async function checkMigrations(
@@ -168,6 +150,7 @@ export async function checkMigrations(
   const missingTables: string[] = [];
   const missingConstraints: string[] = [];
   const backfillMismatches: string[] = [];
+  const remainingLegacyRelationColumns: string[] = [];
 
   for (const tableName of criticalMigrationTables) {
     const result = await client.pool.query<{ exists: string | null }>(
@@ -198,16 +181,27 @@ export async function checkMigrations(
     }
   }
 
-  for (const check of associationBackfillChecks) {
-    if (missingTables.includes(check.id)) {
-      backfillMismatches.push(check.id);
-      continue;
-    }
-    const result = await client.pool.query<{ count: number }>(check.sql);
-    if ((result.rows[0]?.count ?? 0) > 0) {
-      backfillMismatches.push(check.id);
+  for (const [tableName, columnName] of legacyRelationColumns) {
+    const result = await client.pool.query<{ exists: boolean }>(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = $1
+          AND column_name = $2
+      ) AS exists
+    `, [tableName, columnName]);
+    if (result.rows[0]?.exists) {
+      remainingLegacyRelationColumns.push(`${tableName}.${columnName}`);
     }
   }
+
+  const scheduleJobStatusResult = await client.pool.query<{ value: string }>(`
+    SELECT enumlabel AS value
+    FROM pg_enum
+    WHERE enumtypid = 'schedule_job_status'::regtype
+    ORDER BY enumsortorder
+  `);
 
   return {
     migrationCount: migrationFiles.length,
@@ -218,6 +212,8 @@ export async function checkMigrations(
     checkedConstraints: criticalMigrationConstraints.map((constraint) => constraint.id),
     missingConstraints,
     backfillMismatches,
+    legacyRelationColumns: remainingLegacyRelationColumns,
+    scheduleJobStatuses: scheduleJobStatusResult.rows.map((row) => row.value),
   };
 }
 

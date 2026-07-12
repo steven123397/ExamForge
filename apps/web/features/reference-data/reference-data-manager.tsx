@@ -2,7 +2,7 @@ import { Check, Plus, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReferenceDataResponse, ReferenceRecord } from "@examforge/shared";
 import { apiClient } from "../../lib/api-client";
-import type { WorkspaceRole } from "../../lib/roles";
+import { ConfirmationDialog } from "../../components/shared/confirmation-dialog";
 import {
   type EditableResource,
   type FormState,
@@ -17,12 +17,10 @@ import {
 
 export function ReferenceDataManager({
   referenceData,
-  role,
   onRefresh,
   onError,
 }: {
   referenceData: ReferenceDataResponse | null;
-  role: WorkspaceRole;
   onRefresh(): Promise<void>;
   onError(message: string | null): void;
 }) {
@@ -31,6 +29,7 @@ export function ReferenceDataManager({
   const [form, setForm] = useState<FormState>(referenceForms.courses.defaults);
   const [importText, setImportText] = useState(() => sampleImportText("courses"));
   const [saving, setSaving] = useState(false);
+  const [deleteConfirmationOpen, setDeleteConfirmationOpen] = useState(false);
   const config = referenceForms[resource];
   const records = getEditableRecords(referenceData, resource);
   const selectedId = form.id;
@@ -63,8 +62,8 @@ export function ReferenceDataManager({
     try {
       const payload = formToPayload(resource, form);
       const result = mode === "create"
-        ? await apiClient.createReferenceRecord(resource, payload, role)
-        : await apiClient.updateReferenceRecord(resource, form.id, omitId(payload), role);
+        ? await apiClient.createReferenceRecord(resource, payload)
+        : await apiClient.updateReferenceRecord(resource, form.id, omitId(payload));
       setMode("edit");
       setForm(recordToForm(resource, result.record));
       await onRefresh();
@@ -82,7 +81,7 @@ export function ReferenceDataManager({
     setSaving(true);
     onError(null);
     try {
-      await apiClient.deleteReferenceRecord(resource, form.id, role);
+      await apiClient.deleteReferenceRecord(resource, form.id);
       await onRefresh();
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : "基础数据删除失败");
@@ -99,7 +98,7 @@ export function ReferenceDataManager({
       if (!Array.isArray(parsed)) {
         throw new Error("导入内容必须是 JSON 数组");
       }
-      await apiClient.importReferenceRecords(resource, parsed, role);
+      await apiClient.importReferenceRecords(resource, parsed);
       await onRefresh();
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : "基础数据导入失败");
@@ -109,7 +108,7 @@ export function ReferenceDataManager({
   }
 
   return (
-    <div className="reference-manager">
+    <div className="reference-manager" data-testid="reference-data-manager">
       <div className="resource-tabs">
         {(Object.keys(referenceForms) as EditableResource[]).map((item) => (
           <button
@@ -155,7 +154,7 @@ export function ReferenceDataManager({
             <button
               type="button"
               className="danger-button"
-              onClick={deleteRecord}
+              onClick={() => setDeleteConfirmationOpen(true)}
               disabled={saving || mode !== "edit"}
             >
               删除
@@ -196,6 +195,16 @@ export function ReferenceDataManager({
           spellCheck={false}
         />
       </div>
+      {deleteConfirmationOpen && mode === "edit" && form.id ? (
+        <ConfirmationDialog
+          title="确认删除基础数据"
+          target={form.id}
+          description={`删除${config.label}可能影响排考引用；存在关联数据时服务端会拒绝该操作。`}
+          confirmLabel="确认删除"
+          onConfirm={deleteRecord}
+          onCancel={() => setDeleteConfirmationOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

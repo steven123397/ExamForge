@@ -1,5 +1,6 @@
 import {
   boolean,
+  index,
   integer,
   jsonb,
   pgEnum,
@@ -38,11 +39,57 @@ export const draftStatus = pgEnum("draft_status", [
   "published",
   "discarded",
 ]);
+
+export const users = pgTable("users", {
+  id: text("id").primaryKey(),
+  username: text("username").notNull(),
+  displayName: text("display_name").notNull(),
+  active: boolean("active").notNull().default(true),
+  passwordHash: text("password_hash").notNull(),
+  passwordSalt: text("password_salt").notNull(),
+  scryptN: integer("scrypt_n").notNull(),
+  scryptR: integer("scrypt_r").notNull(),
+  scryptP: integer("scrypt_p").notNull(),
+  scryptKeyLength: integer("scrypt_key_length").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  usernameUnique: uniqueIndex("users_username_unique").on(table.username),
+}));
+
+export const roles = pgTable("roles", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+});
+
+export const userRoles = pgTable("user_roles", {
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  roleId: text("role_id").notNull().references(() => roles.id, { onDelete: "restrict" }),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.userId, table.roleId] }),
+}));
+
+export const sessions = pgTable("sessions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  tokenDigest: text("token_digest").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  userAgent: text("user_agent"),
+  ipAddress: text("ip_address"),
+}, (table) => ({
+  tokenDigestUnique: uniqueIndex("sessions_token_digest_unique").on(table.tokenDigest),
+  userExpiresAtIndex: index("sessions_user_expires_at_idx").on(table.userId, table.expiresAt),
+}));
 export const scheduleJobStatus = pgEnum("schedule_job_status", [
   "queued",
   "running",
-  "completed",
+  "succeeded",
   "failed",
+  "cancelled",
+  "timed_out",
 ]);
 
 export const examBatches = pgTable("exam_batches", {
@@ -72,7 +119,6 @@ export const teachers = pgTable("teachers", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   departmentId: text("department_id").notNull().references(() => departments.id),
-  unavailableSlotIds: jsonb("unavailable_slot_ids").$type<string[]>().notNull(),
 });
 
 export const courses = pgTable("courses", {
@@ -106,7 +152,6 @@ export const examTasks = pgTable("exam_tasks", {
   id: text("id").primaryKey(),
   batchId: text("batch_id").notNull().references(() => examBatches.id, { onDelete: "cascade" }),
   courseId: text("course_id").notNull().references(() => courses.id),
-  studentGroupIds: jsonb("student_group_ids").$type<string[]>().notNull(),
   expectedCount: integer("expected_count").notNull(),
   durationMinutes: integer("duration_minutes").notNull(),
   requiredRoomType: roomType("required_room_type").notNull(),
@@ -142,7 +187,6 @@ export const scheduledExams = pgTable("scheduled_exams", {
   examTaskId: text("exam_task_id").notNull().references(() => examTasks.id),
   roomId: text("room_id").notNull().references(() => rooms.id),
   timeSlotId: text("time_slot_id").notNull().references(() => timeSlots.id),
-  teacherIds: jsonb("teacher_ids").$type<string[]>().notNull(),
 }, (table) => ({
   runExamTaskUnique: uniqueIndex("scheduled_exams_run_exam_task_unique").on(table.runId, table.examTaskId),
   runRoomSlotUnique: uniqueIndex("scheduled_exams_run_room_slot_unique").on(table.runId, table.roomId, table.timeSlotId),
@@ -186,7 +230,6 @@ export const draftScheduledExams = pgTable("draft_scheduled_exams", {
   examTaskId: text("exam_task_id").notNull().references(() => examTasks.id),
   roomId: text("room_id").notNull().references(() => rooms.id),
   timeSlotId: text("time_slot_id").notNull().references(() => timeSlots.id),
-  teacherIds: jsonb("teacher_ids").$type<string[]>().notNull(),
   locked: boolean("locked").notNull().default(false),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -224,6 +267,8 @@ export const draftChangeEvents = pgTable("draft_change_events", {
 export const auditEvents = pgTable("audit_events", {
   id: text("id").primaryKey(),
   actor: text("actor").notNull(),
+  actorUserId: text("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+  actorRoles: jsonb("actor_roles").$type<string[]>().notNull().default([]),
   action: text("action").notNull(),
   entityType: text("entity_type").notNull(),
   entityId: text("entity_id").notNull(),
@@ -233,13 +278,77 @@ export const auditEvents = pgTable("audit_events", {
 
 export const scheduleJobs = pgTable("schedule_jobs", {
   id: text("id").primaryKey(),
+  batchId: text("batch_id").notNull().references(() => examBatches.id, { onDelete: "restrict" }),
   status: scheduleJobStatus("status").notNull(),
   progress: integer("progress").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  requestDigest: text("request_digest").notNull(),
+  traceId: text("trace_id").notNull(),
   runId: text("run_id").references(() => scheduleRuns.id, { onDelete: "set null" }),
   error: text("error"),
+  errorCategory: text("error_category"),
+  errorCode: text("error_code"),
+  errorRetryable: boolean("error_retryable"),
+  cancellationRequestedAt: timestamp("cancellation_requested_at", { withTimezone: true }),
+  queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => ({
+  idempotencyKeyUnique: uniqueIndex("schedule_jobs_idempotency_key_unique").on(table.idempotencyKey),
+  batchCreatedAtIndex: index("schedule_jobs_batch_created_at_idx").on(table.batchId, table.createdAt),
+  statusUpdatedAtIndex: index("schedule_jobs_status_updated_at_idx").on(table.status, table.updatedAt),
+}));
+
+export const scheduleJobAttempts = pgTable("schedule_job_attempts", {
+  id: text("id").primaryKey(),
+  jobId: text("job_id").notNull().references(() => scheduleJobs.id, { onDelete: "cascade" }),
+  attemptNumber: integer("attempt_number").notNull(),
+  status: text("status").notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  error: jsonb("error").$type<Record<string, unknown> | null>(),
+}, (table) => ({
+  jobAttemptUnique: uniqueIndex("schedule_job_attempts_job_attempt_unique").on(
+    table.jobId,
+    table.attemptNumber,
+  ),
+}));
+
+export const scheduleJobEvents = pgTable("schedule_job_events", {
+  id: text("id").primaryKey(),
+  jobId: text("job_id").notNull().references(() => scheduleJobs.id, { onDelete: "cascade" }),
+  eventType: text("event_type").notNull(),
+  eventVersion: integer("event_version").notNull().default(1),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+  traceId: text("trace_id").notNull(),
+}, (table) => ({
+  jobOccurredAtIndex: index("schedule_job_events_job_occurred_at_idx").on(
+    table.jobId,
+    table.occurredAt,
+  ),
+}));
+
+export const outboxEvents = pgTable("outbox_events", {
+  id: text("id").primaryKey(),
+  eventId: text("event_id").notNull().references(() => scheduleJobEvents.id, { onDelete: "cascade" }),
+  aggregateType: text("aggregate_type").notNull(),
+  aggregateId: text("aggregate_id").notNull(),
+  eventType: text("event_type").notNull(),
+  eventVersion: integer("event_version").notNull().default(1),
+  payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+  publishedAt: timestamp("published_at", { withTimezone: true }),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  eventUnique: uniqueIndex("outbox_events_event_id_unique").on(table.eventId),
+  pendingIndex: index("outbox_events_pending_idx").on(table.publishedAt, table.availableAt),
+}));
 
 export const teacherUnavailableSlots = pgTable("teacher_unavailable_slots", {
   teacherId: text("teacher_id").notNull().references(() => teachers.id, { onDelete: "cascade" }),

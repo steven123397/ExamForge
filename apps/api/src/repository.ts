@@ -21,14 +21,21 @@ import {
   type ScheduleDraftPublishResponse,
   type ScheduleDraftSummary,
   type ScheduleJobSummary,
+  type ScheduleJobError,
+  type ScheduleJobStatus,
   type ScheduleRunComparisonResponse,
   type ScheduleRunListResponse,
   type ScheduleRollbackResponse,
   type ScheduleResult,
   type ScheduleRunResponse,
   type ScheduleRunSummary,
+  type UserRole,
+  resolveScheduleJobTransition,
+  scheduleJobStatusForSolveResult,
 } from "@examforge/shared";
 import { randomUUID } from "node:crypto";
+import type { PasswordHash } from "./auth/security.js";
+import { getCurrentAuthContext } from "./auth/request-context.js";
 
 export interface PlatformRepository {
   readonly storageMode: "memory" | "postgres";
@@ -61,7 +68,7 @@ export interface PlatformRepository {
     payload: Record<string, unknown>,
     actor?: string,
   ): Promise<void> | void;
-  publishScheduleRun(id: string): Promise<PublishedScheduleResponse | null>;
+  publishScheduleRun(id: string): Promise<PublishScheduleRunResult>;
   getPublishedSchedule(): Promise<PublishedScheduleResponse | null>;
   rollbackPublishedSchedule(): Promise<ScheduleRollbackResponse>;
   createScheduleDraftFromRun(id: string): Promise<ScheduleDraftDetailResponse | null>;
@@ -89,16 +96,85 @@ export interface PlatformRepository {
   rebalanceScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
   publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null>;
   discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null>;
-  createScheduleJob(): Promise<ScheduleJobSummary>;
+  createScheduleJob(command: CreateScheduleJobCommand): Promise<CreateScheduleJobResult>;
   listScheduleJobs(): Promise<{ jobs: ScheduleJobSummary[] }>;
   getScheduleJob(id: string): Promise<ScheduleJobSummary | null>;
-  updateScheduleJob(
+  transitionScheduleJob(
     id: string,
-    patch: Partial<Pick<ScheduleJobSummary, "status" | "progress" | "runId" | "error">>,
-  ): Promise<ScheduleJobSummary | null>;
+    command: TransitionScheduleJobCommand,
+  ): Promise<ScheduleJobTransitionResult>;
+  completeScheduleJob(id: string, result: ScheduleResult): Promise<ScheduleJobTransitionResult>;
+  createAuthUser(command: CreateAuthUserCommand): Promise<AuthUserRecord>;
+  findAuthUserByUsername(username: string): Promise<AuthUserRecord | null>;
+  createAuthSession(command: CreateAuthSessionCommand): Promise<AuthSessionRecord>;
+  findAuthSessionByTokenDigest(tokenDigest: string): Promise<AuthSessionWithUser | null>;
+  revokeAuthSession(id: string, revokedAt: string): Promise<boolean>;
   recoverInterruptedScheduleJobs?(): Promise<ScheduleJobSummary[]>;
   close?(): Promise<void>;
 }
+
+export interface AuthUserRecord {
+  id: string;
+  username: string;
+  displayName: string;
+  active: boolean;
+  roles: UserRole[];
+  password: PasswordHash;
+}
+
+export interface CreateAuthUserCommand extends AuthUserRecord {}
+
+export interface CreateAuthSessionCommand {
+  id: string;
+  userId: string;
+  tokenDigest: string;
+  createdAt: string;
+  expiresAt: string;
+  userAgent: string | null;
+  ipAddress: string | null;
+}
+
+export interface AuthSessionRecord extends CreateAuthSessionCommand {
+  revokedAt: string | null;
+  lastSeenAt: string;
+}
+
+export interface AuthSessionWithUser {
+  session: AuthSessionRecord;
+  user: AuthUserRecord;
+}
+
+export interface CreateScheduleJobCommand {
+  batchId: string;
+  idempotencyKey: string;
+  requestDigest: string;
+  traceId: string;
+}
+
+export interface CreateScheduleJobResult {
+  job: ScheduleJobSummary;
+  created: boolean;
+}
+
+export interface TransitionScheduleJobCommand {
+  to: ScheduleJobStatus;
+  progress: number;
+  error?: ScheduleJobError | null;
+}
+
+export interface ScheduleJobTransitionResult {
+  job: ScheduleJobSummary | null;
+  resolution: "apply" | "idempotent" | "reject" | "not_found";
+}
+
+export class ScheduleJobIdempotencyConflictError extends Error {
+  constructor(readonly idempotencyKey: string) {
+    super(`Schedule job idempotency key ${idempotencyKey} was reused with a different request.`);
+    this.name = "ScheduleJobIdempotencyConflictError";
+  }
+}
+
+export type PublishScheduleRunResult = PublishedScheduleResponse | "not_publishable" | null;
 
 export class ReferenceIntegrityError extends Error {
   constructor(readonly issues: string[]) {
@@ -113,10 +189,21 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   private drafts = new Map<string, ScheduleDraftDetailResponse>();
   private draftLocks = new Map<string, Set<string>>();
   private scheduleJobs = new Map<string, ScheduleJobSummary>();
+  private scheduleJobAttempts = new Map<string, number>();
+  private scheduleJobEvents: Array<Record<string, unknown>> = [];
+  private outboxEvents: Array<Record<string, unknown>> = [];
+  private authUsers = new Map<string, AuthUserRecord>();
+  private authSessions = new Map<string, AuthSessionRecord>();
   private auditEvents: AuditEventSummary[] = [];
   private batch = structuredClone(demoBatch);
   private publishedRunId: string | null = null;
   private scheduleInput = structuredClone(demoScheduleInput);
+
+  constructor(options: { authUsers?: AuthUserRecord[] } = {}) {
+    for (const user of options.authUsers ?? []) {
+      this.authUsers.set(user.id, structuredClone(user));
+    }
+  }
 
   async checkReadiness(): Promise<void> {}
 
@@ -209,6 +296,10 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   }
 
   async createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse> {
+    return this.createScheduleRunInternal(result);
+  }
+
+  private createScheduleRunInternal(result: ScheduleResult): ScheduleRunResponse {
     const id = `run-${randomUUID()}`;
     const run: ScheduleRunSummary = {
       id,
@@ -221,19 +312,11 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     };
     const response = { run, result };
     this.runs.set(id, response);
-    this.auditEvents.push({
-      id: `audit-${randomUUID()}`,
-      actor: "system",
-      action: "schedule_run.created",
-      entityType: "schedule_run",
-      entityId: id,
-      payload: {
-        status: result.statistics.status,
-        score: result.score.total_score,
-        assignmentCount: result.assignments.length,
-        conflictCount: result.conflicts.length,
-      },
-      createdAt: run.createdAt,
+    this.recordAuditEvent("schedule_run.created", "schedule_run", id, {
+      status: result.statistics.status,
+      score: result.score.total_score,
+      assignmentCount: result.assignments.length,
+      conflictCount: result.conflicts.length,
     });
     return response;
   }
@@ -265,10 +348,13 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return { events };
   }
 
-  async publishScheduleRun(id: string): Promise<PublishedScheduleResponse | null> {
+  async publishScheduleRun(id: string): Promise<PublishScheduleRunResult> {
     const response = this.runs.get(id);
     if (!response) {
       return null;
+    }
+    if (!isScheduleResultPublishable(this.scheduleInput, response.result)) {
+      return "not_publishable";
     }
     this.publishedRunId = id;
     this.batch = {
@@ -623,19 +709,37 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return { draft };
   }
 
-  async createScheduleJob(): Promise<ScheduleJobSummary> {
+  async createScheduleJob(command: CreateScheduleJobCommand): Promise<CreateScheduleJobResult> {
+    const existing = [...this.scheduleJobs.values()].find(
+      (job) => job.idempotencyKey === command.idempotencyKey,
+    );
+    if (existing) {
+      if (existing.requestDigest !== command.requestDigest) {
+        throw new ScheduleJobIdempotencyConflictError(command.idempotencyKey);
+      }
+      return { job: existing, created: false };
+    }
     const now = new Date().toISOString();
     const job: ScheduleJobSummary = {
       id: `job-${randomUUID()}`,
+      batchId: command.batchId,
       status: "queued",
       progress: 0,
+      idempotencyKey: command.idempotencyKey,
+      requestDigest: command.requestDigest,
+      traceId: command.traceId,
       runId: null,
       error: null,
+      cancellationRequestedAt: null,
+      queuedAt: now,
+      startedAt: null,
+      finishedAt: null,
       createdAt: now,
       updatedAt: now,
     };
     this.scheduleJobs.set(job.id, job);
-    return job;
+    this.recordScheduleJobEvent(job, "schedule_job.queued", { status: job.status });
+    return { job, created: true };
   }
 
   async listScheduleJobs(): Promise<{ jobs: ScheduleJobSummary[] }> {
@@ -650,21 +754,71 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return this.scheduleJobs.get(id) ?? null;
   }
 
-  async updateScheduleJob(
+  async transitionScheduleJob(
     id: string,
-    patch: Partial<Pick<ScheduleJobSummary, "status" | "progress" | "runId" | "error">>,
-  ): Promise<ScheduleJobSummary | null> {
+    command: TransitionScheduleJobCommand,
+  ): Promise<ScheduleJobTransitionResult> {
     const current = this.scheduleJobs.get(id);
     if (!current) {
-      return null;
+      return { job: null, resolution: "not_found" };
     }
+    const resolution = resolveScheduleJobTransition(current.status, command.to);
+    if (resolution !== "apply") {
+      return { job: current, resolution };
+    }
+    const now = new Date().toISOString();
+    const terminal = ["succeeded", "failed", "cancelled", "timed_out"].includes(command.to);
     const next = {
       ...current,
-      ...patch,
-      updatedAt: new Date().toISOString(),
+      status: command.to,
+      progress: command.progress,
+      error: command.error ?? null,
+      startedAt: command.to === "running" ? now : current.startedAt,
+      finishedAt: terminal ? now : current.finishedAt,
+      cancellationRequestedAt: command.to === "cancelled" ? now : current.cancellationRequestedAt,
+      updatedAt: now,
     };
     this.scheduleJobs.set(id, next);
-    return next;
+    if (command.to === "running") {
+      this.scheduleJobAttempts.set(id, (this.scheduleJobAttempts.get(id) ?? 0) + 1);
+    }
+    this.recordScheduleJobEvent(next, `schedule_job.${command.to}`, {
+      status: command.to,
+      progress: command.progress,
+      error: next.error,
+    });
+    return { job: next, resolution };
+  }
+
+  async completeScheduleJob(
+    id: string,
+    result: ScheduleResult,
+  ): Promise<ScheduleJobTransitionResult> {
+    const current = this.scheduleJobs.get(id);
+    if (!current) {
+      return { job: null, resolution: "not_found" };
+    }
+    const status = scheduleJobStatusForSolveResult(result.statistics.status);
+    const resolution = resolveScheduleJobTransition(current.status, status);
+    if (resolution !== "apply") {
+      return { job: current, resolution };
+    }
+    const response = this.createScheduleRunInternal(result);
+    const now = new Date().toISOString();
+    const next: ScheduleJobSummary = {
+      ...current,
+      status,
+      progress: 100,
+      runId: response.run.id,
+      finishedAt: now,
+      updatedAt: now,
+    };
+    this.scheduleJobs.set(id, next);
+    this.recordScheduleJobEvent(next, `schedule_job.${status}`, {
+      status,
+      runId: response.run.id,
+    });
+    return { job: next, resolution };
   }
 
   async recoverInterruptedScheduleJobs(): Promise<ScheduleJobSummary[]> {
@@ -673,19 +827,89 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       if (job.status !== "queued" && job.status !== "running") {
         continue;
       }
-      const failed = await this.updateScheduleJob(job.id, {
-        status: "failed",
+      const failed = await this.transitionScheduleJob(job.id, {
+        to: "failed",
         progress: 100,
-        error: "Schedule job was interrupted before completion.",
+        error: {
+          category: "infrastructure",
+          code: "schedule_job_interrupted",
+          message: "Schedule job was interrupted before completion.",
+          retryable: true,
+        },
       });
-      if (failed) {
-        recovered.push(failed);
-        this.recordAuditEvent("schedule_job.interrupted", "schedule_job", failed.id, {
+      if (failed.job && failed.resolution === "apply") {
+        recovered.push(failed.job);
+        this.recordAuditEvent("schedule_job.interrupted", "schedule_job", failed.job.id, {
           previousStatus: job.status,
         });
       }
     }
     return recovered;
+  }
+
+  async createAuthUser(command: CreateAuthUserCommand): Promise<AuthUserRecord> {
+    if ([...this.authUsers.values()].some((user) => user.username === command.username)) {
+      throw new Error(`Auth user ${command.username} already exists.`);
+    }
+    const user = structuredClone(command);
+    this.authUsers.set(user.id, user);
+    return structuredClone(user);
+  }
+
+  async findAuthUserByUsername(username: string): Promise<AuthUserRecord | null> {
+    const user = [...this.authUsers.values()].find((candidate) => candidate.username === username);
+    return user ? structuredClone(user) : null;
+  }
+
+  async createAuthSession(command: CreateAuthSessionCommand): Promise<AuthSessionRecord> {
+    const session: AuthSessionRecord = {
+      ...structuredClone(command),
+      revokedAt: null,
+      lastSeenAt: command.createdAt,
+    };
+    this.authSessions.set(session.id, session);
+    return structuredClone(session);
+  }
+
+  async findAuthSessionByTokenDigest(tokenDigest: string): Promise<AuthSessionWithUser | null> {
+    const session = [...this.authSessions.values()].find(
+      (candidate) => candidate.tokenDigest === tokenDigest,
+    );
+    const user = session ? this.authUsers.get(session.userId) : null;
+    return session && user
+      ? { session: structuredClone(session), user: structuredClone(user) }
+      : null;
+  }
+
+  async revokeAuthSession(id: string, revokedAt: string): Promise<boolean> {
+    const session = this.authSessions.get(id);
+    if (!session || session.revokedAt) {
+      return false;
+    }
+    this.authSessions.set(id, { ...session, revokedAt });
+    return true;
+  }
+
+  private recordScheduleJobEvent(
+    job: ScheduleJobSummary,
+    type: string,
+    payload: Record<string, unknown>,
+  ) {
+    const event = {
+      eventId: `event-${randomUUID()}`,
+      jobId: job.id,
+      type,
+      version: 1,
+      occurredAt: new Date().toISOString(),
+      payload,
+      traceId: job.traceId,
+    };
+    this.scheduleJobEvents.push(event);
+    this.outboxEvents.push({
+      id: `outbox-${randomUUID()}`,
+      ...event,
+      publishedAt: null,
+    });
   }
 
   async getPublishedSchedule(): Promise<PublishedScheduleResponse | null> {
@@ -747,9 +971,12 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     payload: Record<string, unknown>,
     actor = "system",
   ) {
+    const context = getCurrentAuthContext();
     this.auditEvents.push({
       id: `audit-${randomUUID()}`,
-      actor,
+      actor: context?.user.username ?? actor,
+      actorUserId: context?.user.id ?? null,
+      actorRoles: context?.user.roles ?? [],
       action,
       entityType,
       entityId,
@@ -823,6 +1050,16 @@ export function validateReferenceRecord(
     const room = record as ReferenceDataResponse["scheduleInput"]["rooms"][number];
     if (!/^[a-z][a-z0-9-]{1,63}$/.test(room.building_id)) {
       issues.push("Room building_id must be a lowercase slug between 2 and 64 characters.");
+    }
+  }
+
+  if (resource === "teachers") {
+    const teacher = record as ReferenceDataResponse["scheduleInput"]["teachers"][number];
+    const timeSlotIds = new Set(scheduleInput.time_slots.map((slot) => slot.id));
+    for (const slotId of teacher.unavailable_slot_ids) {
+      if (!timeSlotIds.has(slotId)) {
+        issues.push(`Time slot ${slotId} does not exist.`);
+      }
     }
   }
 
@@ -1062,9 +1299,36 @@ export function validateDraftAssignments(
   const tasks = new Map(scheduleInput.exam_tasks.map((task) => [task.id, task]));
   const rooms = new Map(scheduleInput.rooms.map((room) => [room.id, room]));
   const teachers = new Map(scheduleInput.teachers.map((teacher) => [teacher.id, teacher]));
+  const timeSlots = new Set(scheduleInput.time_slots.map((slot) => slot.id));
   const roomSlot = new Map<string, string>();
   const teacherSlot = new Map<string, string>();
   const groupSlot = new Map<string, string>();
+  const assignmentCounts = new Map<string, number>();
+
+  for (const assignment of assignments) {
+    assignmentCounts.set(
+      assignment.exam_task_id,
+      (assignmentCounts.get(assignment.exam_task_id) ?? 0) + 1,
+    );
+  }
+  for (const task of scheduleInput.exam_tasks) {
+    const assignmentCount = assignmentCounts.get(task.id) ?? 0;
+    if (assignmentCount === 0) {
+      conflicts.push(buildConflict(
+        "exam_task_unassigned",
+        [task.id],
+        `考试任务 ${task.id} 尚未安排。`,
+        "为该考试任务补充唯一的考场、时间段和监考安排。",
+      ));
+    } else if (assignmentCount > 1) {
+      conflicts.push(buildConflict(
+        "exam_task_duplicate_assignment",
+        [task.id],
+        `考试任务 ${task.id} 存在 ${assignmentCount} 条安排。`,
+        "仅保留一条有效安排后重新校验。",
+      ));
+    }
+  }
 
   assignments.forEach((assignment) => {
     const task = tasks.get(assignment.exam_task_id);
@@ -1080,7 +1344,17 @@ export function validateDraftAssignments(
       return;
     }
 
-    if (task.allowed_slot_ids.length > 0 && !task.allowed_slot_ids.includes(assignment.time_slot_id)) {
+    if (!timeSlots.has(assignment.time_slot_id)) {
+      conflicts.push(buildConflict(
+        "time_slot_not_found",
+        [assignment.time_slot_id],
+        `时间段 ${assignment.time_slot_id} 不存在。`,
+        "请选择有效时间段后重新校验。",
+      ));
+    } else if (
+      task.allowed_slot_ids.length > 0
+      && !task.allowed_slot_ids.includes(assignment.time_slot_id)
+    ) {
       conflicts.push(buildConflict(
         "allowed_slot",
         [task.id, assignment.time_slot_id],
@@ -1198,6 +1472,18 @@ export function validateDraftAssignments(
   });
 
   return conflicts;
+}
+
+export function isScheduleResultPublishable(
+  scheduleInput: ReferenceDataResponse["scheduleInput"],
+  result: ScheduleResult,
+): boolean {
+  return result.statistics.status === "feasible"
+    && result.score.hard_violation_count === 0
+    && !result.conflicts.some((conflict) => conflict.severity === "error")
+    && !validateDraftAssignments(scheduleInput, result.assignments).some(
+      (conflict) => conflict.severity === "error",
+    );
 }
 
 export function buildDraftScheduleResult(detail: ScheduleDraftDetailResponse): ScheduleResult {

@@ -2,9 +2,9 @@ import { execFileSync } from "node:child_process";
 
 const apiBase = process.env.DEMO_API_BASE_URL ?? "http://127.0.0.1:4000";
 const webBase = process.env.DEMO_WEB_BASE_URL ?? "http://127.0.0.1:3000";
-const operatorHeaders = {
-  authorization: `Bearer ${process.env.DEMO_OPERATOR_TOKEN ?? "examforge-operator-token"}`,
-};
+const operatorPassword = process.env.DEMO_OPERATOR_PASSWORD
+  ?? process.env.EXAMFORGE_OPERATOR_PASSWORD;
+assert(operatorPassword, "DEMO_OPERATOR_PASSWORD must be set.");
 
 const health = await getJson(`${apiBase}/health`);
 assert(health.ok === true && health.service === "examforge-api", "API liveness is invalid.");
@@ -13,7 +13,11 @@ const readiness = await getJson(`${apiBase}/ready`);
 assert(readiness.ok === true, "API is not ready.");
 assert(readiness.storage === "postgres", `Expected PostgreSQL storage, received ${readiness.storage}.`);
 
-const referenceData = await getJson(`${apiBase}/api/reference-data`);
+const sessionCookie = await login("operator", operatorPassword);
+const authenticatedHeaders = { cookie: sessionCookie };
+const referenceData = await getJson(`${apiBase}/api/reference-data`, {
+  headers: authenticatedHeaders,
+});
 for (const [resource, records] of Object.entries({
   exams: referenceData.scheduleInput?.exam_tasks,
   rooms: referenceData.scheduleInput?.rooms,
@@ -25,7 +29,7 @@ for (const [resource, records] of Object.entries({
 
 const run = await getJson(`${apiBase}/api/schedule-runs`, {
   method: "POST",
-  headers: operatorHeaders,
+  headers: { ...authenticatedHeaders, origin: webBase },
 });
 assert(run.run?.status === "feasible", `Expected feasible run, received ${run.run?.status}.`);
 assert(run.result?.assignments?.length > 0, "Schedule run has no assignments.");
@@ -36,7 +40,9 @@ assert(webResponse.ok, `Web returned HTTP ${webResponse.status}.`);
 
 execFileSync("docker", ["compose", "restart", "api"], { stdio: "inherit" });
 await waitForReady();
-const persistedRun = await getJson(`${apiBase}/api/schedule-runs/${encodeURIComponent(run.run.id)}`);
+const persistedRun = await getJson(`${apiBase}/api/schedule-runs/${encodeURIComponent(run.run.id)}`, {
+  headers: authenticatedHeaders,
+});
 assert(persistedRun.run?.id === run.run.id, "Schedule run was not persisted across API restart.");
 
 console.log(JSON.stringify({
@@ -62,6 +68,25 @@ async function waitForReady() {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw new Error(`API did not become ready after restart: ${lastError ?? "unknown error"}`);
+}
+
+async function login(username, password) {
+  const response = await fetch(`${apiBase}/api/auth/login`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: webBase,
+    },
+    body: JSON.stringify({ username, password }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`Login returned HTTP ${response.status}: ${text}`);
+  }
+  const setCookie = response.headers.get("set-cookie");
+  assert(setCookie, "Login response did not issue a session cookie.");
+  return setCookie.split(";", 1)[0];
 }
 
 async function getJson(url, init = {}) {

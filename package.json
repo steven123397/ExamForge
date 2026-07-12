@@ -11,7 +11,7 @@
     "dev": "npm run build --workspace @examforge/shared && (npm run dev --workspace @examforge/api & npm run dev --workspace @examforge/web)",
     "build": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run build --workspace @examforge/api && npm run build --workspace @examforge/web",
     "check:ci": "node scripts/ci/check-repository.mjs",
-    "test": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm test --workspace @examforge/api",
+    "test": "npm test --workspace @examforge/shared && npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm test --workspace @examforge/api",
     "test:postgres": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run test:postgres --workspace @examforge/api",
     "test:migrations": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run test:migrations --workspace @examforge/db",
     "test:ci": "node --test scripts/ci/*.test.mjs",
@@ -22,7 +22,7 @@
     "demo:up": "bash scripts/demo-up.sh",
     "demo:down": "bash scripts/demo-down.sh",
     "demo:reset": "bash scripts/demo-reset.sh",
-    "demo:smoke": "node scripts/demo-smoke.mjs",
+    "demo:smoke": "node --env-file-if-exists=.env scripts/demo-smoke.mjs",
     "test:e2e": "playwright test",
     "test:e2e:demo": "bash scripts/test-demo-e2e.sh",
     "typecheck": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run typecheck --workspace @examforge/db && npm run typecheck --workspace @examforge/api && npm run typecheck --workspace @examforge/web"

@@ -96,14 +96,70 @@ describe("schedule run service", () => {
       deferredTask = task;
     });
 
-    const job = await service.createScheduleJob(overrides);
+    const job = await service.createScheduleJob(overrides, {
+      idempotencyKey: "job-reschedule-context",
+      traceId: "trace-reschedule-context",
+    });
     assert.equal(job.status, "queued");
     await requireDeferredTask(deferredTask)();
 
-    const completed = await repository.getScheduleJob(job.id);
-    assert.equal(completed?.status, "completed");
+    const succeeded = await repository.getScheduleJob(job.id);
+    assert.equal(succeeded?.status, "succeeded");
     assert.deepEqual(scheduler.lastInput?.fixed_assignments, fixedAssignments);
     assert.deepEqual(scheduler.lastInput?.reschedule_context, rescheduleContext);
+  });
+
+  it("reuses idempotent submissions without scheduling duplicate execution", async () => {
+    const repository = new InMemoryPlatformRepository();
+    const deferredTasks: DeferredTask[] = [];
+    const service = new ScheduleRunService(repository, new RecordingScheduler(), (task) => {
+      deferredTasks.push(task);
+    });
+    const context = {
+      idempotencyKey: "same-schedule-request",
+      traceId: "trace-idempotent-request",
+    };
+
+    const first = await service.createScheduleJob(overrides, context);
+    const second = await service.createScheduleJob(overrides, context);
+
+    assert.equal(second.id, first.id);
+    assert.equal(deferredTasks.length, 1);
+  });
+
+  it("rejects an idempotency key reused with a different request digest", async () => {
+    const repository = new InMemoryPlatformRepository();
+    const service = new ScheduleRunService(repository, new RecordingScheduler(), () => {});
+    const context = {
+      idempotencyKey: "conflicting-schedule-request",
+      traceId: "trace-conflicting-request",
+    };
+    await service.createScheduleJob(overrides, context);
+
+    await assert.rejects(
+      service.createScheduleJob({ ...overrides, fixed_assignments: [] }, context),
+      /idempotency key/i,
+    );
+  });
+
+  it("does not create another run when a success callback is repeated", async () => {
+    const repository = new InMemoryPlatformRepository();
+    let deferredTask: DeferredTask | null = null;
+    const scheduler = new RecordingScheduler();
+    const service = new ScheduleRunService(repository, scheduler, (task) => {
+      deferredTask = task;
+    });
+    const job = await service.createScheduleJob(overrides, {
+      idempotencyKey: "repeat-success-callback",
+      traceId: "trace-repeat-success",
+    });
+    const execute = requireDeferredTask(deferredTask);
+
+    await execute();
+    await execute();
+
+    assert.equal((await repository.listScheduleRuns()).runs.length, 1);
+    assert.equal((await repository.getScheduleJob(job.id))?.status, "succeeded");
   });
 
   it("builds a stable reschedule context from an editable draft without mutating it", async () => {
@@ -169,26 +225,34 @@ describe("schedule run service", () => {
     const job = await service.createScheduleJob({
       fixed_assignments: [],
       reschedule_context: null,
+    }, {
+      idempotencyKey: "scheduler-failure",
+      traceId: "trace-scheduler-failure",
     });
     await requireDeferredTask(deferredTask)();
 
     const failed = await repository.getScheduleJob(job.id);
     assert.equal(failed?.status, "failed");
     assert.equal(failed?.progress, 100);
-    assert.equal(failed?.error, "scheduler unavailable");
+    assert.equal(failed?.error?.message, "scheduler unavailable");
   });
 
   it("recovers interrupted jobs through the repository", async () => {
     const repository = new InMemoryPlatformRepository();
-    const job = await repository.createScheduleJob();
-    await repository.updateScheduleJob(job.id, { status: "running", progress: 35 });
+    const job = await repository.createScheduleJob({
+      batchId: "batch-2026-spring-final",
+      idempotencyKey: "recover-interrupted-job",
+      requestDigest: "c".repeat(64),
+      traceId: "trace-recover-interrupted",
+    });
+    await repository.transitionScheduleJob(job.job.id, { to: "running", progress: 35 });
     const service = new ScheduleRunService(repository, new RecordingScheduler());
 
     await service.recoverInterruptedJobs();
 
-    const recovered = await repository.getScheduleJob(job.id);
+    const recovered = await repository.getScheduleJob(job.job.id);
     assert.equal(recovered?.status, "failed");
-    assert.equal(recovered?.error, "Schedule job was interrupted before completion.");
+    assert.equal(recovered?.error?.message, "Schedule job was interrupted before completion.");
   });
 });
 

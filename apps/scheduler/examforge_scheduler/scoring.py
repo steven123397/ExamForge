@@ -10,6 +10,7 @@ from .models import (
     SoftPenaltyItem,
     TimeSlot,
 )
+from .time_slots import are_consecutive_time_slots
 
 
 BASE_SCORE = 100
@@ -64,9 +65,9 @@ def _student_consecutive_exam_penalty(
 
     consecutive_pairs: list[str] = []
     for group_id, slots in group_slots.items():
-        ordered_slots = sorted(slots, key=lambda slot: slot.period_index)
+        ordered_slots = sorted(slots, key=lambda slot: (slot.date, slot.period_index))
         for previous, current in zip(ordered_slots, ordered_slots[1:]):
-            if current.period_index - previous.period_index == 1:
+            if are_consecutive_time_slots(previous, current):
                 consecutive_pairs.append(group_id)
 
     if not consecutive_pairs:
@@ -135,9 +136,9 @@ def _teacher_consecutive_invigilation_penalty(
 
     consecutive_teachers: list[str] = []
     for teacher_id, slots in teacher_slots.items():
-        ordered_slots = sorted(slots, key=lambda slot: slot.period_index)
+        ordered_slots = sorted(slots, key=lambda slot: (slot.date, slot.period_index))
         for previous, current in zip(ordered_slots, ordered_slots[1:]):
-            if current.period_index - previous.period_index == 1:
+            if are_consecutive_time_slots(previous, current):
                 consecutive_teachers.append(teacher_id)
 
     if not consecutive_teachers:

@@ -20,6 +20,8 @@ import type {
   ScheduledExam,
 } from "@examforge/shared";
 import type { LoadState } from "../../components/shared/load-state";
+import { ConfirmationDialog } from "../../components/shared/confirmation-dialog";
+import { PanelQueryError } from "../../components/shared/panel-query-error";
 import { DraftMatrix } from "./draft-matrix";
 import { DraftSuggestions } from "./draft-suggestions";
 
@@ -38,9 +40,12 @@ export function DraftWorkspace({
   selectedAssignmentId,
   draftForm,
   draftState,
+  historyError,
+  historyRetrying,
   suggestionState,
   rescheduleState,
   onCreateDraft,
+  onRetryHistory,
   onLoadDraft,
   onSelectAssignment,
   onDraftFormChange,
@@ -64,9 +69,12 @@ export function DraftWorkspace({
   selectedAssignmentId: string;
   draftForm: DraftAssignmentForm;
   draftState: LoadState;
+  historyError: boolean;
+  historyRetrying: boolean;
   suggestionState: LoadState;
   rescheduleState: LoadState;
   onCreateDraft(id: string): Promise<void>;
+  onRetryHistory(): Promise<unknown>;
   onLoadDraft(id: string): Promise<void>;
   onSelectAssignment(id: string): void;
   onDraftFormChange(form: DraftAssignmentForm): void;
@@ -81,6 +89,7 @@ export function DraftWorkspace({
   onDiscardDraft(): Promise<void>;
 }) {
   const [sourceRunId, setSourceRunId] = useState("");
+  const [confirmation, setConfirmation] = useState<"publish" | "discard" | null>(null);
   const scheduleInput = referenceData?.scheduleInput;
   const selectedAssignment = draft?.assignments.find((assignment) => (
     assignment.exam_task_id === selectedAssignmentId
@@ -130,7 +139,13 @@ export function DraftWorkspace({
         </div>
 
         <div className="draft-list">
-          {drafts.map((item) => (
+          {historyError ? (
+            <PanelQueryError
+              message="草稿历史读取失败。"
+              retrying={historyRetrying}
+              onRetry={onRetryHistory}
+            />
+          ) : drafts.map((item) => (
             <button
               type="button"
               key={item.id}
@@ -143,7 +158,7 @@ export function DraftWorkspace({
               <em>{item.conflictCount} 冲突 · {item.score} 分</em>
             </button>
           ))}
-          {!drafts.length ? <p className="muted">从运行历史创建草稿后开始人工调整。</p> : null}
+          {!historyError && !drafts.length ? <p className="muted">从运行历史创建草稿后开始人工调整。</p> : null}
         </div>
       </div>
 
@@ -181,7 +196,7 @@ export function DraftWorkspace({
               type="button"
               className="primary-button"
               disabled={!canPublishDraft || draftBusy}
-              onClick={onPublishDraft}
+              onClick={() => setConfirmation("publish")}
             >
               <ShieldCheck size={17} />
               发布草稿
@@ -238,7 +253,7 @@ export function DraftWorkspace({
               type="button"
               className="danger-button"
               disabled={!draft || draftLocked || draftBusy}
-              onClick={onDiscardDraft}
+              onClick={() => setConfirmation("discard")}
             >
               废弃草稿
             </button>
@@ -342,6 +357,7 @@ export function DraftWorkspace({
 
         <DraftSuggestions
           suggestions={suggestions}
+          selectedAssignmentId={selectedAssignmentId}
           suggestionState={suggestionState}
           draftState={draftBusy ? "loading" : draftState}
           draftLocked={draftLocked}
@@ -372,6 +388,26 @@ export function DraftWorkspace({
           {draft && draft.changeEvents.length === 0 ? <p className="muted">尚无人工调整记录。</p> : null}
         </div>
       </div>
+      {confirmation === "publish" && draft ? (
+        <ConfirmationDialog
+          title="确认发布草稿"
+          target={draft.draft.id}
+          description="确认后该草稿将进入发布终态，并成为当前正式排考。"
+          confirmLabel="确认发布"
+          onConfirm={onPublishDraft}
+          onCancel={() => setConfirmation(null)}
+        />
+      ) : null}
+      {confirmation === "discard" && draft ? (
+        <ConfirmationDialog
+          title="确认废弃草稿"
+          target={draft.draft.id}
+          description="废弃后草稿不能继续调整或发布，该操作不可撤销。"
+          confirmLabel="确认废弃"
+          onConfirm={onDiscardDraft}
+          onCancel={() => setConfirmation(null)}
+        />
+      ) : null}
     </div>
   );
 }

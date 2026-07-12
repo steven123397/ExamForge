@@ -1,4 +1,5 @@
 from collections import Counter
+from dataclasses import replace
 
 from examforge_scheduler.models import (
     ConstraintProfile,
@@ -7,7 +8,9 @@ from examforge_scheduler.models import (
     ExamType,
     Room,
     RoomType,
+    RescheduleContext,
     ScheduleInput,
+    ScheduledExam,
     SolveStatus,
     StudentGroup,
     Teacher,
@@ -34,7 +37,48 @@ def test_student_consecutive_exam_weight_prefers_non_adjacent_slots():
     assigned_slots = {
         assignment.time_slot_id for assignment in result.assignments
     }
-    assert assigned_slots == {"s1", "s3"}
+    assert assigned_slots != {"s1", "s2"}
+    assert all(
+        item.rule != "student_consecutive_exam"
+        for item in result.score.soft_penalty_items
+    )
+
+
+def test_student_consecutive_exam_weight_does_not_avoid_the_next_day():
+    data = _make_student_consecutive_input({"student_consecutive_exam": 1000})
+    data = replace(
+        data,
+        time_slots=tuple(
+            replace(
+                slot,
+                date="2026-07-10" if slot.id == "s1" else "2026-07-11",
+            )
+            for slot in data.time_slots
+        ),
+        exam_tasks=(
+            replace(data.exam_tasks[0], allowed_slot_ids=("s1",)),
+            replace(data.exam_tasks[1], allowed_slot_ids=("s2", "s3")),
+        ),
+        constraint_profile=replace(
+            data.constraint_profile,
+            soft_weights={
+                "student_consecutive_exam": 1000,
+                "schedule_stability": 1,
+            },
+        ),
+        reschedule_context=RescheduleContext(
+            baseline_assignments=(
+                ScheduledExam("e1", "r1", "s1", ("t1",)),
+                ScheduledExam("e2", "r2", "s2", ("t2",)),
+            ),
+            movable_exam_task_ids=("e2",),
+        ),
+    )
+
+    result = solve_schedule(data)
+
+    assert result.statistics.status == SolveStatus.FEASIBLE
+    assert {assignment.time_slot_id for assignment in result.assignments} == {"s1", "s2"}
 
 
 def test_exam_distribution_weight_reduces_single_day_concentration():

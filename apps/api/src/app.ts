@@ -8,11 +8,15 @@ import {
   referenceRecordUpdateSchemas,
   referenceResourceSchema,
   scheduledExamSchema,
+  loginRequestSchema,
+  type AuthContext,
   type ReferenceRecord,
   type ReferenceResource,
+  type UserRole,
 } from "@examforge/shared";
 import {
   ReferenceIntegrityError,
+  ScheduleJobIdempotencyConflictError,
   type PlatformRepository,
 } from "./repository.js";
 import { createPlatformRepository } from "./repository-factory.js";
@@ -27,6 +31,15 @@ import {
 import { DraftService } from "./services/draft-service.js";
 import { PublicationService } from "./services/publication-service.js";
 import { ScheduleRunService } from "./services/schedule-run-service.js";
+import { AuthService } from "./auth/auth-service.js";
+import { initializeConfiguredAuthUsers } from "./auth/bootstrap.js";
+import { runWithAuthContext } from "./auth/request-context.js";
+import {
+  getSessionCookieConfig,
+  readSessionCookie,
+  serializeExpiredSessionCookie,
+  serializeSessionCookie,
+} from "./auth/session-cookie.js";
 
 export interface AppOptions {
   repository?: PlatformRepository;
@@ -37,6 +50,18 @@ const scheduleRequestSchema = z.object({
   fixed_assignments: z.array(fixedAssignmentSchema).default([]),
   reschedule_context: rescheduleContextSchema.nullable().default(null),
 }).strict();
+
+const anonymousReadRoutes = new Set([
+  "/health",
+  "/ready",
+  "/api/auth/login",
+  "/api/published-schedule",
+  "/api/published-schedule/notifications",
+  "/api/published-schedule/teachers/:teacherId",
+  "/api/published-schedule/student-groups/:studentGroupId",
+]);
+
+const requestAuthContexts = new WeakMap<FastifyRequest, AuthContext>();
 
 export function createApp(options: AppOptions = {}) {
   const app = Fastify({
@@ -49,9 +74,59 @@ export function createApp(options: AppOptions = {}) {
   const scheduleRunService = new ScheduleRunService(repository, scheduler);
   const draftService = new DraftService(repository);
   const publicationService = new PublicationService(repository);
+  const cookieConfig = getSessionCookieConfig();
+  const authService = new AuthService(repository, cookieConfig.maxAgeSeconds * 1000);
+  const trustedOrigins = getTrustedOrigins();
+
+  app.setErrorHandler((error, _request, reply) => {
+    if (isDatabaseIntegrityError(error)) {
+      return reply.code(409).send({
+        error: "data_integrity_violation",
+        message: "The request conflicts with persisted data integrity constraints.",
+      });
+    }
+    return reply.send(error);
+  });
 
   app.register(cors, {
-    origin: true,
+    origin: [...trustedOrigins],
+    credentials: true,
+  });
+
+  app.addHook("preHandler", async (request, reply) => {
+    if (request.method === "OPTIONS") {
+      return;
+    }
+    if (isMutation(request.method) && !isTrustedOrigin(request.headers.origin, trustedOrigins)) {
+      return reply.code(403).send({
+        error: "untrusted_origin",
+        message: "The request origin is not trusted.",
+      });
+    }
+    const cookieHeader = Array.isArray(request.headers.cookie)
+      ? request.headers.cookie[0]
+      : request.headers.cookie;
+    const context = await authService.authenticate(
+      readSessionCookie(cookieHeader, cookieConfig.name),
+    );
+    if (context) {
+      requestAuthContexts.set(request, context);
+    }
+    if (!anonymousReadRoutes.has(request.routeOptions.url ?? "") && !context) {
+      return reply.code(401).send({
+        error: "not_authenticated",
+        message: "A valid server session is required.",
+      });
+    }
+  });
+
+  app.addHook("preHandler", (request, _reply, done) => {
+    const context = getRequestAuthContext(request);
+    if (context) {
+      runWithAuthContext(context, done);
+    } else {
+      done();
+    }
   });
 
   app.get("/health", async () => ({
@@ -79,10 +154,7 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.post("/api/auth/login", async (request, reply) => {
-    const parsed = z.object({
-      username: z.string().min(1),
-      password: z.string().min(1),
-    }).safeParse(request.body);
+    const parsed = loginRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({
         error: "invalid_login_payload",
@@ -91,32 +163,44 @@ export function createApp(options: AppOptions = {}) {
       });
     }
 
-    const user = getAuthUsers().find((candidate) => (
-      candidate.username === parsed.data.username
-      && candidate.password === parsed.data.password
-    ));
-    if (!user) {
+    const result = await authService.login(parsed.data.username, parsed.data.password, {
+      userAgent: request.headers["user-agent"] ?? null,
+      ipAddress: request.ip,
+    });
+    if (result.status === "invalid_credentials") {
       return reply.code(401).send({
         error: "invalid_credentials",
         message: "Username or password is invalid.",
       });
     }
-
-    return {
-      token: user.token,
-      user: publicAuthUser(user),
-    };
+    if (result.status === "disabled") {
+      return reply.code(403).send({
+        error: "account_disabled",
+        message: "This account is disabled.",
+      });
+    }
+    return reply
+      .header("set-cookie", serializeSessionCookie(
+        result.token,
+        cookieConfig,
+        result.context.session.expiresAt,
+      ))
+      .send(result.context);
   });
 
   app.get("/api/auth/me", async (request, reply) => {
-    const user = getRequestUser(request);
-    if (!user) {
-      return reply.code(401).send({
-        error: "not_authenticated",
-        message: "A valid bearer token is required.",
-      });
+    return getRequestAuthContext(request);
+  });
+
+  app.post("/api/auth/logout", async (request, reply) => {
+    const context = getRequestAuthContext(request);
+    if (context) {
+      await authService.logout(context.session.id);
     }
-    return { user: publicAuthUser(user) };
+    return reply
+      .header("set-cookie", serializeExpiredSessionCookie(cookieConfig))
+      .code(204)
+      .send();
   });
 
   app.addHook("onClose", async () => {
@@ -124,6 +208,7 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.addHook("onReady", async () => {
+    await initializeConfiguredAuthUsers(repository);
     await scheduleRunService.recoverInterruptedJobs();
   });
 
@@ -305,9 +390,17 @@ export function createApp(options: AppOptions = {}) {
           issues: parsed.error.issues,
         });
       }
-      const teacher = await repository.updateReferenceRecord("teachers", request.params.teacherId, {
-        unavailable_slot_ids: parsed.data.unavailable_slot_ids,
-      });
+      let teacher: ReferenceRecord | null;
+      try {
+        teacher = await repository.updateReferenceRecord("teachers", request.params.teacherId, {
+          unavailable_slot_ids: parsed.data.unavailable_slot_ids,
+        });
+      } catch (error) {
+        if (sendReferenceIntegrityError(reply, error)) {
+          return reply;
+        }
+        throw error;
+      }
       if (!teacher) {
         return reply.code(404).send({
           error: "teacher_not_found",
@@ -346,7 +439,21 @@ export function createApp(options: AppOptions = {}) {
         issues: parsed.error.issues,
       });
     }
-    const job = await scheduleRunService.createScheduleJob(parsed.data);
+    let job;
+    try {
+      job = await scheduleRunService.createScheduleJob(parsed.data, {
+        idempotencyKey: request.headers["idempotency-key"] as string | undefined,
+        traceId: request.id,
+      });
+    } catch (error) {
+      if (error instanceof ScheduleJobIdempotencyConflictError) {
+        return reply.code(409).send({
+          error: "schedule_job_idempotency_conflict",
+          message: "The idempotency key was already used for a different schedule request.",
+        });
+      }
+      throw error;
+    }
     return reply.code(202).send({ job });
   });
 
@@ -689,6 +796,12 @@ export function createApp(options: AppOptions = {}) {
           message: `Schedule run ${request.params.id} does not exist.`,
         });
       }
+      if (published === "not_publishable") {
+        return reply.code(409).send({
+          error: "schedule_run_not_publishable",
+          message: "Only complete, feasible schedule runs without hard conflicts can be published.",
+        });
+      }
       return published;
     },
   );
@@ -705,11 +818,11 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.get("/api/published-schedule/export.csv", async (request, reply) => {
-    if (!requireRole(request, reply, ["admin", "operator", "viewer"])) {
+    if (!requireRole(request, reply, ["admin", "operator", "teacher", "student"])) {
       return reply;
     }
-    const user = getRequestUser(request);
-    const exported = await publicationService.exportCsv(user?.username ?? "unknown");
+    const context = getRequestAuthContext(request);
+    const exported = await publicationService.exportCsv(context?.user.username ?? "unknown");
     if (!exported) {
       return reply.code(404).send({
         error: "published_schedule_not_found",
@@ -800,82 +913,40 @@ function parseScheduleRequest(body: unknown) {
   return scheduleRequestSchema.safeParse(body ?? {});
 }
 
-type ExamForgeRole = "admin" | "operator" | "viewer";
-
-interface AuthUser {
-  id: string;
-  username: string;
-  password: string;
-  displayName: string;
-  role: ExamForgeRole;
-  token: string;
-}
-
-function getAuthUsers(): AuthUser[] {
-  return [
-    {
-      id: "user-admin",
-      username: "admin",
-      password: process.env.EXAMFORGE_ADMIN_PASSWORD ?? "admin",
-      displayName: "系统管理员",
-      role: "admin",
-      token: process.env.EXAMFORGE_ADMIN_TOKEN ?? "examforge-admin-token",
-    },
-    {
-      id: "user-operator",
-      username: "operator",
-      password: process.env.EXAMFORGE_OPERATOR_PASSWORD ?? "operator",
-      displayName: "排考教务员",
-      role: "operator",
-      token: process.env.EXAMFORGE_OPERATOR_TOKEN ?? "examforge-operator-token",
-    },
-    {
-      id: "user-viewer",
-      username: "viewer",
-      password: process.env.EXAMFORGE_VIEWER_PASSWORD ?? "viewer",
-      displayName: "只读观察员",
-      role: "viewer",
-      token: process.env.EXAMFORGE_VIEWER_TOKEN ?? "examforge-viewer-token",
-    },
-  ];
-}
-
-function publicAuthUser(user: AuthUser) {
-  return {
-    id: user.id,
-    username: user.username,
-    displayName: user.displayName,
-    role: user.role,
-  };
-}
-
-function getRequestUser(request: FastifyRequest): AuthUser | null {
-  const raw = request.headers.authorization;
-  const header = Array.isArray(raw) ? raw[0] : raw;
-  const match = header?.match(/^Bearer\s+(.+)$/i);
-  if (!match) {
-    return null;
-  }
-  const token = match[1];
-  return getAuthUsers().find((user) => user.token === token) ?? null;
+function getRequestAuthContext(request: FastifyRequest) {
+  return requestAuthContexts.get(request) ?? null;
 }
 
 function requireRole(
   request: FastifyRequest,
   reply: FastifyReply,
-  allowed: ExamForgeRole[],
+  allowed: UserRole[],
 ) {
-  const user = getRequestUser(request);
-  if (user && allowed.includes(user.role)) {
+  const context = getRequestAuthContext(request);
+  if (context && context.user.roles.some((role) => allowed.includes(role))) {
     return true;
   }
   reply.code(403).send({
     error: "permission_denied",
-    message: user
-      ? `Role ${user.role} is not allowed to perform this operation.`
-      : "A valid bearer token is required to perform this operation.",
+    message: context
+      ? "The authenticated user does not have a required role."
+      : "A valid server session is required to perform this operation.",
   });
   return false;
+}
+
+function getTrustedOrigins() {
+  const configured = process.env.EXAMFORGE_TRUSTED_ORIGINS
+    ?? "http://localhost:3000,http://127.0.0.1:3000";
+  return new Set(configured.split(",").map((origin) => origin.trim()).filter(Boolean));
+}
+
+function isMutation(method: string) {
+  return method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE";
+}
+
+function isTrustedOrigin(origin: string | undefined, trustedOrigins: Set<string>) {
+  return typeof origin === "string" && trustedOrigins.has(origin);
 }
 
 function sendReferenceIntegrityError(reply: FastifyReply, error: unknown) {
@@ -888,6 +959,19 @@ function sendReferenceIntegrityError(reply: FastifyReply, error: unknown) {
     issues: error.issues,
   });
   return true;
+}
+
+function isDatabaseIntegrityError(error: unknown): boolean {
+  const integrityCodes = new Set(["23502", "23503", "23505", "23514"]);
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
+    const candidate = current as { code?: unknown; cause?: unknown };
+    if (typeof candidate.code === "string" && integrityCodes.has(candidate.code)) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
 }
 
 function parseReferenceResource(value: string): ReferenceResource | null {

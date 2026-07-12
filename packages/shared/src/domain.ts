@@ -298,6 +298,8 @@ export interface ScheduleRunListResponse {
 export interface AuditEventSummary {
   id: string;
   actor: string;
+  actorUserId: string | null;
+  actorRoles: UserRole[];
   action: string;
   entityType: string;
   entityId: string;
@@ -435,14 +437,107 @@ export interface ScheduleDraftAdjustmentSuggestionsResponse {
   suggestions: ScheduleDraftAdjustmentSuggestion[];
 }
 
-export type ScheduleJobStatus = "queued" | "running" | "completed" | "failed";
+export const scheduleJobStatuses = [
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "timed_out",
+] as const;
+
+export const scheduleJobStatusSchema = z.enum(scheduleJobStatuses);
+export type ScheduleJobStatus = z.infer<typeof scheduleJobStatusSchema>;
+export type ScheduleJobTransitionResolution = "apply" | "idempotent" | "reject";
+
+const scheduleJobTransitions: Readonly<Record<ScheduleJobStatus, readonly ScheduleJobStatus[]>> = {
+  queued: ["running", "failed", "cancelled", "timed_out"],
+  running: ["succeeded", "failed", "cancelled", "timed_out"],
+  succeeded: [],
+  failed: [],
+  cancelled: [],
+  timed_out: [],
+};
+
+export function resolveScheduleJobTransition(
+  current: ScheduleJobStatus,
+  next: ScheduleJobStatus,
+): ScheduleJobTransitionResolution {
+  if (current === next) {
+    return "idempotent";
+  }
+  return scheduleJobTransitions[current].includes(next) ? "apply" : "reject";
+}
+
+export function scheduleJobStatusForSolveResult(status: SolveStatus): "succeeded" | "failed" {
+  return status === "error" ? "failed" : "succeeded";
+}
+
+export const scheduleJobErrorCategorySchema = z.enum([
+  "validation",
+  "scheduler",
+  "infrastructure",
+  "timeout",
+  "cancelled",
+  "unknown",
+]);
+
+export const scheduleJobErrorSchema = z.object({
+  category: scheduleJobErrorCategorySchema,
+  code: z.string().min(1),
+  message: z.string().min(1),
+  retryable: z.boolean(),
+}).strict();
+
+export const scheduleJobRequestIdentitySchema = z.object({
+  idempotencyKey: z.string().min(1).max(200),
+  requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
+export const scheduleJobTimestampsSchema = z.object({
+  queuedAt: z.string().datetime(),
+  startedAt: z.string().datetime().nullable(),
+  finishedAt: z.string().datetime().nullable(),
+}).strict();
+
+export const scheduleJobEventTypeSchema = z.enum([
+  "schedule_job.queued",
+  "schedule_job.running",
+  "schedule_job.succeeded",
+  "schedule_job.failed",
+  "schedule_job.cancelled",
+  "schedule_job.timed_out",
+]);
+
+export const scheduleJobEventEnvelopeSchema = z.object({
+  eventId: z.string().min(1),
+  jobId: z.string().min(1),
+  type: scheduleJobEventTypeSchema,
+  version: z.literal(1),
+  occurredAt: z.string().datetime(),
+  payload: z.record(z.unknown()),
+  traceId: z.string().min(1),
+}).strict();
+
+export type ScheduleJobError = z.infer<typeof scheduleJobErrorSchema>;
+export type ScheduleJobRequestIdentity = z.infer<typeof scheduleJobRequestIdentitySchema>;
+export type ScheduleJobTimestamps = z.infer<typeof scheduleJobTimestampsSchema>;
+export type ScheduleJobEventEnvelope = z.infer<typeof scheduleJobEventEnvelopeSchema>;
 
 export interface ScheduleJobSummary {
   id: string;
+  batchId: string;
   status: ScheduleJobStatus;
   progress: number;
+  idempotencyKey: string;
+  requestDigest: string;
+  traceId: string;
   runId: string | null;
-  error: string | null;
+  error: ScheduleJobError | null;
+  cancellationRequestedAt: string | null;
+  queuedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -454,6 +549,39 @@ export interface ScheduleJobResponse {
 export interface ScheduleJobListResponse {
   jobs: ScheduleJobSummary[];
 }
+
+export const userRoleSchema = z.enum(["admin", "operator", "teacher", "student"]);
+
+export const userSummarySchema = z.object({
+  id: z.string().min(1),
+  username: z.string().min(1),
+  displayName: z.string().min(1),
+  active: z.boolean(),
+  roles: z.array(userRoleSchema),
+}).strict();
+
+export const sessionSummarySchema = z.object({
+  id: z.string().min(1),
+  userId: z.string().min(1),
+  createdAt: z.string().datetime(),
+  expiresAt: z.string().datetime(),
+}).strict();
+
+export const authContextSchema = z.object({
+  user: userSummarySchema,
+  session: sessionSummarySchema,
+}).strict();
+
+export const loginRequestSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1),
+}).strict();
+
+export type UserRole = z.infer<typeof userRoleSchema>;
+export type UserSummary = z.infer<typeof userSummarySchema>;
+export type SessionSummary = z.infer<typeof sessionSummarySchema>;
+export type AuthContext = z.infer<typeof authContextSchema>;
+export type LoginRequest = z.infer<typeof loginRequestSchema>;
 
 export interface PublishedScheduleNotification {
   id: string;

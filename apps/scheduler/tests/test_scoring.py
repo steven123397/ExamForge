@@ -155,6 +155,55 @@ def test_teacher_consecutive_invigilation_adds_weighted_penalty():
     assert "t1" in item.message
 
 
+def test_cross_day_adjacent_indices_do_not_add_consecutive_penalties():
+    data = make_schedule_input()
+    data.constraint_profile.soft_weights["teacher_consecutive_invigilation"] = 60
+
+    score = calculate_score(
+        data,
+        (
+            ScheduledExam("e1", "r2", "s2", ("t1",)),
+            ScheduledExam("e2", "r2", "s3", ("t1",)),
+        ),
+    )
+
+    assert all(
+        item.rule not in {
+            "student_consecutive_exam",
+            "teacher_consecutive_invigilation",
+        }
+        for item in score.soft_penalty_items
+    )
+
+
+def test_same_day_non_adjacent_indices_do_not_add_consecutive_penalties():
+    data = make_schedule_input()
+    data = replace(
+        data,
+        time_slots=tuple(
+            replace(slot, period_index=2) if slot.id == "s2" else slot
+            for slot in data.time_slots
+        ),
+        constraint_profile=replace(
+            data.constraint_profile,
+            soft_weights={
+                "student_consecutive_exam": 80,
+                "teacher_consecutive_invigilation": 60,
+            },
+        ),
+    )
+
+    score = calculate_score(
+        data,
+        (
+            ScheduledExam("e1", "r2", "s1", ("t1",)),
+            ScheduledExam("e2", "r2", "s2", ("t1",)),
+        ),
+    )
+
+    assert score.soft_penalty_items == ()
+
+
 def test_schedule_stability_penalizes_room_slot_and_teacher_changes():
     data = make_schedule_input()
     data = replace(

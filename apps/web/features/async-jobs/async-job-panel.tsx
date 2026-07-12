@@ -1,14 +1,21 @@
 import { Play } from "lucide-react";
 import type { ScheduleJobSummary } from "@examforge/shared";
 import type { LoadState } from "../../components/shared/load-state";
+import { PanelQueryError } from "../../components/shared/panel-query-error";
 
 export function AsyncJobPanel({
   jobs,
   jobState,
+  historyError,
+  historyRetrying,
+  onRetryHistory,
   onCreateJob,
 }: {
   jobs: ScheduleJobSummary[];
   jobState: LoadState;
+  historyError: boolean;
+  historyRetrying: boolean;
+  onRetryHistory(): Promise<unknown>;
   onCreateJob(): Promise<void>;
 }) {
   return (
@@ -27,7 +34,13 @@ export function AsyncJobPanel({
         <span>{jobs[0]?.status ?? "无后台作业"}</span>
       </div>
       <div className="job-list">
-        {jobs.slice(0, 4).map((job) => (
+        {historyError ? (
+          <PanelQueryError
+            message="异步作业历史读取失败。"
+            retrying={historyRetrying}
+            onRetry={onRetryHistory}
+          />
+        ) : jobs.slice(0, 4).map((job) => (
           <article key={job.id}>
             <div>
               <strong>{job.status}</strong>
@@ -38,7 +51,7 @@ export function AsyncJobPanel({
             </div>
           </article>
         ))}
-        {!jobs.length ? <p className="muted">后台作业会显示队列、运行进度和生成的运行版本。</p> : null}
+        {!historyError && !jobs.length ? <p className="muted">后台作业会显示队列、运行进度和生成的运行版本。</p> : null}
       </div>
     </div>
   );

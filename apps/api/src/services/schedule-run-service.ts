@@ -5,6 +5,7 @@ import {
 } from "@examforge/shared";
 import type { PlatformRepository } from "../repository.js";
 import type { SchedulerClient } from "../scheduler-client.js";
+import { createHash, randomUUID } from "node:crypto";
 
 export type DeferredTask = () => Promise<void>;
 export type DeferScheduleTask = (task: DeferredTask) => void;
@@ -12,6 +13,11 @@ export type ScheduleRunOverrides = Pick<
   ScheduleInput,
   "fixed_assignments" | "reschedule_context"
 >;
+
+export interface ScheduleJobRequestContext {
+  idempotencyKey?: string;
+  traceId?: string;
+}
 
 export class ScheduleRunService {
   constructor(
@@ -62,10 +68,24 @@ export class ScheduleRunService {
     };
   }
 
-  async createScheduleJob(overrides: ScheduleRunOverrides) {
-    const job = await this.repository.createScheduleJob();
-    this.defer(() => this.executeScheduleJob(job.id, overrides));
-    return job;
+  async createScheduleJob(
+    overrides: ScheduleRunOverrides,
+    context: ScheduleJobRequestContext = {},
+  ) {
+    const referenceData = await this.repository.getReferenceData();
+    const requestDigest = createHash("sha256")
+      .update(JSON.stringify(overrides))
+      .digest("hex");
+    const result = await this.repository.createScheduleJob({
+      batchId: referenceData.batch.id,
+      idempotencyKey: context.idempotencyKey ?? `job-request-${randomUUID()}`,
+      requestDigest,
+      traceId: context.traceId ?? `trace-${randomUUID()}`,
+    });
+    if (result.created) {
+      this.defer(() => this.executeScheduleJob(result.job.id, overrides));
+    }
+    return result.job;
   }
 
   listScheduleJobs() {
@@ -81,30 +101,29 @@ export class ScheduleRunService {
   }
 
   private async executeScheduleJob(id: string, overrides: ScheduleRunOverrides) {
-    const current = await this.repository.getScheduleJob(id);
-    if (!current) {
-      return;
-    }
-    await this.repository.updateScheduleJob(id, {
-      status: "running",
+    const started = await this.repository.transitionScheduleJob(id, {
+      to: "running",
       progress: 35,
     });
+    if (started.resolution !== "apply") {
+      return;
+    }
     try {
       const referenceData = await this.repository.getReferenceData();
       const result = await this.scheduler.solve(
         withScheduleOverrides(referenceData.scheduleInput, overrides),
       );
-      const response = await this.repository.createScheduleRun(result);
-      await this.repository.updateScheduleJob(id, {
-        status: "completed",
-        progress: 100,
-        runId: response.run.id,
-      });
+      await this.repository.completeScheduleJob(id, result);
     } catch (error) {
-      await this.repository.updateScheduleJob(id, {
-        status: "failed",
+      await this.repository.transitionScheduleJob(id, {
+        to: "failed",
         progress: 100,
-        error: error instanceof Error ? error.message : "Schedule job failed.",
+        error: {
+          category: "scheduler",
+          code: "schedule_job_execution_failed",
+          message: error instanceof Error ? error.message : "Schedule job failed.",
+          retryable: true,
+        },
       });
     }
   }

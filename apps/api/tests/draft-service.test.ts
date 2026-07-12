@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { ScheduleInput, ScheduleResult } from "@examforge/shared";
 import { InMemoryPlatformRepository } from "../src/repository.js";
 import { DraftService } from "../src/services/draft-service.js";
+import { buildCompleteScheduleResult } from "./test-fixtures.js";
 
 describe("draft service", () => {
   it("rejects updates to drafts that are no longer editable", async () => {
@@ -90,7 +90,9 @@ describe("draft service", () => {
 async function createDraftFixture() {
   const repository = new InMemoryPlatformRepository();
   const referenceData = await repository.getReferenceData();
-  const run = await repository.createScheduleRun(buildResult(referenceData.scheduleInput));
+  const run = await repository.createScheduleRun(
+    buildCompleteScheduleResult(referenceData.scheduleInput),
+  );
   const service = new DraftService(repository);
   const draft = await service.createFromRun(run.run.id);
   assert.ok(draft);
@@ -98,38 +100,5 @@ async function createDraftFixture() {
     repository,
     service,
     draftId: draft.draft.id,
-  };
-}
-
-function buildResult(input: ScheduleInput): ScheduleResult {
-  return {
-    assignments: [
-      {
-        exam_task_id: "e-data-structures",
-        room_id: "r-101",
-        time_slot_id: "s-001",
-        teacher_ids: [input.teachers[0].id],
-      },
-      {
-        exam_task_id: "e-database",
-        room_id: "r-lab-1",
-        time_slot_id: "s-003",
-        teacher_ids: [input.teachers[1].id],
-      },
-    ],
-    conflicts: [],
-    score: {
-      total_score: 94,
-      hard_violation_count: 0,
-      soft_penalty_items: [],
-    },
-    statistics: {
-      status: "feasible",
-      elapsed_ms: 22,
-      exam_count: input.exam_tasks.length,
-      room_count: input.rooms.length,
-      slot_count: input.time_slots.length,
-      attempted_assignments: 12,
-    },
   };
 }

@@ -214,6 +214,13 @@ def validate_schedule_input(schedule_input: ScheduleInput) -> tuple[str, ...]:
         if slot.period_index < 0:
             errors.append(f"time_slot {slot.id} period_index must be >= 0")
 
+    for teacher in schedule_input.teachers:
+        for slot_id in teacher.unavailable_slot_ids:
+            if slot_id not in slot_ids:
+                errors.append(
+                    f"teacher {teacher.id} references missing unavailable_slot_id {slot_id}"
+                )
+
     for task in schedule_input.exam_tasks:
         if task.expected_count <= 0:
             errors.append(f"exam_task {task.id} expected_count must be > 0")

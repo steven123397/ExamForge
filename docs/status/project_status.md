@@ -3,53 +3,56 @@
 ## 当前结论
 
 - 日期：2026-07-12。
-- 当前版本：第四版四个阶段全部完成；第四阶段实现提交为 `533619d`，文档收尾见包含本状态更新的提交。
-- 当前没有活动计划；历史阶段与验证明细维护在 `docs/plan/history_plan.md`，审查问题维护在 `docs/status/code_review_status.md`。
+- 当前版本：第五版第一阶段已经完成并归档，当前唯一活动计划为 `docs/plan/第五版第二阶段计划.md`。
+- 第一阶段建立了可靠作业与事件数据合同、关系化单一事实源、真实本地身份会话、四角色权限边界和前端信息架构基础；尚未开始 Scheduler 服务化、可靠队列或实时事件。
+- 代码审查问题仍为 4 项暂缓：P2 的 CR-002、CR-007、CR-008，以及 P3 的 CR-003；当前无待解决 P0/P1。详细问题只维护在 `docs/status/code_review_status.md`。
 
 ## 当前实现基线
 
-### 调度器与重排
+### 调度器与作业
 
-- room-slot 与教师分配采用顺序二阶段 CP-SAT；教师模型覆盖固定教师、不可用时间、同时间唯一、最大负载、负载极差和连续监考。
-- `reschedule_context` 已贯通 shared、API 同步/异步入口、Python CLI 和 solver；冻结考试保持 room、slot、teacher，可移动考试受稳定性目标影响。
-- 报告输出 frozen、retained 和 changed 摘要；根脚本提供固定 seed 的 50、100、150 场 benchmark。
-- 草稿锁定可由 API service 自动转换为重排上下文；Web 可以生成独立重排运行并展示冻结、保留和变化摘要，来源草稿不被原地修改。
+- room-slot 与教师分配采用顺序二阶段 CP-SAT，覆盖固定安排、教师不可用、同时间唯一、最大负载、负载极差和同日相邻连续监考。
+- `reschedule_context` 已贯通 shared、API、Python CLI 和 solver；固定 seed 提供 50、100、150 场 benchmark。
+- 作业状态统一为 `queued`、`running`、`succeeded`、`failed`、`cancelled`、`timed_out`；`infeasible` 是 `succeeded` 下的业务结果。
+- PostgreSQL 持久化作业、尝试、事件和 outbox；请求摘要、幂等键、条件状态转换和唯一约束防止重复入队、重复完成和终态竞争。
+- 当前 API 仍以进程内执行器调用 Python scheduler CLI，Web 仍以轮询读取作业状态；FastAPI/HTTP 调用由第二阶段实施，Redis/BullMQ/Worker/SSE 由第三阶段实施。
 
-### 平台与数据
+### 数据、身份与 Web
 
-- Web、API、PostgreSQL 和调度器已形成排考、草稿治理、发布、查询、通知和导出闭环。
-- 排考、草稿和发布治理进入独立 service/use-case 层；PostgreSQL 关联表优先读取，JSONB 暂作兼容回退。
-- 同一草稿通过 PostgreSQL advisory lock 串行化，并以终态 CAS 防止重复发布和终态后修改。
-- Compose 已覆盖 PostgreSQL、迁移、seed、API、容器内 scheduler 和 Web；`/health` 与真实仓储 `/ready` 分离，完整演示支持一键启动、重置、烟测和清理。
+- 教师不可用、考试学生群体、正式监考和草稿监考四类关系只使用关联表；旧 JSONB 关系列已由顺序迁移删除。
+- PostgreSQL advisory lock 和终态 CAS 继续保护同一草稿的调整、校验、锁定、重排、发布和废弃。
+- 本地用户、角色、用户角色和服务端会话已持久化；密码使用 scrypt 随机盐，会话只存摘要，Cookie 使用 HttpOnly/SameSite 并集中配置 Secure、过期和可信 Origin。
+- API 根据真实会话执行管理员、排考员、教师、学生 RBAC，关键审计记录真实 userId 与角色快照；不存在匿名默认管理员回退。
+- Web 使用 Cookie 恢复会话并统一处理 401/403/退出缓存；管理员和排考员使用运营台，教师和学生使用受限的已发布查询门户。
+- `docs/design/第五版前端信息架构与视觉规范.md` 固定后续路由、角色导航、设计 token、状态、响应式与视觉验收边界；第一阶段只整理现有原型基础样式，没有完成第五阶段的页面级重构。
 
-### CI 与交付
+### CI 与演示
 
-- `.github/workflows/ci.yml` 建立快速、PostgreSQL 和 Compose/Playwright 三层门禁；快速门禁覆盖全部 `push`、PR 和手动触发，完整门禁覆盖 `main` 与手动触发。
-- 治理脚本检查禁止跟踪的产物、中文 Conventional Commits 和真实提交区间空白错误，并通过 7 个临时 Git 仓库场景验证规则行为。
-- 工作流固定官方 action 发布 SHA，使用只读权限、分支级并发取消和作业超时；E2E 失败时收集 Compose 与 Playwright 诊断，保留 7 天后自动过期。
+- GitHub Actions 继续提供快速、PostgreSQL/迁移和 Compose/Playwright 三层门禁；治理脚本检查禁止跟踪产物、中文 Conventional Commits 和提交区间空白错误。
+- Compose 继续按 PostgreSQL、迁移、seed、API、Web 启动；演示账户密码必须显式注入，未配置时不会生成默认生产账户。
+- demo smoke 使用真实 Cookie 会话完成主链，并验证 API 重启后 PostgreSQL 中的运行记录仍可读取。
 
-## 最新验证基线
+## 第一阶段收尾验证
 
-- `npm run test:ci`：CI 治理脚本 `7 passed`；`npm run check:ci` 在当前仓库通过。
-- `actionlint 1.7.12 .github/workflows/ci.yml`：工作流 YAML、表达式和作业依赖静态检查通过。
-- [GitHub Actions CI #1](https://github.com/steven123397/ExamForge/actions/runs/29181104234)：提交 `533619d` 的快速、PostgreSQL 与迁移、Compose 与 Playwright 三类托管门禁均成功。
-- `npm run test:scheduler`：scheduler `73 passed`。
-- `npm run benchmark:scheduler`：50、100、150 场均为 `feasible`、零冲突；最新耗时为 305、437、732 ms，教师负载极差均为 1。
-- `npm run typecheck`：通过。
-- `LOG_LEVEL=silent npm test`：API `54 passed`。
-- `npm run build`：通过。
-- 隔离 PostgreSQL 16 验证：迁移测试 `4 passed`；8 个迁移首次全部应用、第二次应用数为 0，关键表、约束和关联表回填检查无缺失；正式迁移入口返回 `applied: []`；集成测试 `9 passed`。
-- `npm run test:e2e`：本地自启内存服务 Playwright `3 passed`，默认不复用未知旧服务。
-- 隔离 `npm run test:e2e:demo`：Node.js 22 镜像从干净依赖完成构建，真实 Compose/PostgreSQL Playwright `3 passed`；前置 smoke 为 `storage=postgres`、6 条安排、硬冲突 0，并通过 API 重启持久化检查；测试项目容器、网络和卷已清理。
+- `npm run test:ci`：`7 passed`；`npm run check:ci`、`npm run typecheck` 和 `npm run build` 通过。
+- `LOG_LEVEL=silent npm test`：shared `9 passed`，API/服务测试共 `70 passed`。
+- `npm run test:scheduler`：`78 passed`。
+- `npm run benchmark:scheduler`：50、100、150 场均 feasible、0 冲突，耗时 419、767、1199 ms，教师负载极差均为 1。
+- 可丢弃 PostgreSQL 16：迁移测试 `5 passed`，12 个迁移首次全部应用、第二次应用 0；迁移检查确认关键表/约束无缺失、关系无双向不一致、旧关系列为空、作业状态枚举正确；正式迁移入口返回 `applied: []`；真实集成测试 `13 passed`。
+- 独立 Compose：smoke 完成真实登录、排考、持久化读取和 API 重启检查；Chromium E2E `17 passed`，覆盖错误密码、退出、Cookie 失效、管理员主链、排考员允许操作和教师/学生写请求 403。
+- 视觉检查：登录、1600 px 管理员全页和 375 px 教师门户截图均非空；桌面和移动页面宽度等于视口，移动端未发现可见溢出元素。
+- 最终隔离 Compose 回归再次通过：smoke 使用真实会话完成排考并验证 API 重启后的 PostgreSQL 持久化读取，Chromium E2E `17 passed`；测试容器、网络和卷均已清理，用户原有演示栈未修改。
 
 ## 当前边界
 
 - 规模 profile 显式关闭连续监考软目标；该目标由专项测试覆盖，未取得大规模全局最优性能结论。
 - 固定 100 分制在大规模下会因累计软惩罚饱和到 0，暂不支持跨批次质量比较。
-- Bearer token 鉴权、API 进程内异步执行、HTTP 轮询和 scheduler JSON CLI 仍是演示级边界；本阶段只把 CLI 运行环境封装进 API 镜像，没有引入独立 scheduler 服务。
-- JSONB 兼容字段尚未删除。
-- CI 已取得 GitHub 托管 runner 成功记录；当前没有配置分支保护，也未引入发布、镜像推送或生产部署流水线。
+- 作业事件和 outbox 已持久化，但尚无 Publisher、可靠队列、独立 Worker、崩溃恢复和 SSE 补发。
+- scheduler 尚未提供独立 FastAPI/OpenAPI 服务，API 容器仍包含 CLI 调用所需的 Python 运行时。
+- CI 尚未配置自动发布、镜像推送、分支保护或生产部署流水线。
 
 ## 下一步
 
-1. 执行第四版完成后的全量代码审查，发现写入 `docs/status/code_review_status.md`，修复另建计划。
+1. 等待用户确认第五版第一阶段结果，不自动开始第二阶段。
+2. 确认后按 `docs/plan/第五版第二阶段计划.md` 顺序实施 FastAPI、OpenAPI、API HTTP 客户端、独立 scheduler 镜像和故障合同，并在阶段末重评 CR-008。
+3. CR-007 继续留到第五版第三阶段，与 Redis/BullMQ、Outbox Publisher、独立 Worker 和 SSE 成组处理；CR-002、CR-003 按各自重评条件持续跟踪。

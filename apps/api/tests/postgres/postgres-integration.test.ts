@@ -9,7 +9,12 @@ import {
   examTasks,
   examTaskStudentGroups,
   runMigrations,
+  outboxEvents,
+  scheduleJobAttempts,
+  scheduleJobEvents,
   scheduleJobs,
+  scheduleRuns,
+  sessions,
   scheduledExamInvigilators,
   scheduledExams,
   seedDemoData,
@@ -21,10 +26,17 @@ import type { ScheduleInput, ScheduleResult } from "@examforge/shared";
 import { eq } from "drizzle-orm";
 import { createApp } from "../../src/app.js";
 import { PostgresPlatformRepository } from "../../src/postgres-repository.js";
+import { hashSessionToken } from "../../src/auth/security.js";
 import type { SchedulerClient } from "../../src/scheduler-client.js";
+import {
+  buildCompleteScheduleResult,
+  seedTestAuth,
+  testAuthHeaders,
+} from "../test-fixtures.js";
 
-const adminHeaders = { authorization: "Bearer examforge-admin-token" };
-const operatorHeaders = { authorization: "Bearer examforge-operator-token" };
+const adminHeaders = testAuthHeaders.admin;
+const operatorHeaders = testAuthHeaders.operator;
+const viewerHeaders = testAuthHeaders.student;
 const scheduleDraftLockNamespace = 20_260_711;
 
 const testDatabaseUrl = getTestDatabaseUrl();
@@ -42,6 +54,7 @@ describe("PostgreSQL platform integration", () => {
     await resetDatabase(client);
     await runMigrations(client);
     await seedDemoData(client);
+    await seedTestAuth(new PostgresPlatformRepository(client));
   });
 
   afterEach(async () => {
@@ -64,7 +77,11 @@ describe("PostgreSQL platform integration", () => {
       storage: "postgres",
     });
 
-    const dashboardResponse = await app.inject({ method: "GET", url: "/api/dashboard" });
+    const dashboardResponse = await app.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: viewerHeaders,
+    });
     assert.equal(dashboardResponse.statusCode, 200);
     assert.equal(dashboardResponse.json().metrics.examTaskCount, 6);
 
@@ -92,43 +109,120 @@ describe("PostgreSQL platform integration", () => {
       dbClient.db.select().from(auditEvents).where(eq(auditEvents.entityId, created.run.id)),
     ]);
 
-    assert.equal(assignmentRows.length, 2);
-    assert.equal(invigilatorRows.length, 2);
+    assert.equal(assignmentRows.length, 6);
+    assert.equal(invigilatorRows.length, 7);
     assert.equal(conflictRows.length, 1);
     assert.ok(auditRows.some((event) => event.action === "schedule_run.created"));
 
     const readResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-runs/${created.run.id}`,
+      headers: viewerHeaders,
     });
     assert.equal(readResponse.statusCode, 200);
-    assert.equal(readResponse.json().result.assignments.length, 2);
+    assert.equal(readResponse.json().result.assignments.length, 6);
     assert.equal(readResponse.json().result.conflicts.length, 1);
 
     const filteredAudit = await repository.listAuditEvents({
       entityType: "schedule_run",
       entityId: created.run.id,
-      actor: "system",
+      actor: "operator",
       limit: 50,
     });
     assert.deepEqual(
       filteredAudit.events.map((event) => event.entityId),
       [created.run.id],
     );
+    assert.equal(filteredAudit.events[0]?.actorUserId, "user-operator");
+    assert.deepEqual(filteredAudit.events[0]?.actorRoles, ["operator"]);
 
     await app.close();
     client = null;
   });
 
-  it("builds scheduler reference data from association tables before JSONB compatibility fields", async () => {
+  it("persists login sessions, rejects expired or disabled access, and revokes replay", async () => {
     const dbClient = requireClient();
-    await dbClient.db.update(teachers).set({
-      unavailableSlotIds: [],
-    }).where(eq(teachers.id, "t-zhang"));
-    await dbClient.db.update(examTasks).set({
-      studentGroupIds: [],
-    }).where(eq(examTasks.id, "e-data-structures"));
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+    const loginResponse = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: "http://localhost:3000" },
+      payload: { username: "operator", password: "operator-password" },
+    });
+    assert.equal(loginResponse.statusCode, 200);
+    assert.equal(loginResponse.body.includes("passwordHash"), false);
+    assert.equal(loginResponse.body.includes("tokenDigest"), false);
+    const setCookie = loginResponse.headers["set-cookie"];
+    const cookie = (Array.isArray(setCookie) ? setCookie[0] : setCookie)?.split(";")[0];
+    assert.ok(cookie);
+    const rawToken = cookie.slice(cookie.indexOf("=") + 1);
+    const persisted = await dbClient.db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.tokenDigest, hashSessionToken(rawToken)));
+    assert.equal(persisted.length, 1);
+    assert.notEqual(persisted[0].tokenDigest, rawToken);
 
+    const meResponse = await app.inject({
+      method: "GET",
+      url: "/api/auth/me",
+      headers: { cookie },
+    });
+    assert.equal(meResponse.statusCode, 200);
+    assert.deepEqual(meResponse.json().user.roles, ["operator"]);
+
+    const wrongPassword = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: "http://localhost:3000" },
+      payload: { username: "operator", password: "wrong" },
+    });
+    assert.equal(wrongPassword.statusCode, 401);
+    const disabled = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: "http://localhost:3000" },
+      payload: { username: "disabled", password: "disabled-password" },
+    });
+    assert.equal(disabled.statusCode, 403);
+
+    const expiredToken = "expired-postgres-session";
+    await repository.createAuthSession({
+      id: "expired-postgres-session",
+      userId: "user-student",
+      tokenDigest: hashSessionToken(expiredToken),
+      createdAt: "2020-01-01T00:00:00.000Z",
+      expiresAt: "2020-01-02T00:00:00.000Z",
+      userAgent: null,
+      ipAddress: null,
+    });
+    const expired = await app.inject({
+      method: "GET",
+      url: "/api/auth/me",
+      headers: { cookie: `examforge_session=${expiredToken}` },
+    });
+    assert.equal(expired.statusCode, 401);
+
+    const logout = await app.inject({
+      method: "POST",
+      url: "/api/auth/logout",
+      headers: { origin: "http://localhost:3000", cookie },
+    });
+    assert.equal(logout.statusCode, 204);
+    const replay = await app.inject({
+      method: "GET",
+      url: "/api/auth/me",
+      headers: { cookie },
+    });
+    assert.equal(replay.statusCode, 401);
+
+    await app.close();
+    client = null;
+  });
+
+  it("builds scheduler reference data from association tables", async () => {
+    const dbClient = requireClient();
     const repository = new PostgresPlatformRepository(dbClient);
     const referenceData = await repository.getReferenceData();
 
@@ -160,7 +254,30 @@ describe("PostgreSQL platform integration", () => {
     client = null;
   });
 
-  it("reads schedule and draft invigilators from association tables before JSONB compatibility fields", async () => {
+  it("maps missing teacher unavailable slots to a stable integrity error", async () => {
+    const app = createApp({
+      repository: new PostgresPlatformRepository(requireClient()),
+      scheduler: new PostgresDraftScheduler(),
+    });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: "/api/teachers/t-zhang/unavailable-slots",
+      headers: operatorHeaders,
+      payload: {
+        unavailable_slot_ids: ["missing-slot"],
+      },
+    });
+
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().error, "reference_integrity_violation");
+    assert.doesNotMatch(response.body, /Failed query|teacher_unavailable_slots|insert into/i);
+
+    await app.close();
+    client = null;
+  });
+
+  it("reads schedule and draft invigilators from association tables", async () => {
     const dbClient = requireClient();
     const app = createApp({
       repository: new PostgresPlatformRepository(dbClient),
@@ -190,16 +307,10 @@ describe("PostgreSQL platform integration", () => {
     assert.equal(draftResponse.statusCode, 201);
     const draft = draftResponse.json();
 
-    await dbClient.db.update(scheduledExams).set({
-      teacherIds: [],
-    }).where(eq(scheduledExams.examTaskId, "e-data-structures"));
-    await dbClient.db.update(draftScheduledExams).set({
-      teacherIds: [],
-    }).where(eq(draftScheduledExams.examTaskId, "e-data-structures"));
-
     const runDetailResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-runs/${run.run.id}`,
+      headers: viewerHeaders,
     });
     assert.equal(runDetailResponse.statusCode, 200);
     const runAssignment = runDetailResponse.json().result.assignments.find(
@@ -221,6 +332,7 @@ describe("PostgreSQL platform integration", () => {
     const draftDetailResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}`,
+      headers: viewerHeaders,
     });
     assert.equal(draftDetailResponse.statusCode, 200);
     const draftAssignment = draftDetailResponse.json().assignments.find(
@@ -231,6 +343,7 @@ describe("PostgreSQL platform integration", () => {
     const comparisonResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}/compare`,
+      headers: viewerHeaders,
     });
     assert.equal(comparisonResponse.statusCode, 200);
     assert.equal(comparisonResponse.json().summary.changedFromSource, 0);
@@ -250,7 +363,7 @@ describe("PostgreSQL platform integration", () => {
     client = null;
   });
 
-  it("falls back to JSONB compatibility fields when association rows are absent", async () => {
+  it("does not synthesize relationship data when association rows are absent", async () => {
     const dbClient = requireClient();
     const repository = new PostgresPlatformRepository(dbClient);
     const app = createApp({
@@ -287,11 +400,6 @@ describe("PostgreSQL platform integration", () => {
       dbClient.db.select().from(scheduledExams).where(eq(scheduledExams.examTaskId, "e-data-structures")),
       dbClient.db.select().from(draftScheduledExams).where(eq(draftScheduledExams.examTaskId, "e-data-structures")),
     ]);
-    assert.ok(teacherRow.unavailableSlotIds.length > 0);
-    assert.ok(taskRow.studentGroupIds.length > 0);
-    assert.ok(scheduledExamRow.teacherIds.length > 0);
-    assert.ok(draftExamRow.teacherIds.length > 0);
-
     await Promise.all([
       dbClient.db.delete(teacherUnavailableSlots).where(eq(teacherUnavailableSlots.teacherId, teacherRow.id)),
       dbClient.db.delete(examTaskStudentGroups).where(eq(examTaskStudentGroups.examTaskId, taskRow.id)),
@@ -302,31 +410,31 @@ describe("PostgreSQL platform integration", () => {
     const referenceData = await repository.getReferenceData();
     const teacher = referenceData.scheduleInput.teachers.find((item) => item.id === teacherRow.id);
     const task = referenceData.scheduleInput.exam_tasks.find((item) => item.id === taskRow.id);
-    assert.deepEqual(teacher?.unavailable_slot_ids, teacherRow.unavailableSlotIds);
-    assert.deepEqual(task?.student_group_ids, taskRow.studentGroupIds);
+    assert.deepEqual(teacher?.unavailable_slot_ids, []);
+    assert.deepEqual(task?.student_group_ids, []);
 
     const runDetail = await repository.getScheduleRun(run.run.id);
     const runAssignment = runDetail?.result.assignments.find(
       (assignment) => assignment.exam_task_id === scheduledExamRow.examTaskId,
     );
-    assert.deepEqual(runAssignment?.teacher_ids, scheduledExamRow.teacherIds);
+    assert.deepEqual(runAssignment?.teacher_ids, []);
 
     const teacherScheduleResponse = await app.inject({
       method: "GET",
       url: `/api/published-schedule/teachers/${teacherRow.id}`,
     });
     assert.equal(teacherScheduleResponse.statusCode, 200);
-    assert.ok(teacherScheduleResponse.json().assignments.some(
+    assert.equal(teacherScheduleResponse.json().assignments.some(
       (item: { assignment: { exam_task_id: string } }) => (
         item.assignment.exam_task_id === scheduledExamRow.examTaskId
       ),
-    ));
+    ), false);
 
     const draftDetail = await repository.getScheduleDraft(draft.draft.id);
     const draftAssignment = draftDetail?.assignments.find(
       (assignment) => assignment.exam_task_id === draftExamRow.examTaskId,
     );
-    assert.deepEqual(draftAssignment?.teacher_ids, draftExamRow.teacherIds);
+    assert.deepEqual(draftAssignment?.teacher_ids, []);
 
     const comparison = await repository.compareScheduleDraft(draft.draft.id);
     assert.equal(comparison?.summary.changedFromSource, 0);
@@ -361,7 +469,7 @@ describe("PostgreSQL platform integration", () => {
     const initialDraftInvigilators = await dbClient.db
       .select()
       .from(draftExamInvigilators);
-    assert.equal(initialDraftInvigilators.length, 2);
+    assert.equal(initialDraftInvigilators.length, 7);
 
     const conflictResponse = await app.inject({
       method: "PATCH",
@@ -415,14 +523,36 @@ describe("PostgreSQL platform integration", () => {
     });
     assert.equal(publishResponse.statusCode, 200);
     assert.equal(publishResponse.json().batch.status, "published");
-    assert.equal(publishResponse.json().result.assignments.length, 2);
+    assert.equal(publishResponse.json().result.assignments.length, 6);
     const publishedInvigilators = await dbClient.db
       .select()
       .from(scheduledExamInvigilators);
-    assert.equal(publishedInvigilators.length, 4);
+    assert.equal(publishedInvigilators.length, 14);
 
     await app.close();
     client = null;
+  });
+
+  it("rejects incomplete PostgreSQL runs and drafts from publication", async () => {
+    const repository = new PostgresPlatformRepository(requireClient());
+    const referenceData = await repository.getReferenceData();
+    const sourceRun = await repository.createScheduleRun(
+      buildIncompleteScheduleResult(referenceData.scheduleInput),
+    );
+
+    const runPublishResult = await repository.publishScheduleRun(sourceRun.run.id);
+    assert.equal(runPublishResult, "not_publishable");
+
+    const draft = await repository.createScheduleDraftFromRun(sourceRun.run.id);
+    assert.ok(draft);
+    assert.equal(draft.draft.status, "blocked");
+    assert.equal(
+      draft.conflicts.filter((conflict) => conflict.type === "exam_task_unassigned").length,
+      referenceData.scheduleInput.exam_tasks.length,
+    );
+
+    const draftPublishResult = await repository.publishScheduleDraft(draft.draft.id);
+    assert.equal(draftPublishResult, "conflict");
   });
 
   it("allows only one concurrent PostgreSQL draft publication", async () => {
@@ -561,35 +691,82 @@ describe("PostgreSQL platform integration", () => {
     client = null;
   });
 
-  it("persists schedule job state transitions and run links", async () => {
+  it("persists job creation with an event and pending outbox in one transaction", async () => {
     const dbClient = requireClient();
     const repository = new PostgresPlatformRepository(dbClient);
     const referenceData = await repository.getReferenceData();
-    const job = await repository.createScheduleJob();
+    const command = {
+      batchId: referenceData.batch.id,
+      idempotencyKey: "postgres-idempotent-job",
+      requestDigest: "a".repeat(64),
+      traceId: "trace-postgres-idempotent-job",
+    };
+    const [first, second] = await Promise.all([
+      repository.createScheduleJob(command),
+      repository.createScheduleJob(command),
+    ]);
+    assert.equal(first.job.id, second.job.id);
+    assert.equal(Number(first.created) + Number(second.created), 1);
+    const job = first.job;
     assert.equal(job.status, "queued");
+    assert.equal(job.batchId, referenceData.batch.id);
+    assert.equal(job.idempotencyKey, command.idempotencyKey);
 
-    const running = await repository.updateScheduleJob(job.id, {
-      status: "running",
+    assert.equal((await dbClient.db.select().from(scheduleJobEvents)).length, 1);
+    const pendingOutbox = await dbClient.db.select().from(outboxEvents);
+    assert.equal(pendingOutbox.length, 1);
+    assert.equal(pendingOutbox[0].publishedAt, null);
+
+    const running = await repository.transitionScheduleJob(job.id, {
+      to: "running",
       progress: 50,
     });
-    assert.equal(running?.status, "running");
-    assert.equal(running?.progress, 50);
+    assert.equal(running.resolution, "apply");
+    assert.equal(running.job?.status, "running");
+    assert.equal((await dbClient.db.select().from(scheduleJobAttempts)).length, 1);
 
-    const run = await repository.createScheduleRun(buildScheduleResult(referenceData.scheduleInput));
-    const completed = await repository.updateScheduleJob(job.id, {
-      status: "completed",
-      progress: 100,
-      runId: run.run.id,
-    });
-    assert.equal(completed?.status, "completed");
-    assert.equal(completed?.runId, run.run.id);
+    const result = buildScheduleResult(referenceData.scheduleInput);
+    const [firstCompletion, duplicateCompletion] = await Promise.all([
+      repository.completeScheduleJob(job.id, result),
+      repository.completeScheduleJob(job.id, result),
+    ]);
+    assert.deepEqual(
+      [firstCompletion.resolution, duplicateCompletion.resolution].sort(),
+      ["apply", "idempotent"],
+    );
+    assert.equal(firstCompletion.job?.runId, duplicateCompletion.job?.runId);
+    assert.equal((await dbClient.db.select().from(scheduleRuns)).length, 1);
 
     const [jobRow] = await dbClient.db.select().from(scheduleJobs).where(eq(scheduleJobs.id, job.id));
-    assert.equal(jobRow.runId, run.run.id);
+    assert.equal(jobRow.runId, firstCompletion.job?.runId);
 
     const jobList = await repository.listScheduleJobs();
     assert.deepEqual(jobList.jobs.map((item) => item.id), [job.id]);
 
+    await repository.close();
+    client = null;
+  });
+
+  it("allows only one concurrent terminal transition", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const referenceData = await repository.getReferenceData();
+    const created = await repository.createScheduleJob({
+      batchId: referenceData.batch.id,
+      idempotencyKey: "postgres-terminal-race",
+      requestDigest: "b".repeat(64),
+      traceId: "trace-postgres-terminal-race",
+    });
+    await repository.transitionScheduleJob(created.job.id, { to: "running", progress: 35 });
+
+    const results = await Promise.all([
+      repository.transitionScheduleJob(created.job.id, { to: "cancelled", progress: 100 }),
+      repository.transitionScheduleJob(created.job.id, { to: "timed_out", progress: 100 }),
+    ]);
+
+    assert.deepEqual(results.map((result) => result.resolution).sort(), ["apply", "reject"]);
+    const finalJob = await repository.getScheduleJob(created.job.id);
+    assert.ok(finalJob?.status === "cancelled" || finalJob?.status === "timed_out");
     await repository.close();
     client = null;
   });
@@ -695,21 +872,9 @@ async function waitForAdvisoryLockWaiters(
 }
 
 function buildScheduleResult(input: ScheduleInput): ScheduleResult {
+  const result = buildCompleteScheduleResult(input);
   return {
-    assignments: [
-      {
-        exam_task_id: "e-data-structures",
-        room_id: "r-101",
-        time_slot_id: "s-001",
-        teacher_ids: [input.teachers[0].id],
-      },
-      {
-        exam_task_id: "e-database",
-        room_id: "r-lab-1",
-        time_slot_id: "s-003",
-        teacher_ids: [input.teachers[1].id],
-      },
-    ],
+    ...result,
     conflicts: [
       {
         type: "room_utilization_warning",
@@ -720,21 +885,42 @@ function buildScheduleResult(input: ScheduleInput): ScheduleResult {
       },
     ],
     score: {
+      ...result.score,
       total_score: 88,
-      hard_violation_count: 0,
-      soft_penalty_items: [],
     },
     statistics: {
-      status: "partial",
+      ...result.statistics,
       elapsed_ms: 12,
-      exam_count: input.exam_tasks.length,
-      room_count: input.rooms.length,
-      slot_count: input.time_slots.length,
       attempted_assignments: 16,
     },
     report: {
       summary: {
-        status: "partial",
+        status: "feasible",
+      },
+    },
+  };
+}
+
+function buildIncompleteScheduleResult(input: ScheduleInput): ScheduleResult {
+  return {
+    assignments: [],
+    conflicts: [],
+    score: {
+      total_score: 0,
+      hard_violation_count: 1,
+      soft_penalty_items: [],
+    },
+    statistics: {
+      status: "infeasible",
+      elapsed_ms: 1,
+      exam_count: input.exam_tasks.length,
+      room_count: input.rooms.length,
+      slot_count: input.time_slots.length,
+      attempted_assignments: 0,
+    },
+    report: {
+      summary: {
+        status: "infeasible",
       },
     },
   };

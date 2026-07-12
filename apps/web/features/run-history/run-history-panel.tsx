@@ -6,6 +6,8 @@ import type {
   ScheduleRunSummary,
 } from "@examforge/shared";
 import type { LoadState } from "../../components/shared/load-state";
+import { ConfirmationDialog } from "../../components/shared/confirmation-dialog";
+import { PanelQueryError } from "../../components/shared/panel-query-error";
 
 export function RunHistoryPanel({
   runs,
@@ -13,6 +15,9 @@ export function RunHistoryPanel({
   publishedSchedule,
   compareState,
   publishState,
+  historyError,
+  historyRetrying,
+  onRetryHistory,
   onCompare,
   onPublish,
   onCreateDraft,
@@ -23,6 +28,9 @@ export function RunHistoryPanel({
   publishedSchedule: PublishedScheduleResponse | null;
   compareState: LoadState;
   publishState: LoadState;
+  historyError: boolean;
+  historyRetrying: boolean;
+  onRetryHistory(): Promise<unknown>;
   onCompare(baseId: string, targetId: string): Promise<void>;
   onPublish(id: string): Promise<void>;
   onCreateDraft(id: string): Promise<void>;
@@ -30,6 +38,10 @@ export function RunHistoryPanel({
 }) {
   const [baseId, setBaseId] = useState("");
   const [targetId, setTargetId] = useState("");
+  const [confirmation, setConfirmation] = useState<{
+    action: "publish" | "rollback";
+    targetId: string;
+  } | null>(null);
 
   useEffect(() => {
     if (runs.length >= 2) {
@@ -42,9 +54,15 @@ export function RunHistoryPanel({
   }, [runs]);
 
   return (
-    <div className="history-panel">
+    <div className="history-panel" data-testid="run-history-panel">
       <div className="history-list">
-        {runs.slice(0, 6).map((run) => (
+        {historyError ? (
+          <PanelQueryError
+            message="运行历史读取失败。"
+            retrying={historyRetrying}
+            onRetry={onRetryHistory}
+          />
+        ) : runs.slice(0, 6).map((run) => (
           <article key={run.id}>
             <div>
               <strong>{run.status}</strong>
@@ -60,7 +78,7 @@ export function RunHistoryPanel({
               type="button"
               className="mini-button"
               disabled={publishState === "loading"}
-              onClick={() => onPublish(run.id)}
+              onClick={() => setConfirmation({ action: "publish", targetId: run.id })}
             >
               发布
             </button>
@@ -74,7 +92,7 @@ export function RunHistoryPanel({
             </button>
           </article>
         ))}
-        {!runs.length ? <p className="muted">运行排考后展示历史版本。</p> : null}
+        {!historyError && !runs.length ? <p className="muted">运行排考后展示历史版本。</p> : null}
       </div>
 
       <div className="compare-box">
@@ -117,11 +135,34 @@ export function RunHistoryPanel({
           type="button"
           className="secondary-button"
           disabled={!publishedSchedule || publishState === "loading"}
-          onClick={() => onRollback()}
+          onClick={() => publishedSchedule && setConfirmation({
+            action: "rollback",
+            targetId: publishedSchedule.run.id,
+          })}
         >
           回滚发布
         </button>
       </div>
+      {confirmation?.action === "publish" ? (
+        <ConfirmationDialog
+          title="确认发布排考运行"
+          target={confirmation.targetId}
+          description="确认后该运行将成为对外查询、通知和导出的正式排考。"
+          confirmLabel="确认发布"
+          onConfirm={() => onPublish(confirmation.targetId)}
+          onCancel={() => setConfirmation(null)}
+        />
+      ) : null}
+      {confirmation?.action === "rollback" ? (
+        <ConfirmationDialog
+          title="确认回滚发布"
+          target={confirmation.targetId}
+          description="确认后当前正式排考将被撤下，对外发布查询会随之变化。"
+          confirmLabel="确认回滚"
+          onConfirm={onRollback}
+          onCancel={() => setConfirmation(null)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -10,17 +10,24 @@ import {
   examBatches,
   examTaskStudentGroups,
   examTasks,
+  outboxEvents,
   rooms,
   scheduleDrafts,
+  scheduleJobAttempts,
+  scheduleJobEvents,
   scheduleJobs,
   scheduledExamInvigilators,
   scheduledExams,
   scheduleRuns,
+  sessions,
   studentGroups,
   teacherUnavailableSlots,
   teachers,
   timeSlots,
+  userRoles,
+  users,
   type ExamForgeDbClient,
+  type ExamForgeDatabase,
 } from "@examforge/db";
 import {
   type ConstraintProfile,
@@ -43,6 +50,7 @@ import {
   type ScheduleDraftPublishResponse,
   type ScheduleDraftSummary,
   type ScheduleJobSummary,
+  type ScheduleJobStatus,
   type ScheduleRunComparisonResponse,
   type ScheduleRunListResponse,
   type ScheduleRollbackResponse,
@@ -50,18 +58,34 @@ import {
   type ScheduleRunResponse,
   type ScheduleRunSummary,
   type ScheduledExam,
+  type UserRole,
+  resolveScheduleJobTransition,
+  scheduleJobStatusForSolveResult,
 } from "@examforge/shared";
-import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
+import { getCurrentAuthContext } from "./auth/request-context.js";
 import {
   buildDraftComparison,
   buildDraftAdjustmentSuggestions,
   buildDraftScheduleResult,
   buildRunComparison,
+  isScheduleResultPublishable,
   validateDraftAssignments,
   validateReferenceDelete,
   validateReferenceRecord,
+  ScheduleJobIdempotencyConflictError,
+  type CreateScheduleJobCommand,
+  type CreateScheduleJobResult,
+  type AuthSessionRecord,
+  type AuthSessionWithUser,
+  type AuthUserRecord,
+  type CreateAuthSessionCommand,
+  type CreateAuthUserCommand,
   type PlatformRepository,
+  type PublishScheduleRunResult,
+  type ScheduleJobTransitionResult,
+  type TransitionScheduleJobCommand,
 } from "./repository.js";
 
 const scheduleDraftLockNamespace = 20_260_711;
@@ -78,6 +102,7 @@ type ExamTaskRow = typeof examTasks.$inferSelect;
 type DraftRow = typeof scheduleDrafts.$inferSelect;
 type DraftChangeEventRow = typeof draftChangeEvents.$inferSelect;
 type ScheduleJobRow = typeof scheduleJobs.$inferSelect;
+type UserRow = typeof users.$inferSelect;
 
 export class PostgresPlatformRepository implements PlatformRepository {
   readonly storageMode = "postgres" as const;
@@ -149,7 +174,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
           id: teacher.id,
           name: teacher.name,
           department_id: teacher.departmentId,
-          unavailable_slot_ids: unavailableSlotsByTeacher.get(teacher.id) ?? teacher.unavailableSlotIds,
+          unavailable_slot_ids: unavailableSlotsByTeacher.get(teacher.id) ?? [],
         })),
         courses: courseRows.map((course) => ({
           id: course.id,
@@ -175,7 +200,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         exam_tasks: examTaskRows.map((task) => ({
           id: task.id,
           course_id: task.courseId,
-          student_group_ids: studentGroupsByExamTask.get(task.id) ?? task.studentGroupIds,
+          student_group_ids: studentGroupsByExamTask.get(task.id) ?? [],
           expected_count: task.expectedCount,
           duration_minutes: task.durationMinutes,
           required_room_type: task.requiredRoomType,
@@ -214,7 +239,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
             id: data.id as string,
             name: data.name as string,
             departmentId: data.department_id as string,
-            unavailableSlotIds: data.unavailable_slot_ids as string[],
           }).returning();
           const unavailableSlotIds = data.unavailable_slot_ids as string[];
           if (unavailableSlotIds.length > 0) {
@@ -227,7 +251,10 @@ export class PostgresPlatformRepository implements PlatformRepository {
           }
           return [teacher];
         });
-        return this.toTeacher(row);
+        return {
+          ...this.toTeacher(row),
+          unavailable_slot_ids: data.unavailable_slot_ids as string[],
+        };
       }
       case "courses": {
         const [row] = await this.client.db.insert(courses).values({
@@ -266,7 +293,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
             id: data.id as string,
             batchId: batch.id,
             courseId: data.course_id as string,
-            studentGroupIds: data.student_group_ids as string[],
             expectedCount: data.expected_count as number,
             durationMinutes: data.duration_minutes as number,
             requiredRoomType: data.required_room_type as "standard" | "computer_lab" | "language_lab",
@@ -285,7 +311,10 @@ export class PostgresPlatformRepository implements PlatformRepository {
           }
           return [task];
         });
-        return this.toExamTask(row);
+        return {
+          ...this.toExamTask(row),
+          student_group_ids: data.student_group_ids as string[],
+        };
       }
     }
   }
@@ -322,7 +351,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
           const [teacher] = await tx.update(teachers).set(stripUndefined({
             name: data.name as string | undefined,
             departmentId: data.department_id as string | undefined,
-            unavailableSlotIds: data.unavailable_slot_ids as string[] | undefined,
           })).where(eq(teachers.id, id)).returning();
           if (teacher && data.unavailable_slot_ids) {
             await tx.delete(teacherUnavailableSlots).where(eq(teacherUnavailableSlots.teacherId, id));
@@ -338,7 +366,11 @@ export class PostgresPlatformRepository implements PlatformRepository {
           }
           return [teacher];
         });
-        return row ? this.toTeacher(row) : null;
+        return row ? {
+          ...this.toTeacher(row),
+          unavailable_slot_ids: data.unavailable_slot_ids as string[] | undefined
+            ?? (existing as ReferenceDataResponse["scheduleInput"]["teachers"][number]).unavailable_slot_ids,
+        } : null;
       }
       case "courses": {
         const [row] = await this.client.db.update(courses).set(stripUndefined({
@@ -371,7 +403,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
         const [row] = await this.client.db.transaction(async (tx) => {
           const [task] = await tx.update(examTasks).set(stripUndefined({
             courseId: data.course_id as string | undefined,
-            studentGroupIds: data.student_group_ids as string[] | undefined,
             expectedCount: data.expected_count as number | undefined,
             durationMinutes: data.duration_minutes as number | undefined,
             requiredRoomType: data.required_room_type as "standard" | "computer_lab" | "language_lab" | undefined,
@@ -393,7 +424,11 @@ export class PostgresPlatformRepository implements PlatformRepository {
           }
           return [task];
         });
-        return row ? this.toExamTask(row) : null;
+        return row ? {
+          ...this.toExamTask(row),
+          student_group_ids: data.student_group_ids as string[] | undefined
+            ?? (existing as ReferenceDataResponse["scheduleInput"]["exam_tasks"][number]).student_group_ids,
+        } : null;
       }
     }
   }
@@ -454,86 +489,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
 
   async createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse> {
     const batch = await this.getActiveBatch();
-    const id = `run-${randomUUID()}`;
-    const createdAt = new Date();
-    const run: ScheduleRunSummary = {
-      id,
-      status: result.statistics.status,
-      createdAt: createdAt.toISOString(),
-      elapsedMs: result.statistics.elapsed_ms,
-      score: result.score.total_score,
-      conflictCount: result.conflicts.length,
-      assignmentCount: result.assignments.length,
-    };
-
-    await this.client.db.transaction(async (tx) => {
-      await tx.insert(scheduleRuns).values({
-        id,
-        batchId: batch.id,
-        status: result.statistics.status,
-        score: result.score.total_score,
-        scoreBreakdown: result.score,
-        conflictCount: result.conflicts.length,
-        assignmentCount: result.assignments.length,
-        elapsedMs: result.statistics.elapsed_ms,
-        statistics: result.statistics,
-        report: result.report ?? {},
-        createdAt,
-      });
-
-      if (result.assignments.length > 0) {
-        const scheduledExamRows = result.assignments.map((assignment, index) => ({
-            id: `${id}-exam-${index + 1}`,
-            runId: id,
-            examTaskId: assignment.exam_task_id,
-            roomId: assignment.room_id,
-            timeSlotId: assignment.time_slot_id,
-            teacherIds: assignment.teacher_ids,
-          }));
-        await tx.insert(scheduledExams).values(scheduledExamRows);
-        const invigilatorRows = scheduledExamRows.flatMap((row, index) => (
-          result.assignments[index].teacher_ids.map((teacherId, teacherIndex) => ({
-            scheduledExamId: row.id,
-            position: teacherIndex + 1,
-            teacherId,
-          }))
-        ));
-        if (invigilatorRows.length > 0) {
-          await tx.insert(scheduledExamInvigilators).values(invigilatorRows);
-        }
-      }
-
-      if (result.conflicts.length > 0) {
-        await tx.insert(conflictRecords).values(
-          result.conflicts.map((conflict, index) => ({
-            id: `${id}-conflict-${index + 1}`,
-            runId: id,
-            type: conflict.type,
-            severity: conflict.severity,
-            affectedIds: conflict.affected_ids,
-            message: conflict.message,
-            suggestion: conflict.suggestion,
-          })),
-        );
-      }
-
-      await tx.insert(auditEvents).values({
-        id: `audit-${randomUUID()}`,
-        actor: "system",
-        action: "schedule_run.created",
-        entityType: "schedule_run",
-        entityId: id,
-        payload: {
-          batchId: batch.id,
-          status: result.statistics.status,
-          score: result.score.total_score,
-          assignmentCount: result.assignments.length,
-          conflictCount: result.conflicts.length,
-        },
-      });
-    });
-
-    return { run, result };
+    return this.withDatabaseTransaction((db) => this.insertScheduleRun(db, result, batch.id));
   }
 
   async getScheduleRun(id: string): Promise<ScheduleRunResponse | null> {
@@ -584,7 +540,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
           exam_task_id: assignment.examTaskId,
           room_id: assignment.roomId,
           time_slot_id: assignment.timeSlotId,
-          teacher_ids: teacherIdsByScheduledExam.get(assignment.id) ?? assignment.teacherIds,
+          teacher_ids: teacherIdsByScheduledExam.get(assignment.id) ?? [],
         })),
         conflicts: conflictRows.map((conflict) => ({
           type: conflict.type,
@@ -670,7 +626,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
           examTaskId: assignment.exam_task_id,
           roomId: assignment.room_id,
           timeSlotId: assignment.time_slot_id,
-          teacherIds: assignment.teacher_ids,
           locked: false,
           updatedAt: now,
         }));
@@ -699,7 +654,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       }
       await tx.insert(auditEvents).values({
         id: `audit-${randomUUID()}`,
-        actor: "system",
+        ...this.auditActorValues("system"),
         action: "schedule_draft.created",
         entityType: "schedule_draft",
         entityId: draftId,
@@ -776,7 +731,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         exam_task_id: assignment.examTaskId,
         room_id: assignment.roomId,
         time_slot_id: assignment.timeSlotId,
-        teacher_ids: teacherIdsByDraftExam.get(assignment.id) ?? assignment.teacherIds,
+        teacher_ids: teacherIdsByDraftExam.get(assignment.id) ?? [],
       })),
       conflicts: conflictRows.map((conflict) => ({
         type: conflict.type,
@@ -845,7 +800,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
         .set({
           roomId: after.room_id,
           timeSlotId: after.time_slot_id,
-          teacherIds: after.teacher_ids,
           updatedAt,
         })
         .where(and(
@@ -884,7 +838,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         examTaskId,
         before,
         after,
-        actor: "admin",
+        ...this.auditActorValues("admin"),
         createdAt: updatedAt,
       });
       await tx.update(scheduleDrafts)
@@ -898,7 +852,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         .where(eq(scheduleDrafts.id, id));
       await tx.insert(auditEvents).values({
         id: `audit-${randomUUID()}`,
-        actor: "system",
+        ...this.auditActorValues("system"),
         action: "schedule_draft.assignment_updated",
         entityType: "schedule_draft",
         entityId: id,
@@ -961,7 +915,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       }
       await tx.insert(auditEvents).values({
         id: `audit-${randomUUID()}`,
-        actor: "system",
+        ...this.auditActorValues("system"),
         action: "schedule_draft.validated",
         entityType: "schedule_draft",
         entityId: id,
@@ -1184,7 +1138,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
           examTaskId: assignment.exam_task_id,
           roomId: assignment.room_id,
           timeSlotId: assignment.time_slot_id,
-          teacherIds: assignment.teacher_ids,
         }));
         await tx.insert(scheduledExams).values(scheduledExamRows);
         const invigilatorRows = scheduledExamRows.flatMap((row, index) => (
@@ -1206,7 +1159,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         .where(eq(examBatches.id, batch.id));
       await tx.insert(auditEvents).values({
         id: `audit-${randomUUID()}`,
-        actor: "system",
+        ...this.auditActorValues("system"),
         action: "schedule_draft.published",
         entityType: "schedule_draft",
         entityId: id,
@@ -1270,7 +1223,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       }
       await tx.insert(auditEvents).values({
         id: `audit-${randomUUID()}`,
-        actor: "system",
+        ...this.auditActorValues("system"),
         action: "schedule_draft.discarded",
         entityType: "schedule_draft",
         entityId: id,
@@ -1306,10 +1259,16 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
-  async publishScheduleRun(id: string): Promise<PublishedScheduleResponse | null> {
-    const response = await this.getScheduleRun(id);
+  async publishScheduleRun(id: string): Promise<PublishScheduleRunResult> {
+    const [response, referenceData] = await Promise.all([
+      this.getScheduleRun(id),
+      this.getReferenceData(),
+    ]);
     if (!response) {
       return null;
+    }
+    if (!isScheduleResultPublishable(referenceData.scheduleInput, response.result)) {
+      return "not_publishable";
     }
     const batch = await this.getActiveBatch();
     const [updatedBatch] = await this.client.db
@@ -1371,18 +1330,42 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
-  async createScheduleJob(): Promise<ScheduleJobSummary> {
+  async createScheduleJob(command: CreateScheduleJobCommand): Promise<CreateScheduleJobResult> {
     const now = new Date();
-    const [row] = await this.client.db.insert(scheduleJobs).values({
-      id: `job-${randomUUID()}`,
-      status: "queued",
-      progress: 0,
-      runId: null,
-      error: null,
-      createdAt: now,
-      updatedAt: now,
-    }).returning();
-    return this.toScheduleJob(row);
+    return this.withDatabaseTransaction(async (db) => {
+      const [row] = await db.insert(scheduleJobs).values({
+        id: `job-${randomUUID()}`,
+        batchId: command.batchId,
+        status: "queued",
+        progress: 0,
+        idempotencyKey: command.idempotencyKey,
+        requestDigest: command.requestDigest,
+        traceId: command.traceId,
+        runId: null,
+        error: null,
+        queuedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      }).onConflictDoNothing({ target: scheduleJobs.idempotencyKey }).returning();
+      if (!row) {
+        const [existing] = await db
+          .select()
+          .from(scheduleJobs)
+          .where(eq(scheduleJobs.idempotencyKey, command.idempotencyKey))
+          .limit(1);
+        if (!existing) {
+          throw new Error("Schedule job idempotency conflict did not return an existing job.");
+        }
+        if (existing.requestDigest !== command.requestDigest) {
+          throw new ScheduleJobIdempotencyConflictError(command.idempotencyKey);
+        }
+        return { job: this.toScheduleJob(existing), created: false };
+      }
+      await this.insertScheduleJobEvent(db, row, "schedule_job.queued", {
+        status: row.status,
+      }, now);
+      return { job: this.toScheduleJob(row), created: true };
+    });
   }
 
   async listScheduleJobs(): Promise<{ jobs: ScheduleJobSummary[] }> {
@@ -1402,22 +1385,121 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return row ? this.toScheduleJob(row) : null;
   }
 
-  async updateScheduleJob(
+  async transitionScheduleJob(
     id: string,
-    patch: Partial<Pick<ScheduleJobSummary, "status" | "progress" | "runId" | "error">>,
-  ): Promise<ScheduleJobSummary | null> {
-    const [row] = await this.client.db
-      .update(scheduleJobs)
-      .set(stripUndefined({
-        status: patch.status,
-        progress: patch.progress,
-        runId: patch.runId,
-        error: patch.error,
-        updatedAt: new Date(),
-      }))
-      .where(eq(scheduleJobs.id, id))
-      .returning();
-    return row ? this.toScheduleJob(row) : null;
+    command: TransitionScheduleJobCommand,
+  ): Promise<ScheduleJobTransitionResult> {
+    return this.withLockedScheduleJob(id, async (db, current) => {
+      const resolution = resolveScheduleJobTransition(current.status, command.to);
+      if (resolution !== "apply") {
+        return { job: this.toScheduleJob(current), resolution };
+      }
+      const now = new Date();
+      const terminal = isTerminalScheduleJobStatus(command.to);
+      const [row] = await db
+        .update(scheduleJobs)
+        .set({
+          status: command.to,
+          progress: command.progress,
+          error: command.error?.message ?? null,
+          errorCategory: command.error?.category ?? null,
+          errorCode: command.error?.code ?? null,
+          errorRetryable: command.error?.retryable ?? null,
+          cancellationRequestedAt: command.to === "cancelled"
+            ? now
+            : current.cancellationRequestedAt,
+          startedAt: command.to === "running" ? now : current.startedAt,
+          finishedAt: terminal ? now : current.finishedAt,
+          updatedAt: now,
+        })
+        .where(eq(scheduleJobs.id, id))
+        .returning();
+      if (command.to === "running") {
+        const attemptResult = await db
+          .select({ attemptNumber: scheduleJobAttempts.attemptNumber })
+          .from(scheduleJobAttempts)
+          .where(eq(scheduleJobAttempts.jobId, id))
+          .orderBy(desc(scheduleJobAttempts.attemptNumber))
+          .limit(1);
+        await db.insert(scheduleJobAttempts).values({
+          id: `attempt-${randomUUID()}`,
+          jobId: id,
+          attemptNumber: (attemptResult[0]?.attemptNumber ?? 0) + 1,
+          status: "running",
+          startedAt: now,
+        });
+      } else if (terminal) {
+        const [attempt] = await db
+          .select()
+          .from(scheduleJobAttempts)
+          .where(eq(scheduleJobAttempts.jobId, id))
+          .orderBy(desc(scheduleJobAttempts.attemptNumber))
+          .limit(1);
+        if (attempt && attempt.finishedAt === null) {
+          await db.update(scheduleJobAttempts).set({
+            status: command.to,
+            finishedAt: now,
+            error: command.error ?? null,
+          }).where(eq(scheduleJobAttempts.id, attempt.id));
+        }
+      }
+      await this.insertScheduleJobEvent(db, row, `schedule_job.${command.to}`, {
+        status: command.to,
+        progress: command.progress,
+        error: command.error ?? null,
+      }, now);
+      return { job: this.toScheduleJob(row), resolution };
+    });
+  }
+
+  async completeScheduleJob(
+    id: string,
+    result: ScheduleResult,
+  ): Promise<ScheduleJobTransitionResult> {
+    return this.withLockedScheduleJob(id, async (db, current) => {
+      const status = scheduleJobStatusForSolveResult(result.statistics.status);
+      const resolution = resolveScheduleJobTransition(current.status, status);
+      if (resolution !== "apply") {
+        return { job: this.toScheduleJob(current), resolution };
+      }
+      const response = await this.insertScheduleRun(db, result, current.batchId);
+      const now = new Date();
+      const error = status === "failed" ? {
+        category: "scheduler" as const,
+        code: "scheduler_result_error",
+        message: "Scheduler returned an error result.",
+        retryable: true,
+      } : null;
+      const [row] = await db.update(scheduleJobs).set({
+        status,
+        progress: 100,
+        runId: response.run.id,
+        error: error?.message ?? null,
+        errorCategory: error?.category ?? null,
+        errorCode: error?.code ?? null,
+        errorRetryable: error?.retryable ?? null,
+        finishedAt: now,
+        updatedAt: now,
+      }).where(eq(scheduleJobs.id, id)).returning();
+      const [attempt] = await db
+        .select()
+        .from(scheduleJobAttempts)
+        .where(eq(scheduleJobAttempts.jobId, id))
+        .orderBy(desc(scheduleJobAttempts.attemptNumber))
+        .limit(1);
+      if (attempt && attempt.finishedAt === null) {
+        await db.update(scheduleJobAttempts).set({
+          status,
+          finishedAt: now,
+          error,
+        }).where(eq(scheduleJobAttempts.id, attempt.id));
+      }
+      await this.insertScheduleJobEvent(db, row, `schedule_job.${status}`, {
+        status,
+        runId: response.run.id,
+      }, now);
+      return { job: this.toScheduleJob(row), resolution };
+    });
   }
 
   async recoverInterruptedScheduleJobs(): Promise<ScheduleJobSummary[]> {
@@ -1427,19 +1509,105 @@ export class PostgresPlatformRepository implements PlatformRepository {
       if (job.status !== "queued" && job.status !== "running") {
         continue;
       }
-      const failed = await this.updateScheduleJob(job.id, {
-        status: "failed",
+      const failed = await this.transitionScheduleJob(job.id, {
+        to: "failed",
         progress: 100,
-        error: "Schedule job was interrupted before completion.",
+        error: {
+          category: "infrastructure",
+          code: "schedule_job_interrupted",
+          message: "Schedule job was interrupted before completion.",
+          retryable: true,
+        },
       });
-      if (failed) {
-        recovered.push(failed);
-        await this.recordAuditEvent("schedule_job.interrupted", "schedule_job", failed.id, {
+      if (failed.job && failed.resolution === "apply") {
+        recovered.push(failed.job);
+        await this.recordAuditEvent("schedule_job.interrupted", "schedule_job", failed.job.id, {
           previousStatus: job.status,
         });
       }
     }
     return recovered;
+  }
+
+  async createAuthUser(command: CreateAuthUserCommand): Promise<AuthUserRecord> {
+    await this.client.db.transaction(async (tx) => {
+      await tx.insert(users).values({
+        id: command.id,
+        username: command.username,
+        displayName: command.displayName,
+        active: command.active,
+        passwordHash: command.password.hash,
+        passwordSalt: command.password.salt,
+        scryptN: command.password.n,
+        scryptR: command.password.r,
+        scryptP: command.password.p,
+        scryptKeyLength: command.password.keyLength,
+      });
+      if (command.roles.length > 0) {
+        await tx.insert(userRoles).values(command.roles.map((role) => ({
+          userId: command.id,
+          roleId: role,
+        })));
+      }
+    });
+    return structuredClone(command);
+  }
+
+  async findAuthUserByUsername(username: string): Promise<AuthUserRecord | null> {
+    const [user] = await this.client.db
+      .select()
+      .from(users)
+      .where(eq(users.username, username))
+      .limit(1);
+    return user ? this.loadAuthUser(user) : null;
+  }
+
+  async createAuthSession(command: CreateAuthSessionCommand): Promise<AuthSessionRecord> {
+    const [session] = await this.client.db.insert(sessions).values({
+      id: command.id,
+      userId: command.userId,
+      tokenDigest: command.tokenDigest,
+      createdAt: new Date(command.createdAt),
+      expiresAt: new Date(command.expiresAt),
+      lastSeenAt: new Date(command.createdAt),
+      userAgent: command.userAgent,
+      ipAddress: command.ipAddress,
+    }).returning();
+    return this.toAuthSession(session);
+  }
+
+  async findAuthSessionByTokenDigest(tokenDigest: string): Promise<AuthSessionWithUser | null> {
+    const [session] = await this.client.db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.tokenDigest, tokenDigest))
+      .limit(1);
+    if (!session) {
+      return null;
+    }
+    const [user] = await this.client.db
+      .select()
+      .from(users)
+      .where(eq(users.id, session.userId))
+      .limit(1);
+    if (!user) {
+      return null;
+    }
+    return {
+      session: this.toAuthSession(session),
+      user: await this.loadAuthUser(user),
+    };
+  }
+
+  async revokeAuthSession(id: string, revokedAt: string): Promise<boolean> {
+    const rows = await this.client.db.update(sessions).set({
+      revokedAt: new Date(revokedAt),
+    }).where(and(
+      eq(sessions.id, id),
+      // Drizzle keeps this update idempotent at the application boundary.
+      isNull(sessions.revokedAt),
+    )).returning({ id: sessions.id });
+    return rows.length > 0;
   }
 
   async close(): Promise<void> {
@@ -1532,7 +1700,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       id: teacher.id,
       name: teacher.name,
       department_id: teacher.departmentId,
-      unavailable_slot_ids: teacher.unavailableSlotIds,
+      unavailable_slot_ids: [],
     };
   }
 
@@ -1570,7 +1738,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return {
       id: task.id,
       course_id: task.courseId,
-      student_group_ids: task.studentGroupIds,
+      student_group_ids: [],
       expected_count: task.expectedCount,
       duration_minutes: task.durationMinutes,
       required_room_type: task.requiredRoomType,
@@ -1596,6 +1764,8 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return {
       id: event.id,
       actor: event.actor,
+      actorUserId: event.actorUserId,
+      actorRoles: event.actorRoles as UserRole[],
       action: event.action,
       entityType: event.entityType,
       entityId: event.entityId,
@@ -1632,13 +1802,239 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
+  private async withDatabaseTransaction<T>(
+    operation: (db: ExamForgeDatabase) => Promise<T>,
+  ): Promise<T> {
+    const connection = await this.client.pool.connect();
+    const session = createDbSession(connection);
+    try {
+      await connection.query("BEGIN");
+      const result = await operation(session.db);
+      await session.drain();
+      await connection.query("COMMIT");
+      return result;
+    } catch (error) {
+      await session.drain();
+      await connection.query("ROLLBACK");
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  private async withLockedScheduleJob(
+    id: string,
+    operation: (
+      db: ExamForgeDatabase,
+      current: ScheduleJobRow,
+    ) => Promise<ScheduleJobTransitionResult>,
+  ): Promise<ScheduleJobTransitionResult> {
+    const connection = await this.client.pool.connect();
+    const session = createDbSession(connection);
+    try {
+      await connection.query("BEGIN");
+      const lockResult = await connection.query<{ id: string }>(
+        "SELECT id FROM schedule_jobs WHERE id = $1 FOR UPDATE",
+        [id],
+      );
+      if (lockResult.rowCount === 0) {
+        await connection.query("COMMIT");
+        return { job: null, resolution: "not_found" };
+      }
+      const [current] = await session.db
+        .select()
+        .from(scheduleJobs)
+        .where(eq(scheduleJobs.id, id))
+        .limit(1);
+      const result = await operation(session.db, current);
+      await session.drain();
+      await connection.query("COMMIT");
+      return result;
+    } catch (error) {
+      await session.drain();
+      await connection.query("ROLLBACK");
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  private async insertScheduleRun(
+    db: ExamForgeDatabase,
+    result: ScheduleResult,
+    batchId: string,
+  ): Promise<ScheduleRunResponse> {
+    const id = `run-${randomUUID()}`;
+    const createdAt = new Date();
+    const run: ScheduleRunSummary = {
+      id,
+      status: result.statistics.status,
+      createdAt: createdAt.toISOString(),
+      elapsedMs: result.statistics.elapsed_ms,
+      score: result.score.total_score,
+      conflictCount: result.conflicts.length,
+      assignmentCount: result.assignments.length,
+    };
+    await db.insert(scheduleRuns).values({
+      id,
+      batchId,
+      status: result.statistics.status,
+      score: result.score.total_score,
+      scoreBreakdown: result.score,
+      conflictCount: result.conflicts.length,
+      assignmentCount: result.assignments.length,
+      elapsedMs: result.statistics.elapsed_ms,
+      statistics: result.statistics,
+      report: result.report ?? {},
+      createdAt,
+    });
+    if (result.assignments.length > 0) {
+      const scheduledExamRows = result.assignments.map((assignment, index) => ({
+        id: `${id}-exam-${index + 1}`,
+        runId: id,
+        examTaskId: assignment.exam_task_id,
+        roomId: assignment.room_id,
+        timeSlotId: assignment.time_slot_id,
+      }));
+      await db.insert(scheduledExams).values(scheduledExamRows);
+      const invigilatorRows = scheduledExamRows.flatMap((row, index) => (
+        result.assignments[index].teacher_ids.map((teacherId, teacherIndex) => ({
+          scheduledExamId: row.id,
+          position: teacherIndex + 1,
+          teacherId,
+        }))
+      ));
+      if (invigilatorRows.length > 0) {
+        await db.insert(scheduledExamInvigilators).values(invigilatorRows);
+      }
+    }
+    if (result.conflicts.length > 0) {
+      await db.insert(conflictRecords).values(
+        result.conflicts.map((conflict, index) => ({
+          id: `${id}-conflict-${index + 1}`,
+          runId: id,
+          type: conflict.type,
+          severity: conflict.severity,
+          affectedIds: conflict.affected_ids,
+          message: conflict.message,
+          suggestion: conflict.suggestion,
+        })),
+      );
+    }
+    await db.insert(auditEvents).values({
+      id: `audit-${randomUUID()}`,
+      ...this.auditActorValues("system"),
+      action: "schedule_run.created",
+      entityType: "schedule_run",
+      entityId: id,
+      payload: {
+        batchId,
+        status: result.statistics.status,
+        score: result.score.total_score,
+        assignmentCount: result.assignments.length,
+        conflictCount: result.conflicts.length,
+      },
+    });
+    return { run, result };
+  }
+
+  private async insertScheduleJobEvent(
+    db: ExamForgeDatabase,
+    job: ScheduleJobRow,
+    eventType: string,
+    payload: Record<string, unknown>,
+    occurredAt: Date,
+  ) {
+    const eventId = `event-${randomUUID()}`;
+    const eventVersion = 1;
+    await db.insert(scheduleJobEvents).values({
+      id: eventId,
+      jobId: job.id,
+      eventType,
+      eventVersion,
+      occurredAt,
+      payload,
+      traceId: job.traceId,
+    });
+    await db.insert(outboxEvents).values({
+      id: `outbox-${randomUUID()}`,
+      eventId,
+      aggregateType: "schedule_job",
+      aggregateId: job.id,
+      eventType,
+      eventVersion,
+      payload: {
+        eventId,
+        jobId: job.id,
+        type: eventType,
+        version: eventVersion,
+        occurredAt: occurredAt.toISOString(),
+        payload,
+        traceId: job.traceId,
+      },
+      occurredAt,
+      availableAt: occurredAt,
+    });
+  }
+
+  private async loadAuthUser(user: UserRow): Promise<AuthUserRecord> {
+    const roleRows = await this.client.db
+      .select({ roleId: userRoles.roleId })
+      .from(userRoles)
+      .where(eq(userRoles.userId, user.id));
+    return {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      active: user.active,
+      roles: roleRows.map((row) => row.roleId as UserRole).sort(),
+      password: {
+        hash: user.passwordHash,
+        salt: user.passwordSalt,
+        n: user.scryptN,
+        r: user.scryptR,
+        p: user.scryptP,
+        keyLength: user.scryptKeyLength,
+      },
+    };
+  }
+
+  private toAuthSession(session: typeof sessions.$inferSelect): AuthSessionRecord {
+    return {
+      id: session.id,
+      userId: session.userId,
+      tokenDigest: session.tokenDigest,
+      createdAt: session.createdAt.toISOString(),
+      expiresAt: session.expiresAt.toISOString(),
+      lastSeenAt: session.lastSeenAt.toISOString(),
+      revokedAt: session.revokedAt?.toISOString() ?? null,
+      userAgent: session.userAgent,
+      ipAddress: session.ipAddress,
+    };
+  }
+
   private toScheduleJob(job: ScheduleJobRow): ScheduleJobSummary {
     return {
       id: job.id,
+      batchId: job.batchId,
       status: job.status,
       progress: job.progress,
+      idempotencyKey: job.idempotencyKey,
+      requestDigest: job.requestDigest,
+      traceId: job.traceId,
       runId: job.runId,
-      error: job.error,
+      error: job.error && job.errorCategory && job.errorCode && job.errorRetryable !== null
+        ? {
+            category: job.errorCategory as NonNullable<ScheduleJobSummary["error"]>["category"],
+            code: job.errorCode,
+            message: job.error,
+            retryable: job.errorRetryable,
+          }
+        : null,
+      cancellationRequestedAt: job.cancellationRequestedAt?.toISOString() ?? null,
+      queuedAt: job.queuedAt.toISOString(),
+      startedAt: job.startedAt?.toISOString() ?? null,
+      finishedAt: job.finishedAt?.toISOString() ?? null,
       createdAt: job.createdAt.toISOString(),
       updatedAt: job.updatedAt.toISOString(),
     };
@@ -1669,7 +2065,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
   ) {
     await this.client.db.insert(auditEvents).values({
       id: `audit-${randomUUID()}`,
-      actor,
+      ...this.auditActorValues(actor),
       action,
       entityType,
       entityId,
@@ -1677,6 +2073,22 @@ export class PostgresPlatformRepository implements PlatformRepository {
     });
   }
 
+  private auditActorValues(fallbackActor: string) {
+    const context = getCurrentAuthContext();
+    return {
+      actor: context?.user.username ?? fallbackActor,
+      actorUserId: context?.user.id ?? null,
+      actorRoles: context?.user.roles ?? [],
+    };
+  }
+
+}
+
+function isTerminalScheduleJobStatus(status: ScheduleJobStatus) {
+  return status === "succeeded"
+    || status === "failed"
+    || status === "cancelled"
+    || status === "timed_out";
 }
 
 function groupRelationRows<T, K extends keyof T, V extends keyof T>(

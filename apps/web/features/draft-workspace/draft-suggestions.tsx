@@ -9,6 +9,7 @@ import type { LoadState } from "../../components/shared/load-state";
 
 export function DraftSuggestions({
   suggestions,
+  selectedAssignmentId,
   suggestionState,
   draftState,
   draftLocked,
@@ -17,6 +18,7 @@ export function DraftSuggestions({
   onApplySuggestion,
 }: {
   suggestions: ScheduleDraftAdjustmentSuggestionsResponse | null;
+  selectedAssignmentId: string;
   suggestionState: LoadState;
   draftState: LoadState;
   draftLocked: boolean;
@@ -29,6 +31,7 @@ export function DraftSuggestions({
       <div className="suggestion-title">
         <Lightbulb size={16} />
         <strong>局部调整建议</strong>
+        <span data-testid="draft-suggestion-context">{selectedAssignmentId || "--"}</span>
         <span>{suggestionState === "loading" ? "计算中" : `${suggestions?.suggestions.length ?? 0} 项`}</span>
       </div>
       {suggestions?.suggestions.slice(0, 4).map((suggestion) => {
@@ -51,7 +54,13 @@ export function DraftSuggestions({
                 type="button"
                 className="secondary-button"
                 data-testid="draft-suggestion-apply"
-                disabled={draftState === "loading" || draftLocked || suggestion.hardConflictCount > 0}
+                disabled={
+                  draftState === "loading"
+                  || draftLocked
+                  || suggestions?.examTaskId !== selectedAssignmentId
+                  || suggestion.assignment.exam_task_id !== selectedAssignmentId
+                  || suggestion.hardConflictCount > 0
+                }
                 onClick={() => onApplySuggestion(suggestion)}
               >
                 应用

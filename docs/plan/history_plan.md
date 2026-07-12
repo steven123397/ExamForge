@@ -182,3 +182,34 @@
 - 本地验证：`npm run test:ci` 为 `7 passed`；`npm run check:ci`、`actionlint 1.7.12 .github/workflows/ci.yml`、`npm run typecheck` 和 `npm run build` 通过；API 为 `54 passed`，scheduler 为 `73 passed`；迁移测试为 `4 passed`，8 个迁移首次全部应用、第二次应用数为 0，正式迁移入口返回 `applied: []`，PostgreSQL 集成为 `9 passed`；隔离 Compose smoke 返回 `storage=postgres`、6 条安排和硬冲突 0，Playwright 为 `3 passed`。
 - 范围边界：未引入自动发布、镜像推送、生产部署、远端 secrets 或分支保护；CR-002、CR-003、CR-007、CR-008 保持原状态，Bearer token、进程内异步作业、HTTP 轮询、scheduler CLI、JSONB 兼容字段和跨批次评分边界未改变。
 - 后续影响：第四版四个阶段全部完成；下一步按大版本节奏执行一次全量代码审查，发现写入 `docs/status/code_review_status.md`，修复另建活动计划。
+
+## 2026-07-12 第四版完成后全量代码审查
+
+- 原计划：`docs/plan/全量代码审查计划.md`。
+- 审查基线：`HEAD` 与 `origin/main` 均为 `2320fbdfbe2e1cd9c1be4d1d67b807f7ce0017db`；保留审查前已有的服务器勘察、第五版设计、第五版第一阶段计划、索引和状态文档修改。
+- 完成内容：按计划覆盖调度算法、约束、评分、增量重排和规模基准；API/service、认证护栏、状态机和审计；PostgreSQL 仓储、事务并发、八个迁移、关联表和 shared 合同；Web 数据流、角色边界、关键工作流、错误状态、响应式和可访问性；单元、集成、迁移、E2E、CI、依赖、Compose、演示脚本和文档一致性。理解代码时先使用 CodeGraph，再以文件和运行证据补充。
+- 审查结论：复核 CR-002、CR-003、CR-007、CR-008 仍成立，CR-014 至 CR-019 未发现回归；新增 CR-020 至 CR-027。详细证据和建议统一维护在 `docs/status/code_review_status.md`，当前问题共 12 个，分布为 P0 2 个、P1 3 个、P2 6 个、P3 1 个。
+- 验证结果：CI 治理脚本 7 passed，仓库检查、类型检查、API/服务测试 54 passed、scheduler 73 passed、生产构建通过；50/100/150 场 benchmark 均 feasible、0 冲突，耗时 262/403/676 ms，教师负载极差均为 1。隔离 PostgreSQL 16 中迁移测试 4 passed、迁移检查无缺失、正式迁移无待应用、集成测试 9 passed；隔离 Compose 空卷 smoke 和 Chromium E2E 3 passed 并完成清理。`npm audit` 的 2 个 moderate 公告仍归入 CR-002；本机未安装 `actionlint`，未重复其本地静态检查。
+- 范围边界：本轮只审查、不修复，没有修改业务代码、测试、迁移、依赖、CI 或部署配置，没有创建整改计划、启动第五版、提交或推送。
+- 后续影响：先由用户确认审查结论，再为 P0/P1 和关联 P2 建立独立整改计划；阻塞问题处置并取得回归证据后，才可启动 `docs/plan/第五版第一阶段计划.md`。
+
+## 2026-07-12 第四版完成后全量审查整改
+
+- 原计划：`docs/plan/第四版完成后全量审查整改计划.md`。
+- 完成内容：按严重度和依赖顺序修复 CR-020 至 CR-027。发布资格统一要求可行、零硬冲突且考试任务与安排一一对应；内部运营 GET 统一要求有效 Bearer token，公开发布查询保留匿名白名单；API、Python 和 PostgreSQL 统一跨资源时段引用校验并隐藏 SQL 完整性细节；连续考试/监考统一为同日相邻场次；草稿建议增加请求代次与上下文双重校验；运营历史面板分别展示错误与重试；发布、回滚、废弃和删除统一进入原生确认对话框；草稿矩阵改为原生表格语义，全局异步错误进入 polite live region。
+- 测试过程：每项先取得可复现红灯，再完成最窄实现与风险相关回归。浏览器红灯覆盖旧建议响应修改错误考试、四类历史接口失败被渲染为空数据、四类高影响操作首次点击立即发请求，以及不完整 `role=grid`；API、scheduler 和 PostgreSQL 红灯覆盖不可行/不完整发布、缺失时段引用、SQL 错误泄露和跨日连续误罚。最终 Compose 首次运行发现 `demo-smoke.mjs` 匿名读取新受保护内部接口返回 401，补齐 viewer token 后重新从空卷验证通过。
+- 既有问题处置：CR-002 的安全 PostCSS override 会使 `npm ls` 返回 `ELSPROBLEMS`，试验改动已撤回，等待 Next 官方依赖更新；CR-003 当前 Docker daemon 代理实际拉取新镜像成功，机器配置未修改；CR-007 和 CR-008 分别等待第五版第三阶段可靠事件/SSE和第二阶段 FastAPI/OpenAPI 合同。四项均保留为暂缓，当前无待解决 P0/P1。
+- 验证结果：`npm run test:ci` 为 `7 passed`，`npm run check:ci`、`npm run typecheck`、`npm run build` 和 `git diff --check` 通过；API 为 `62 passed`，scheduler 为 `78 passed`；50、100、150 场 benchmark 均 feasible、0 冲突，耗时 246、412、724 ms，教师负载极差均为 1。隔离 PostgreSQL 迁移测试为 `4 passed`、迁移检查无缺失或双向不一致、正式迁移无待应用、集成测试为 `11 passed`；独立 Compose smoke 通过 API 重启持久化检查，Chromium E2E 为 `14 passed`，测试容器、网络、卷和隔离 PostgreSQL 均已清理，原演示栈未修改。
+- 交付边界：未提交或推送，未开始第五版；整改结论等待用户确认。
+- 后续影响：用户确认后可启动 `docs/plan/第五版第一阶段计划.md`；CR-002、CR-003、CR-007、CR-008 按各自重评条件继续维护在代码审查状态文档。
+
+## 2026-07-12 第五版第一阶段：合同、数据与身份基础
+
+- 原计划：`docs/plan/第五版第一阶段计划.md`。
+- 完成提交：未提交；按用户要求保留当前工作树，不提交或推送。
+- 完成内容：统一作业状态为 `queued`、`running`、`succeeded`、`failed`、`cancelled`、`timed_out`，新增作业尝试、持久化事件和 outbox，并以请求摘要、幂等键和原子终态防止重复运行；删除教师不可用、考试学生群体、正式监考和草稿监考四类旧 JSONB 列，关联表成为唯一事实源；新增用户、角色、用户角色和服务端会话，使用 scrypt 随机盐、会话摘要、HttpOnly Cookie、可信 Origin 和真实 actor 审计；Web 移除演示 Bearer token 与角色切换，管理员/排考员进入运营台，教师/学生进入受限已发布门户；形成第五版前端信息架构与视觉规范，并整理现有原型的基础设计 token、焦点和窄屏行为。
+- 迁移与数据库证据：可丢弃 PostgreSQL 16 中迁移测试 `5 passed`，12 个迁移首次全部应用、第二次应用数为 0；第四版 `completed` 作业升级为 `succeeded`，四类关系漂移会在删列前拒绝迁移，迁移检查确认旧关系列为空、关键表和约束无缺失、关联数据无双向不一致；正式迁移入口返回 `applied: []`，真实 PostgreSQL 集成测试 `13 passed`。
+- 应用与算法证据：`npm run test:ci` 为 `7 passed`，`npm run check:ci`、`npm run typecheck`、`LOG_LEVEL=silent npm test`（shared `9 passed`、API/服务共 `70 passed`）、`npm run test:scheduler`（`78 passed`）和生产构建通过。固定 seed 的 50、100、150 场 benchmark 均 feasible、0 冲突，耗时 419、767、1199 ms，教师负载极差均为 1。
+- 浏览器与视觉证据：隔离 Compose/PostgreSQL smoke 完成真实登录、排考、持久化读取和 API 重启检查，Chromium E2E `17 passed`；桌面登录、1600 px 管理员页面和 375 px 教师门户截图均非空，桌面和移动页面宽度等于视口，移动端未发现可见溢出元素。临时 Compose 项目、网络和卷均在验证后清理，用户原有演示栈未修改。
+- 范围边界：未实现 Redis/BullMQ、Outbox Publisher、独立 Worker、FastAPI scheduler、SSE/WebSocket、完整任务中心或全量前端路由重构；API 仍以进程内执行器调用 Python CLI，Web 仍轮询作业状态。CR-002、CR-003、CR-007、CR-008 继续按审查状态文档维护。
+- 后续影响：下一阶段按 `docs/plan/第五版第二阶段计划.md` 将 scheduler 服务化；只处理 FastAPI、OpenAPI、HTTP 客户端、故障合同和独立容器，不提前混入可靠队列与实时事件。

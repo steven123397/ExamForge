@@ -1,5 +1,6 @@
 import type {
   AuditEventListResponse,
+  AuthContext,
   DashboardResponse,
   PublishedScheduleAudienceResponse,
   PublishedScheduleNotificationsResponse,
@@ -25,7 +26,6 @@ import type {
   ScheduledExam,
   TeacherUnavailableSlotsResponse,
 } from "@examforge/shared";
-import { roleHeaders, type WorkspaceRole } from "./roles";
 
 export const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 
@@ -45,10 +45,14 @@ export async function requestJson<T>(
 ): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     cache: "no-store",
+    credentials: "include",
     ...init,
   });
 
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("examforge:session-expired"));
+    }
     throw new ApiClientError(response.status, await readErrorMessage(response));
   }
 
@@ -60,15 +64,18 @@ export async function requestJson<T>(
 }
 
 function jsonInit(
-  role: WorkspaceRole,
   method: "POST" | "PATCH" | "DELETE",
   body?: unknown,
 ): RequestInit {
   return {
     method,
-    headers: roleHeaders(role, body === undefined ? {} : { "content-type": "application/json" }),
+    headers: body === undefined ? {} : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   };
+}
+
+function internalReadInit(): RequestInit {
+  return {};
 }
 
 async function readErrorMessage(response: Response): Promise<string> {
@@ -77,22 +84,33 @@ async function readErrorMessage(response: Response): Promise<string> {
 }
 
 export const apiClient = {
+  login(username: string, password: string) {
+    return requestJson<AuthContext>("/api/auth/login", jsonInit("POST", { username, password }));
+  },
+
+  getSession() {
+    return requestJson<AuthContext>("/api/auth/me", internalReadInit());
+  },
+
+  logout() {
+    return requestJson<void>("/api/auth/logout", jsonInit("POST"));
+  },
+
   getDashboard() {
-    return requestJson<DashboardResponse>("/api/dashboard");
+    return requestJson<DashboardResponse>("/api/dashboard", internalReadInit());
   },
 
   getReferenceData() {
-    return requestJson<ReferenceDataResponse>("/api/reference-data");
+    return requestJson<ReferenceDataResponse>("/api/reference-data", internalReadInit());
   },
 
   createReferenceRecord(
     resource: ReferenceResource,
     record: ReferenceRecord,
-    role: WorkspaceRole,
   ) {
     return requestJson<{ record: ReferenceRecord }>(
       `/api/reference-data/${resource}`,
-      jsonInit(role, "POST", record),
+      jsonInit("POST", record),
     );
   },
 
@@ -100,76 +118,78 @@ export const apiClient = {
     resource: ReferenceResource,
     id: string,
     patch: Partial<ReferenceRecord>,
-    role: WorkspaceRole,
   ) {
     return requestJson<{ record: ReferenceRecord }>(
       `/api/reference-data/${resource}/${encodeURIComponent(id)}`,
-      jsonInit(role, "PATCH", patch),
+      jsonInit("PATCH", patch),
     );
   },
 
-  deleteReferenceRecord(resource: ReferenceResource, id: string, role: WorkspaceRole) {
+  deleteReferenceRecord(resource: ReferenceResource, id: string) {
     return requestJson<ReferenceDeleteResponse>(
       `/api/reference-data/${resource}/${encodeURIComponent(id)}`,
-      jsonInit(role, "DELETE"),
+      jsonInit("DELETE"),
     );
   },
 
   importReferenceRecords(
     resource: ReferenceResource,
     records: unknown[],
-    role: WorkspaceRole,
   ) {
     return requestJson<ReferenceImportResponse>(
       `/api/reference-data/${resource}/import`,
-      jsonInit(role, "POST", { records }),
+      jsonInit("POST", { records }),
     );
   },
 
-  createScheduleRun(role: WorkspaceRole) {
-    return requestJson<ScheduleRunResponse>("/api/schedule-runs", jsonInit(role, "POST"));
+  createScheduleRun() {
+    return requestJson<ScheduleRunResponse>("/api/schedule-runs", jsonInit("POST"));
   },
 
   listScheduleRuns() {
-    return requestJson<ScheduleRunListResponse>("/api/schedule-runs");
+    return requestJson<ScheduleRunListResponse>("/api/schedule-runs", internalReadInit());
   },
 
   getScheduleRun(id: string) {
-    return requestJson<ScheduleRunResponse>(`/api/schedule-runs/${encodeURIComponent(id)}`);
+    return requestJson<ScheduleRunResponse>(
+      `/api/schedule-runs/${encodeURIComponent(id)}`,
+      internalReadInit(),
+    );
   },
 
   compareScheduleRuns(baseId: string, targetId: string) {
     return requestJson<ScheduleRunComparisonResponse>(
       `/api/schedule-runs/compare?baseId=${encodeURIComponent(baseId)}&targetId=${encodeURIComponent(targetId)}`,
+      internalReadInit(),
     );
   },
 
-  publishScheduleRun(id: string, role: WorkspaceRole) {
+  publishScheduleRun(id: string) {
     return requestJson<PublishedScheduleResponse>(
       `/api/schedule-runs/${encodeURIComponent(id)}/publish`,
-      jsonInit(role, "POST"),
+      jsonInit("POST"),
     );
   },
 
-  createDraftFromRun(id: string, role: WorkspaceRole) {
+  createDraftFromRun(id: string) {
     return requestJson<ScheduleDraftDetailResponse>(
       `/api/schedule-runs/${encodeURIComponent(id)}/drafts`,
-      jsonInit(role, "POST"),
+      jsonInit("POST"),
     );
   },
 
   listAuditEvents() {
-    return requestJson<AuditEventListResponse>("/api/audit-events");
+    return requestJson<AuditEventListResponse>("/api/audit-events", internalReadInit());
   },
 
   getPublishedSchedule() {
     return requestJson<PublishedScheduleResponse>("/api/published-schedule");
   },
 
-  rollbackPublishedSchedule(role: WorkspaceRole) {
+  rollbackPublishedSchedule() {
     return requestJson<ScheduleRollbackResponse>(
       "/api/published-schedule/rollback",
-      jsonInit(role, "POST"),
+      jsonInit("POST"),
     );
   },
 
@@ -191,10 +211,10 @@ export const apiClient = {
     );
   },
 
-  async downloadPublishedScheduleCsv(role: WorkspaceRole) {
+  async downloadPublishedScheduleCsv() {
     const response = await fetch(`${apiBase}/api/published-schedule/export.csv`, {
       cache: "no-store",
-      headers: roleHeaders(role),
+      credentials: "include",
     });
     if (!response.ok) {
       throw new ApiClientError(response.status, await readErrorMessage(response));
@@ -203,95 +223,98 @@ export const apiClient = {
   },
 
   listScheduleDrafts() {
-    return requestJson<ScheduleDraftListResponse>("/api/schedule-drafts");
+    return requestJson<ScheduleDraftListResponse>("/api/schedule-drafts", internalReadInit());
   },
 
   getScheduleDraft(id: string) {
-    return requestJson<ScheduleDraftDetailResponse>(`/api/schedule-drafts/${encodeURIComponent(id)}`);
+    return requestJson<ScheduleDraftDetailResponse>(
+      `/api/schedule-drafts/${encodeURIComponent(id)}`,
+      internalReadInit(),
+    );
   },
 
   updateScheduleDraftAssignment(
     draftId: string,
     examTaskId: string,
     patch: Pick<ScheduledExam, "room_id" | "time_slot_id" | "teacher_ids">,
-    role: WorkspaceRole,
   ) {
     return requestJson<ScheduleDraftDetailResponse>(
       `/api/schedule-drafts/${encodeURIComponent(draftId)}/assignments/${encodeURIComponent(examTaskId)}`,
-      jsonInit(role, "PATCH", patch),
+      jsonInit("PATCH", patch),
     );
   },
 
-  lockScheduleDraftAssignment(draftId: string, examTaskId: string, role: WorkspaceRole) {
+  lockScheduleDraftAssignment(draftId: string, examTaskId: string) {
     return requestJson<ScheduleDraftDetailResponse>(
       `/api/schedule-drafts/${encodeURIComponent(draftId)}/assignments/${encodeURIComponent(examTaskId)}/lock`,
-      jsonInit(role, "POST"),
+      jsonInit("POST"),
     );
   },
 
-  unlockScheduleDraftAssignment(draftId: string, examTaskId: string, role: WorkspaceRole) {
+  unlockScheduleDraftAssignment(draftId: string, examTaskId: string) {
     return requestJson<ScheduleDraftDetailResponse>(
       `/api/schedule-drafts/${encodeURIComponent(draftId)}/assignments/${encodeURIComponent(examTaskId)}/unlock`,
-      jsonInit(role, "POST"),
+      jsonInit("POST"),
     );
   },
 
-  rebalanceScheduleDraft(draftId: string, role: WorkspaceRole) {
+  rebalanceScheduleDraft(draftId: string) {
     return requestJson<ScheduleDraftDetailResponse>(
       `/api/schedule-drafts/${encodeURIComponent(draftId)}/rebalance`,
-      jsonInit(role, "POST"),
+      jsonInit("POST"),
     );
   },
 
-  rescheduleScheduleDraft(draftId: string, role: WorkspaceRole) {
+  rescheduleScheduleDraft(draftId: string) {
     return requestJson<ScheduleDraftRescheduleResponse>(
       `/api/schedule-drafts/${encodeURIComponent(draftId)}/reschedule`,
-      jsonInit(role, "POST"),
+      jsonInit("POST"),
     );
   },
 
   getScheduleDraftSuggestions(draftId: string, examTaskId: string) {
     return requestJson<ScheduleDraftAdjustmentSuggestionsResponse>(
       `/api/schedule-drafts/${encodeURIComponent(draftId)}/assignments/${encodeURIComponent(examTaskId)}/suggestions`,
+      internalReadInit(),
     );
   },
 
-  publishScheduleDraft(draftId: string, role: WorkspaceRole) {
+  publishScheduleDraft(draftId: string) {
     return requestJson<ScheduleDraftPublishResponse>(
       `/api/schedule-drafts/${encodeURIComponent(draftId)}/publish`,
-      jsonInit(role, "POST"),
+      jsonInit("POST"),
     );
   },
 
-  discardScheduleDraft(draftId: string, role: WorkspaceRole) {
+  discardScheduleDraft(draftId: string) {
     return requestJson<ScheduleDraftDiscardResponse>(
       `/api/schedule-drafts/${encodeURIComponent(draftId)}/discard`,
-      jsonInit(role, "POST"),
+      jsonInit("POST"),
     );
   },
 
   compareScheduleDraft(id: string) {
     return requestJson<ScheduleDraftComparisonResponse>(
       `/api/schedule-drafts/${encodeURIComponent(id)}/compare`,
+      internalReadInit(),
     );
   },
 
-  createScheduleJob(role: WorkspaceRole) {
-    return requestJson<ScheduleJobResponse>("/api/schedule-jobs", jsonInit(role, "POST"));
+  createScheduleJob() {
+    return requestJson<ScheduleJobResponse>("/api/schedule-jobs", jsonInit("POST"));
   },
 
   listScheduleJobs() {
-    return requestJson<ScheduleJobListResponse>("/api/schedule-jobs");
+    return requestJson<ScheduleJobListResponse>("/api/schedule-jobs", internalReadInit());
   },
 
   updateTeacherUnavailableSlots(
     teacherId: string,
     slotIds: string[],
-    role: WorkspaceRole,
   ) {
     return requestJson<TeacherUnavailableSlotsResponse>(
       `/api/teachers/${encodeURIComponent(teacherId)}/unavailable-slots`,
-      jsonInit(role, "PATCH", { unavailable_slot_ids: slotIds }),
+      jsonInit("PATCH", { unavailable_slot_ids: slotIds }),
     );
   },
 };

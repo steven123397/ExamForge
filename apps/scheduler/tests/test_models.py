@@ -74,6 +74,20 @@ def test_valid_schedule_input_has_no_validation_errors():
     assert validate_schedule_input(make_valid_input()) == ()
 
 
+def test_teacher_unavailable_slots_must_reference_existing_time_slots():
+    data = make_valid_input()
+    invalid = replace(
+        data,
+        teachers=(
+            replace(data.teachers[0], unavailable_slot_ids=("missing-slot",)),
+        ),
+    )
+
+    assert validate_schedule_input(invalid) == (
+        "teacher t1 references missing unavailable_slot_id missing-slot",
+    )
+
+
 def test_valid_reschedule_context_has_no_validation_errors():
     context = RescheduleContext(
         baseline_assignments=(

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { ScheduleInput, ScheduleResult } from "@examforge/shared";
 import { InMemoryPlatformRepository } from "../src/repository.js";
 import { PublicationService } from "../src/services/publication-service.js";
+import { buildCompleteScheduleResult } from "./test-fixtures.js";
 
 describe("publication service", () => {
   it("records the authenticated actor and published run in CSV export audits", async () => {
@@ -55,7 +55,9 @@ describe("publication service", () => {
 async function createPublicationFixture() {
   const repository = new InMemoryPlatformRepository();
   const referenceData = await repository.getReferenceData();
-  const run = await repository.createScheduleRun(buildResult(referenceData.scheduleInput));
+  const run = await repository.createScheduleRun(
+    buildCompleteScheduleResult(referenceData.scheduleInput),
+  );
   const service = new PublicationService(repository);
   const published = await service.publishRun(run.run.id);
   assert.ok(published);
@@ -63,32 +65,5 @@ async function createPublicationFixture() {
     repository,
     service,
     runId: run.run.id,
-  };
-}
-
-function buildResult(input: ScheduleInput): ScheduleResult {
-  return {
-    assignments: [
-      {
-        exam_task_id: "e-data-structures",
-        room_id: "r-101",
-        time_slot_id: "s-001",
-        teacher_ids: ["t-zhang"],
-      },
-    ],
-    conflicts: [],
-    score: {
-      total_score: 100,
-      hard_violation_count: 0,
-      soft_penalty_items: [],
-    },
-    statistics: {
-      status: "feasible",
-      elapsed_ms: 1,
-      exam_count: input.exam_tasks.length,
-      room_count: input.rooms.length,
-      slot_count: input.time_slots.length,
-      attempted_assignments: 1,
-    },
   };
 }

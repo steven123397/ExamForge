@@ -155,6 +155,41 @@ def test_consecutive_weight_changes_teacher_selection():
     assert _assignment_by_exam(weighted)["e2"].teacher_ids == ("t3",)
 
 
+def test_consecutive_weight_does_not_penalize_the_next_day():
+    assignments = (
+        ScheduledExam("e1", "r1", "s1"),
+        ScheduledExam("e2", "r2", "s2"),
+        ScheduledExam("e3", "r3", "s3"),
+    )
+    schedule_input = _make_input(
+        exam_count=3,
+        teacher_count=3,
+        fixed_assignments=(
+            FixedAssignment("e1", "r1", "s1", ("t1",)),
+            FixedAssignment("e3", "r3", "s3", ("t2",)),
+        ),
+        soft_weights={
+            "teacher_workload_balance": 0,
+            "teacher_consecutive_invigilation": 80,
+        },
+    )
+    schedule_input = replace(
+        schedule_input,
+        time_slots=tuple(
+            replace(
+                slot,
+                date="2026-07-10" if slot.id == "s1" else "2026-07-11",
+            )
+            for slot in schedule_input.time_slots
+        ),
+    )
+
+    weighted, conflicts = assign_teachers(schedule_input, assignments)
+
+    assert conflicts == ()
+    assert _assignment_by_exam(weighted)["e2"].teacher_ids == ("t1",)
+
+
 def _make_input(
     *,
     exam_count: int = 2,

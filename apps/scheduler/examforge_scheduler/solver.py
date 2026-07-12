@@ -16,6 +16,7 @@ from .models import (
 )
 from .scoring import LOW_ROOM_UTILIZATION_THRESHOLD, calculate_score
 from .teacher_assignment import assign_teachers
+from .time_slots import are_consecutive_time_slots
 
 
 @dataclass(frozen=True)
@@ -420,7 +421,7 @@ def _student_consecutive_exam_terms(
                 if right_candidate.exam_task_id != right_task_id:
                     continue
                 right_slot = slots_by_id[right_candidate.slot_id]
-                if abs(left_slot.period_index - right_slot.period_index) != 1:
+                if not are_consecutive_time_slots(left_slot, right_slot):
                     continue
                 penalty = model.NewBoolVar(
                     "student_consecutive_exam"

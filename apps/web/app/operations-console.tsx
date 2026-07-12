@@ -10,6 +10,7 @@ import {
   ClipboardList,
   Database,
   Gauge,
+  LogOut,
   Play,
   ShieldCheck,
   Users,
@@ -17,6 +18,7 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AuthContext,
   PublishedScheduleNotificationsResponse,
   PublishedScheduleAudienceResponse,
   PublishedScheduleResponse,
@@ -42,10 +44,15 @@ import { RunHistoryPanel } from "../features/run-history/run-history-panel";
 import { TeacherUnavailablePanel } from "../features/teacher-unavailable/teacher-unavailable-panel";
 import { ApiClientError, apiBase, apiClient } from "../lib/api-client";
 import { queryKeys } from "../lib/query-keys";
-import type { WorkspaceRole } from "../lib/roles";
 
 
-export function OperationsConsole() {
+export function OperationsConsole({
+  auth,
+  onLogout,
+}: {
+  auth: AuthContext;
+  onLogout(): Promise<void>;
+}) {
   const [latestRun, setLatestRun] = useState<ScheduleRunResponse | null>(null);
   const [comparison, setComparison] = useState<ScheduleRunComparisonResponse | null>(null);
   const [notifications, setNotifications] = useState<PublishedScheduleNotificationsResponse | null>(null);
@@ -72,9 +79,9 @@ export function OperationsConsole() {
   const [jobState, setJobState] = useState<LoadState>("idle");
   const [teacherState, setTeacherState] = useState<LoadState>("idle");
   const [notificationState, setNotificationState] = useState<LoadState>("idle");
-  const [role, setRole] = useState<WorkspaceRole>("admin");
   const [error, setError] = useState<string | null>(null);
   const latestCompletedJobRunIdRef = useRef<string | null>(null);
+  const draftSuggestionRequestIdRef = useRef(0);
   const dashboardQuery = useQuery({
     queryKey: queryKeys.dashboard,
     queryFn: () => apiClient.getDashboard(),
@@ -86,10 +93,12 @@ export function OperationsConsole() {
   const scheduleRunsQuery = useQuery({
     queryKey: queryKeys.scheduleRuns,
     queryFn: () => apiClient.listScheduleRuns(),
+    retry: false,
   });
   const auditEventsQuery = useQuery({
     queryKey: queryKeys.auditEvents,
     queryFn: () => apiClient.listAuditEvents(),
+    retry: false,
   });
   const publishedScheduleQuery = useQuery<PublishedScheduleResponse | null>({
     queryKey: queryKeys.publishedSchedule,
@@ -108,6 +117,7 @@ export function OperationsConsole() {
   const draftsQuery = useQuery({
     queryKey: queryKeys.scheduleDrafts,
     queryFn: () => apiClient.listScheduleDrafts(),
+    retry: false,
   });
   const scheduleJobsQuery = useScheduleJobsQuery();
   const dashboard = dashboardQuery.data ?? null;
@@ -117,6 +127,11 @@ export function OperationsConsole() {
   const publishedSchedule = publishedScheduleQuery.data ?? null;
   const drafts = draftsQuery.data?.drafts ?? [];
   const scheduleJobs = scheduleJobsQuery.data?.jobs ?? [];
+  const visibleDraftSuggestions = (
+    draftSuggestions
+    && draftSuggestions.draft.id === currentDraft?.draft.id
+    && draftSuggestions.examTaskId === selectedDraftAssignmentId
+  ) ? draftSuggestions : null;
 
   useEffect(() => {
     void loadInitialData();
@@ -126,7 +141,7 @@ export function OperationsConsole() {
     if (!scheduleJobsQuery.data) {
       return;
     }
-    const latestCompleted = scheduleJobsQuery.data.jobs.find((job) => job.status === "completed" && job.runId);
+    const latestCompleted = scheduleJobsQuery.data.jobs.find((job) => job.status === "succeeded" && job.runId);
     if (latestCompleted?.runId && latestCompletedJobRunIdRef.current !== latestCompleted.runId) {
       latestCompletedJobRunIdRef.current = latestCompleted.runId;
       void apiClient.getScheduleRun(latestCompleted.runId).then(setLatestRun).catch(() => undefined);
@@ -148,13 +163,20 @@ export function OperationsConsole() {
   }, [currentDraft, selectedDraftAssignmentId]);
 
   useEffect(() => {
+    const requestId = draftSuggestionRequestIdRef.current + 1;
+    draftSuggestionRequestIdRef.current = requestId;
     const draftLocked = currentDraft?.draft.status === "published" || currentDraft?.draft.status === "discarded";
+    setDraftSuggestions(null);
     if (currentDraft && selectedDraftAssignmentId && !draftLocked) {
-      void loadDraftSuggestions(currentDraft.draft.id, selectedDraftAssignmentId);
+      void loadDraftSuggestions(currentDraft.draft.id, selectedDraftAssignmentId, requestId);
     } else {
-      setDraftSuggestions(null);
       setSuggestionState("idle");
     }
+    return () => {
+      if (draftSuggestionRequestIdRef.current === requestId) {
+        draftSuggestionRequestIdRef.current += 1;
+      }
+    };
   }, [currentDraft?.draft.id, currentDraft?.draft.status, currentDraft?.draft.updatedAt, selectedDraftAssignmentId]);
 
   async function loadInitialData() {
@@ -180,7 +202,7 @@ export function OperationsConsole() {
     setRunState("loading");
     setError(null);
     try {
-      const payload = await apiClient.createScheduleRun(role);
+      const payload = await apiClient.createScheduleRun();
       setLatestRun(payload);
       await refreshDashboard();
       await loadOperationalHistory();
@@ -195,7 +217,7 @@ export function OperationsConsole() {
     setJobState("loading");
     setError(null);
     try {
-      await apiClient.createScheduleJob(role);
+      await apiClient.createScheduleJob();
       await scheduleJobsQuery.refetch();
       setJobState("ready");
     } catch (reason) {
@@ -238,7 +260,7 @@ export function OperationsConsole() {
     setPublishState("loading");
     setError(null);
     try {
-      await apiClient.publishScheduleRun(id, role);
+      await apiClient.publishScheduleRun(id);
       await loadOperationalHistory();
       await refreshDashboard();
       setPublishState("ready");
@@ -254,7 +276,7 @@ export function OperationsConsole() {
     setRescheduleState("idle");
     setError(null);
     try {
-      const payload = await apiClient.createDraftFromRun(id, role);
+      const payload = await apiClient.createDraftFromRun(id);
       setCurrentDraft(payload);
       setSelectedDraftAssignmentId(payload.assignments[0]?.exam_task_id ?? "");
       await loadDraftComparison(payload.draft.id);
@@ -295,6 +317,15 @@ export function OperationsConsole() {
   }
 
   async function applyDraftSuggestion(suggestion: ScheduleDraftAdjustmentSuggestion) {
+    if (
+      !currentDraft
+      || !selectedDraftAssignmentId
+      || draftSuggestions?.draft.id !== currentDraft.draft.id
+      || draftSuggestions.examTaskId !== selectedDraftAssignmentId
+      || suggestion.assignment.exam_task_id !== selectedDraftAssignmentId
+    ) {
+      return;
+    }
     await saveDraftAssignment(suggestion.assignment.exam_task_id, {
       room_id: suggestion.assignment.room_id,
       time_slot_id: suggestion.assignment.time_slot_id,
@@ -333,7 +364,6 @@ export function OperationsConsole() {
         currentDraft.draft.id,
         examTaskId,
         patch,
-        role,
       );
       setCurrentDraft(payload);
       setSelectedDraftAssignmentId(examTaskId);
@@ -353,7 +383,6 @@ export function OperationsConsole() {
     await mutateDraft(() => apiClient.lockScheduleDraftAssignment(
       currentDraft.draft.id,
       selectedDraftAssignmentId,
-      role,
     ), "考试锁定失败");
   }
 
@@ -364,7 +393,6 @@ export function OperationsConsole() {
     await mutateDraft(() => apiClient.unlockScheduleDraftAssignment(
       currentDraft.draft.id,
       selectedDraftAssignmentId,
-      role,
     ), "考试解锁失败");
   }
 
@@ -372,7 +400,7 @@ export function OperationsConsole() {
     if (!currentDraft) {
       return;
     }
-    await mutateDraft(() => apiClient.rebalanceScheduleDraft(currentDraft.draft.id, role), "局部再平衡失败");
+    await mutateDraft(() => apiClient.rebalanceScheduleDraft(currentDraft.draft.id), "局部再平衡失败");
   }
 
   async function rescheduleDraft() {
@@ -383,7 +411,7 @@ export function OperationsConsole() {
     setDraftReschedule(null);
     setError(null);
     try {
-      const payload = await apiClient.rescheduleScheduleDraft(currentDraft.draft.id, role);
+      const payload = await apiClient.rescheduleScheduleDraft(currentDraft.draft.id);
       setLatestRun(payload);
       setDraftReschedule(payload);
       await refreshDashboard();
@@ -415,12 +443,24 @@ export function OperationsConsole() {
     }
   }
 
-  async function loadDraftSuggestions(id: string, examTaskId: string) {
+  async function loadDraftSuggestions(id: string, examTaskId: string, requestId: number) {
     setSuggestionState("loading");
     try {
-      setDraftSuggestions(await apiClient.getScheduleDraftSuggestions(id, examTaskId));
+      const response = await apiClient.getScheduleDraftSuggestions(id, examTaskId);
+      if (draftSuggestionRequestIdRef.current !== requestId) {
+        return;
+      }
+      if (response.draft.id !== id || response.examTaskId !== examTaskId) {
+        setDraftSuggestions(null);
+        setSuggestionState("error");
+        return;
+      }
+      setDraftSuggestions(response);
       setSuggestionState("ready");
     } catch (reason) {
+      if (draftSuggestionRequestIdRef.current !== requestId) {
+        return;
+      }
       setDraftSuggestions(null);
       setSuggestionState(statusOf(reason) === 404 ? "idle" : "error");
     }
@@ -435,7 +475,7 @@ export function OperationsConsole() {
     setRescheduleState("idle");
     setError(null);
     try {
-      const payload = await apiClient.publishScheduleDraft(currentDraft.draft.id, role);
+      const payload = await apiClient.publishScheduleDraft(currentDraft.draft.id);
       setCurrentDraft((current) => current ? {
         ...current,
         draft: payload.draft,
@@ -458,7 +498,7 @@ export function OperationsConsole() {
     setRescheduleState("idle");
     setError(null);
     try {
-      const payload = await apiClient.discardScheduleDraft(currentDraft.draft.id, role);
+      const payload = await apiClient.discardScheduleDraft(currentDraft.draft.id);
       setCurrentDraft((current) => current ? {
         ...current,
         draft: payload.draft,
@@ -484,7 +524,7 @@ export function OperationsConsole() {
     setPublishState("loading");
     setError(null);
     try {
-      await apiClient.rollbackPublishedSchedule(role);
+      await apiClient.rollbackPublishedSchedule();
       await loadOperationalHistory();
       await refreshDashboard();
       setPublishState("ready");
@@ -531,7 +571,7 @@ export function OperationsConsole() {
     setTeacherState("loading");
     setError(null);
     try {
-      await apiClient.updateTeacherUnavailableSlots(teacherId, slotIds, role);
+      await apiClient.updateTeacherUnavailableSlots(teacherId, slotIds);
       await loadInitialData();
       setTeacherState("ready");
     } catch (reason) {
@@ -555,7 +595,7 @@ export function OperationsConsole() {
     setNotificationState("loading");
     setError(null);
     try {
-      const blob = await apiClient.downloadPublishedScheduleCsv(role);
+      const blob = await apiClient.downloadPublishedScheduleCsv();
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -583,6 +623,7 @@ export function OperationsConsole() {
   const teacherWorkload = latestRun?.result.report?.teacher_workload as
     | { average_assignments?: number; teachers?: Array<{ teacher_id: string; assignment_count: number }> }
     | undefined;
+  const canOperate = auth.user.roles.some((role) => role === "admin" || role === "operator");
 
   const lookups = useMemo(() => {
     return {
@@ -599,6 +640,35 @@ export function OperationsConsole() {
       tasks: new Map(scheduleInput?.exam_tasks.map((item) => [item.id, item]) ?? []),
     };
   }, [scheduleInput]);
+
+  if (!canOperate) {
+    return (
+      <main className="limited-workspace">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">Published schedule portal</p>
+            <h1>{dashboard?.batch.name ?? "ExamForge 已发布查询"}</h1>
+          </div>
+          <SessionUser auth={auth} onLogout={onLogout} />
+        </header>
+        {error ? <div className="alert" role="alert" aria-live="polite">{error}</div> : null}
+        <Panel title="已发布查询" eyebrow="Published Portal">
+          <PublishedScheduleViewer
+            referenceData={referenceData}
+            teacherSchedule={teacherSchedule}
+            studentSchedule={studentSchedule}
+            queryState={queryState}
+            notifications={notifications}
+            notificationState={notificationState}
+            onTeacherQuery={queryTeacherSchedule}
+            onStudentQuery={queryStudentSchedule}
+            onRefreshNotifications={loadNotifications}
+            onExportCsv={downloadPublishedCsv}
+          />
+        </Panel>
+      </main>
+    );
+  }
 
   return (
     <main className="shell">
@@ -635,21 +705,18 @@ export function OperationsConsole() {
             <p className="eyebrow">Enterprise Examination Command Center</p>
             <h1>{dashboard?.batch.name ?? "ExamForge 排考运营台"}</h1>
           </div>
-          <button className="primary-button" onClick={runSchedule} disabled={runState === "loading"}>
+          <button
+            className="primary-button"
+            onClick={runSchedule}
+            disabled={runState === "loading" || !canOperate}
+          >
             <Play size={18} />
             {runState === "loading" ? "运行中" : "运行排考"}
           </button>
-          <label className="role-switcher">
-            <span>角色</span>
-            <select value={role} onChange={(event) => setRole(event.target.value as WorkspaceRole)}>
-              <option value="admin">管理员</option>
-              <option value="operator">排考员</option>
-              <option value="viewer">只读</option>
-            </select>
-          </label>
+          <SessionUser auth={auth} onLogout={onLogout} />
         </header>
 
-        {error ? <div className="alert">{error}</div> : null}
+        {error ? <div className="alert" role="alert" aria-live="polite">{error}</div> : null}
 
         <section className="metric-grid">
           <Metric icon={BookOpen} label="考试任务" value={dashboard?.metrics.examTaskCount ?? "--"} />
@@ -682,6 +749,9 @@ export function OperationsConsole() {
             <AsyncJobPanel
               jobs={scheduleJobs}
               jobState={jobState}
+              historyError={scheduleJobsQuery.isError}
+              historyRetrying={scheduleJobsQuery.isFetching}
+              onRetryHistory={() => scheduleJobsQuery.refetch()}
               onCreateJob={runScheduleJob}
             />
           </Panel>
@@ -753,7 +823,6 @@ export function OperationsConsole() {
         <Panel title="基础数据管理" eyebrow="Master Data">
           <ReferenceDataManager
             referenceData={referenceData}
-            role={role}
             onRefresh={loadInitialData}
             onError={setError}
           />
@@ -767,6 +836,9 @@ export function OperationsConsole() {
               publishedSchedule={publishedSchedule}
               compareState={compareState}
               publishState={publishState}
+              historyError={scheduleRunsQuery.isError}
+              historyRetrying={scheduleRunsQuery.isFetching}
+              onRetryHistory={() => scheduleRunsQuery.refetch()}
               onCompare={compareRuns}
               onPublish={publishRun}
               onCreateDraft={createDraftFromRun}
@@ -775,7 +847,12 @@ export function OperationsConsole() {
           </Panel>
 
           <Panel title="审计详情" eyebrow="Audit Trail">
-            <AuditEventsPanel events={auditEvents} />
+            <AuditEventsPanel
+              events={auditEvents}
+              historyError={auditEventsQuery.isError}
+              historyRetrying={auditEventsQuery.isFetching}
+              onRetryHistory={() => auditEventsQuery.refetch()}
+            />
           </Panel>
         </section>
 
@@ -785,15 +862,18 @@ export function OperationsConsole() {
             runs={runHistory}
             draft={currentDraft}
             comparison={draftComparison}
-            suggestions={draftSuggestions}
+            suggestions={visibleDraftSuggestions}
             reschedule={draftReschedule}
             referenceData={referenceData}
             selectedAssignmentId={selectedDraftAssignmentId}
             draftForm={draftForm}
             draftState={draftState}
+            historyError={draftsQuery.isError}
+            historyRetrying={draftsQuery.isFetching}
             suggestionState={suggestionState}
             rescheduleState={rescheduleState}
             onCreateDraft={createDraftFromRun}
+            onRetryHistory={() => draftsQuery.refetch()}
             onLoadDraft={loadDraft}
             onSelectAssignment={setSelectedDraftAssignmentId}
             onDraftFormChange={setDraftForm}
@@ -868,4 +948,18 @@ function splitList(value: string) {
 
 function statusOf(reason: unknown) {
   return reason instanceof ApiClientError ? reason.status : null;
+}
+
+function SessionUser({ auth, onLogout }: { auth: AuthContext; onLogout(): Promise<void> }) {
+  return (
+    <div className="session-user" data-testid="session-user">
+      <div>
+        <strong>{auth.user.displayName}</strong>
+        <span>{auth.user.roles.join(" / ")}</span>
+      </div>
+      <button type="button" className="icon-button" onClick={() => onLogout()} title="退出登录">
+        <LogOut size={17} />
+      </button>
+    </div>
+  );
 }

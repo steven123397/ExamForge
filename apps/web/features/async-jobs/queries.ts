@@ -11,6 +11,7 @@ export function useScheduleJobsQuery() {
   return useQuery({
     queryKey: queryKeys.scheduleJobs,
     queryFn: () => apiClient.listScheduleJobs(),
+    retry: false,
     refetchInterval: (query) => (
       hasActiveScheduleJobs(query.state.data?.jobs ?? []) ? 1200 : false
     ),
