@@ -58,21 +58,7 @@
 - 建议处理：在持久化队列完成后再评估 SSE 或 WebSocket，避免先做实时通道但缺少可靠任务状态。
 - 验证方式：新增浏览器端实时进度测试或 API 事件流测试。
 - 解决记录：未解决。
-- 本轮处置：暂缓。2026-07-12 第五版第一阶段已经建立持久化作业事件和 outbox 事实，但活动作业仍以 1200 ms `refetchInterval` 轮询，尚无 Publisher、可靠 Worker 和可补发事件流。SSE 继续按第五版第三阶段与 Redis/BullMQ、Outbox Publisher 和 Worker 成组实施；第一阶段记录已归档到 `docs/plan/history_plan.md`，第二阶段计划仍明确排除 SSE/WebSocket。
-
-### CR-008：Python 调度器尚未独立 FastAPI 服务化
-
-- 状态：暂缓
-- 严重级别：P2 中优先级
-- 所属模块：`apps/scheduler`、`apps/api`
-- 发现来源：`docs/design/总体设计与技术选型.md`
-- 位置：`apps/scheduler/examforge_scheduler/cli.py`、`apps/api/src/scheduler-client.ts`
-- 问题描述：总体设计曾规划 Python + FastAPI 算法服务；当前实现为 API 通过 JSON stdin/stdout 调用 Python CLI。
-- 影响：当前解耦程度足够支持测试和演示，但服务化部署、健康检查、并发隔离和独立扩缩容能力不足。
-- 建议处理：按第五版第二阶段计划引入 FastAPI/OpenAPI 和 API HTTP 客户端，保留 CLI 调试入口；合同、故障分类和独立部署验证通过后再切换生产调用并关闭本问题。
-- 验证方式：服务化后补充 API 到 scheduler 服务的契约测试和故障降级测试。
-- 解决记录：未解决。
-- 本轮处置：暂缓。2026-07-12 第五版第一阶段完成后，API 仍通过 `uv run ... python -m examforge_scheduler.cli solve` 和 stdin/stdout 调用调度器；第一阶段只固定了作业、身份和数据合同，没有引入临时网络服务。`docs/plan/第五版第二阶段计划.md` 已建立 FastAPI、OpenAPI、HTTP 客户端、独立镜像和故障分类的实施顺序；待生产 Compose 明确切换 HTTP 且合同、故障和进程间验证通过后重评本问题。
+- 本轮处置：暂缓。2026-07-13 第五版第二阶段完成后，活动作业仍以 1200 ms `refetchInterval` 轮询，尚无 Publisher、可靠 Worker 和可补发事件流；独立 FastAPI scheduler 与同步 HTTP 调用不能替代这些能力。SSE 继续按当前 `docs/plan/第五版第三阶段计划.md` 与 Redis/BullMQ、Outbox Publisher 和 Worker 成组实施，待真实队列、断线补发和浏览器证据齐全后重评。
 
 ## 4. 已解决问题索引
 
@@ -99,8 +85,11 @@
 - CR-025：运营历史子查询失败会被吞掉并显示成空数据
 - CR-026：发布、回滚、废弃和删除等高影响操作没有确认步骤
 - CR-027：草稿矩阵 ARIA 网格语义和异步错误播报不完整
+- CR-008：Python 调度器尚未独立 FastAPI 服务化
 
 ## 5. 审查记录
+
+- 2026-07-13：第五版第二阶段解决 CR-008。新增独立 FastAPI scheduler 的 `/health`、`/ready`、`/solve` 和确定性 OpenAPI，CLI/HTTP 共用解析、求解、报告与序列化 pipeline；API 生产 Compose 显式使用 HTTP 客户端并稳定分类合同错误、业务不可行、超时、取消、不可用、协议损坏和内部错误，不进行 CLI 回退。独立 scheduler 镜像以 UID 10002 运行并设置 CPU、内存、进程数和健康检查，API 镜像探针确认不含 Python/uv。固定样例等价测试覆盖可行、不可行、固定安排和增量重排；隔离 Compose smoke 直连 scheduler 后完成真实会话排考、PostgreSQL 持久化和 API 重启读取，Chromium E2E `17 passed`。CR-007 仍保留到第三阶段，不能用同步 HTTP 服务替代可靠队列或 SSE 结论。
 
 - 2026-07-06：创建本文档，迁入 `docs/status/project_status.md` 中既有存留风险，并补充第二版第四阶段已明确的轻量实现边界问题。
 - 2026-07-06：执行当前 `main` 全量代码审查；复核 CR-001 至 CR-009 均仍成立，新增 CR-010 至 CR-013。新鲜验证包括：默认 `python -m pytest -q` 因 `python` 缺失失败，`cd apps/scheduler && uv run --python 3.12 --extra dev python -m pytest -q` 为 `32 passed`，`npm test` 为 API `16` 个测试通过，`npm run typecheck` 通过，`npm run build` 通过，顺序运行 `npm run test:e2e` 为 `2 passed`，`npm audit --audit-level=moderate` 仍报告 2 个 moderate 公告。

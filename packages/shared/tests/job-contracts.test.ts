@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   authContextSchema,
   resolveScheduleJobTransition,
+  scheduleJobErrorCategorySchema,
   scheduleJobEventEnvelopeSchema,
   scheduleJobStatuses,
   scheduleJobStatusForSolveResult,
@@ -73,6 +74,19 @@ describe("schedule job contracts", () => {
     assert.equal(scheduleJobStatusForSolveResult("partial"), "succeeded");
     assert.equal(scheduleJobStatusForSolveResult("infeasible"), "succeeded");
     assert.equal(scheduleJobStatusForSolveResult("error"), "failed");
+  });
+
+  it("preserves scheduler HTTP failure categories in persisted job errors", () => {
+    for (const category of [
+      "validation",
+      "timeout",
+      "cancelled",
+      "unavailable",
+      "protocol",
+      "internal",
+    ]) {
+      assert.equal(scheduleJobErrorCategorySchema.parse(category), category);
+    }
   });
 
   it("validates a versioned event envelope with trace correlation", () => {

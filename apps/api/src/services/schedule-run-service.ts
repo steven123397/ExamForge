@@ -4,7 +4,10 @@ import {
   type ScheduleInput,
 } from "@examforge/shared";
 import type { PlatformRepository } from "../repository.js";
-import type { SchedulerClient } from "../scheduler-client.js";
+import {
+  SchedulerClientError,
+  type SchedulerClient,
+} from "../scheduler-client.js";
 import { createHash, randomUUID } from "node:crypto";
 
 export type DeferredTask = () => Promise<void>;
@@ -30,6 +33,7 @@ export class ScheduleRunService {
     const referenceData = await this.repository.getReferenceData();
     const result = await this.scheduler.solve(
       withScheduleOverrides(referenceData.scheduleInput, overrides),
+      { requestId: `trace-${randomUUID()}` },
     );
     return this.repository.createScheduleRun(result);
   }
@@ -58,7 +62,7 @@ export class ScheduleRunService {
           .map((assignment) => assignment.exam_task_id)
           .filter((examTaskId) => !lockedExamTaskIds.has(examTaskId)),
       },
-    });
+    }, { requestId: `trace-${randomUUID()}` });
     const reschedule = rescheduleReportSchema.parse(result.report?.reschedule);
     const response = await this.repository.createScheduleRun(result);
     return {
@@ -83,7 +87,11 @@ export class ScheduleRunService {
       traceId: context.traceId ?? `trace-${randomUUID()}`,
     });
     if (result.created) {
-      this.defer(() => this.executeScheduleJob(result.job.id, overrides));
+      this.defer(() => this.executeScheduleJob(
+        result.job.id,
+        overrides,
+        result.job.traceId,
+      ));
     }
     return result.job;
   }
@@ -100,7 +108,11 @@ export class ScheduleRunService {
     return this.repository.recoverInterruptedScheduleJobs?.();
   }
 
-  private async executeScheduleJob(id: string, overrides: ScheduleRunOverrides) {
+  private async executeScheduleJob(
+    id: string,
+    overrides: ScheduleRunOverrides,
+    traceId: string,
+  ) {
     const started = await this.repository.transitionScheduleJob(id, {
       to: "running",
       progress: 35,
@@ -112,21 +124,45 @@ export class ScheduleRunService {
       const referenceData = await this.repository.getReferenceData();
       const result = await this.scheduler.solve(
         withScheduleOverrides(referenceData.scheduleInput, overrides),
+        { requestId: traceId },
       );
       await this.repository.completeScheduleJob(id, result);
     } catch (error) {
+      const failure = scheduleJobFailure(error);
       await this.repository.transitionScheduleJob(id, {
-        to: "failed",
+        to: failure.status,
         progress: 100,
-        error: {
-          category: "scheduler",
-          code: "schedule_job_execution_failed",
-          message: error instanceof Error ? error.message : "Schedule job failed.",
-          retryable: true,
-        },
+        error: failure.error,
       });
     }
   }
+}
+
+function scheduleJobFailure(error: unknown) {
+  if (error instanceof SchedulerClientError) {
+    return {
+      status: error.category === "timeout"
+        ? "timed_out" as const
+        : error.category === "cancelled"
+          ? "cancelled" as const
+          : "failed" as const,
+      error: {
+        category: error.category,
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+      },
+    };
+  }
+  return {
+    status: "failed" as const,
+    error: {
+      category: "scheduler" as const,
+      code: "schedule_job_execution_failed",
+      message: "Schedule job execution failed.",
+      retryable: true,
+    },
+  };
 }
 
 function deferWithTimer(task: DeferredTask) {

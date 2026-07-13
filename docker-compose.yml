@@ -40,6 +40,25 @@ services:
         condition: service_completed_successfully
     restart: "no"
 
+  scheduler:
+    image: ${COMPOSE_PROJECT_NAME:-examforge}-scheduler:demo
+    build:
+      context: .
+      dockerfile: apps/scheduler/Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 15s
+    cpus: ${SCHEDULER_CPUS:-2.0}
+    mem_limit: ${SCHEDULER_MEMORY_LIMIT:-2g}
+    pids_limit: ${SCHEDULER_PIDS_LIMIT:-256}
+    ports:
+      - "${SCHEDULER_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
   api:
     image: ${COMPOSE_PROJECT_NAME:-examforge}-api:demo
     build:
@@ -51,7 +70,9 @@ services:
       API_PORT: 4000
       DATABASE_URL: postgres://${POSTGRES_USER:-examforge}:${POSTGRES_PASSWORD:-examforge}@postgres:5432/${POSTGRES_DB:-examforge}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      SCHEDULER_PYTHON: uv
+      SCHEDULER_TRANSPORT: http
+      SCHEDULER_BASE_URL: http://scheduler:8000
+      SCHEDULER_HTTP_TIMEOUT_MS: ${SCHEDULER_HTTP_TIMEOUT_MS:-35000}
       EXAMFORGE_ADMIN_PASSWORD: ${EXAMFORGE_ADMIN_PASSWORD:-}
       EXAMFORGE_OPERATOR_PASSWORD: ${EXAMFORGE_OPERATOR_PASSWORD:-}
       EXAMFORGE_TEACHER_PASSWORD: ${EXAMFORGE_TEACHER_PASSWORD:-}
@@ -63,6 +84,8 @@ services:
     depends_on:
       seed:
         condition: service_completed_successfully
+      scheduler:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 5s

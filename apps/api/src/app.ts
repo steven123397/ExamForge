@@ -21,7 +21,8 @@ import {
 } from "./repository.js";
 import { createPlatformRepository } from "./repository-factory.js";
 import {
-  PythonSchedulerClient,
+  createSchedulerClient,
+  SchedulerClientError,
   type SchedulerClient,
 } from "./scheduler-client.js";
 import {
@@ -70,7 +71,7 @@ export function createApp(options: AppOptions = {}) {
     },
   });
   const repository = options.repository ?? createPlatformRepository();
-  const scheduler = options.scheduler ?? new PythonSchedulerClient();
+  const scheduler = options.scheduler ?? createSchedulerClient();
   const scheduleRunService = new ScheduleRunService(repository, scheduler);
   const draftService = new DraftService(repository);
   const publicationService = new PublicationService(repository);
@@ -79,6 +80,15 @@ export function createApp(options: AppOptions = {}) {
   const trustedOrigins = getTrustedOrigins();
 
   app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof SchedulerClientError) {
+      return reply.code(schedulerHttpStatus(error)).send({
+        error: error.code,
+        message: error.message,
+        category: error.category,
+        retryable: error.retryable,
+        requestId: error.requestId,
+      });
+    }
     if (isDatabaseIntegrityError(error)) {
       return reply.code(409).send({
         error: "data_integrity_violation",
@@ -137,13 +147,14 @@ export function createApp(options: AppOptions = {}) {
   app.get("/ready", async (_request, reply) => {
     try {
       await repository.checkReadiness();
+      await scheduler.checkReadiness?.();
       return {
         ok: true,
         service: "examforge-api",
         storage: repository.storageMode,
       };
     } catch {
-      app.log.warn("Repository readiness check failed.");
+      app.log.warn("API dependency readiness check failed.");
       return reply.code(503).send({
         ok: false,
         service: "examforge-api",
@@ -972,6 +983,22 @@ function isDatabaseIntegrityError(error: unknown): boolean {
     current = candidate.cause;
   }
   return false;
+}
+
+function schedulerHttpStatus(error: SchedulerClientError) {
+  switch (error.category) {
+    case "validation":
+      return 422;
+    case "timeout":
+      return 504;
+    case "unavailable":
+      return 503;
+    case "cancelled":
+      return 409;
+    case "protocol":
+    case "internal":
+      return 502;
+  }
 }
 
 function parseReferenceResource(value: string): ReferenceResource | null {

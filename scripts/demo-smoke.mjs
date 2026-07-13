@@ -2,9 +2,18 @@ import { execFileSync } from "node:child_process";
 
 const apiBase = process.env.DEMO_API_BASE_URL ?? "http://127.0.0.1:4000";
 const webBase = process.env.DEMO_WEB_BASE_URL ?? "http://127.0.0.1:3000";
+const schedulerBase = process.env.DEMO_SCHEDULER_BASE_URL ?? "http://127.0.0.1:8000";
 const operatorPassword = process.env.DEMO_OPERATOR_PASSWORD
   ?? process.env.EXAMFORGE_OPERATOR_PASSWORD;
 assert(operatorPassword, "DEMO_OPERATOR_PASSWORD must be set.");
+
+const schedulerHealth = await getJson(`${schedulerBase}/health`);
+assert(
+  schedulerHealth.ok === true && schedulerHealth.service === "examforge-scheduler",
+  "Scheduler liveness is invalid.",
+);
+const schedulerReadiness = await getJson(`${schedulerBase}/ready`);
+assert(schedulerReadiness.ok === true, "Scheduler is not ready.");
 
 const health = await getJson(`${apiBase}/health`);
 assert(health.ok === true && health.service === "examforge-api", "API liveness is invalid.");
@@ -27,6 +36,33 @@ for (const [resource, records] of Object.entries({
   assert(Array.isArray(records) && records.length > 0, `Seeded ${resource} are missing.`);
 }
 
+const directSchedule = await getJson(`${schedulerBase}/solve`, {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    "x-request-id": "demo-smoke-feasible",
+  },
+  body: JSON.stringify(referenceData.scheduleInput),
+});
+assert(
+  directSchedule.statistics?.status === "feasible",
+  `Expected direct scheduler feasible result, received ${directSchedule.statistics?.status}.`,
+);
+const infeasibleInput = structuredClone(referenceData.scheduleInput);
+infeasibleInput.rooms = infeasibleInput.rooms.map((room) => ({ ...room, capacity: 1 }));
+const directInfeasible = await getJson(`${schedulerBase}/solve`, {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    "x-request-id": "demo-smoke-infeasible",
+  },
+  body: JSON.stringify(infeasibleInput),
+});
+assert(
+  directInfeasible.statistics?.status === "infeasible",
+  `Expected direct scheduler infeasible result, received ${directInfeasible.statistics?.status}.`,
+);
+
 const run = await getJson(`${apiBase}/api/schedule-runs`, {
   method: "POST",
   headers: { ...authenticatedHeaders, origin: webBase },
@@ -48,6 +84,7 @@ assert(persistedRun.run?.id === run.run.id, "Schedule run was not persisted acro
 console.log(JSON.stringify({
   smoke: true,
   storage: readiness.storage,
+  schedulerVersion: schedulerReadiness.version,
   runId: run.run.id,
   assignments: run.result.assignments.length,
   hardViolations: run.result.score.hard_violation_count,

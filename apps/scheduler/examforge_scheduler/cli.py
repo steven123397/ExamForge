@@ -1,29 +1,8 @@
 import argparse
 import json
 import sys
-from dataclasses import asdict, is_dataclass
-from enum import Enum
-from typing import Any
 
-from .conflicts import detect_assignment_conflicts
-from .models import (
-    ConstraintProfile,
-    Course,
-    ExamTask,
-    ExamType,
-    FixedAssignment,
-    RescheduleContext,
-    Room,
-    RoomType,
-    ScheduleInput,
-    ScheduledExam,
-    Teacher,
-    TimeSlot,
-    StudentGroup,
-)
-from .precheck import run_precheck
-from .report import build_schedule_report
-from .solver import solve_schedule
+from .transport import SchedulerValidationError, solve_payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,164 +21,31 @@ def main(argv: list[str] | None = None) -> int:
 def _solve_from_stdin() -> int:
     try:
         raw_input = json.load(sys.stdin)
-        schedule_input = _schedule_input_from_json(raw_input)
-        result = _solve_with_report(schedule_input)
+        result = solve_payload(raw_input)
     except Exception as exc:
         error_payload = {
             "error": {
-                "type": exc.__class__.__name__,
+                "category": (
+                    exc.category
+                    if isinstance(exc, SchedulerValidationError)
+                    else "validation"
+                ),
+                "code": (
+                    exc.code
+                    if isinstance(exc, SchedulerValidationError)
+                    else "scheduler_payload_invalid"
+                ),
                 "message": str(exc),
+                "retryable": False,
             }
         }
+        if isinstance(exc, SchedulerValidationError):
+            error_payload["issues"] = list(exc.issues)
         print(json.dumps(error_payload, ensure_ascii=False))
         return 1
 
-    print(json.dumps(_to_jsonable(result), ensure_ascii=False))
+    print(json.dumps(result, ensure_ascii=False))
     return 0
-
-
-def _solve_with_report(schedule_input: ScheduleInput) -> dict[str, Any]:
-    precheck_conflicts = run_precheck(schedule_input)
-    result = solve_schedule(schedule_input)
-    assignment_conflicts = detect_assignment_conflicts(schedule_input, result.assignments)
-    all_conflicts = (*precheck_conflicts, *result.conflicts, *assignment_conflicts)
-    result_with_score = result.__class__(
-        assignments=result.assignments,
-        conflicts=all_conflicts,
-        score=result.score.__class__(
-            total_score=0 if all_conflicts else result.score.total_score,
-            hard_violation_count=len(all_conflicts),
-            soft_penalty_items=result.score.soft_penalty_items,
-        ),
-        statistics=result.statistics,
-    )
-    report = build_schedule_report(schedule_input, result_with_score)
-    return {
-        "assignments": result_with_score.assignments,
-        "conflicts": result_with_score.conflicts,
-        "score": result_with_score.score,
-        "statistics": result_with_score.statistics,
-        "report": report,
-    }
-
-
-def _schedule_input_from_json(payload: dict[str, Any]) -> ScheduleInput:
-    reschedule_payload = payload.get("reschedule_context")
-    reschedule_context = (
-        None
-        if reschedule_payload is None
-        else RescheduleContext(
-            baseline_assignments=tuple(
-                ScheduledExam(
-                    exam_task_id=item["exam_task_id"],
-                    room_id=item["room_id"],
-                    time_slot_id=item["time_slot_id"],
-                    teacher_ids=tuple(item.get("teacher_ids", ())),
-                )
-                for item in reschedule_payload["baseline_assignments"]
-            ),
-            movable_exam_task_ids=tuple(
-                reschedule_payload.get("movable_exam_task_ids", ())
-            ),
-        )
-    )
-
-    return ScheduleInput(
-        student_groups=tuple(
-            StudentGroup(
-                id=item["id"],
-                name=item["name"],
-                size=item["size"],
-                department_id=item["department_id"],
-            )
-            for item in payload["student_groups"]
-        ),
-        teachers=tuple(
-            Teacher(
-                id=item["id"],
-                name=item["name"],
-                department_id=item["department_id"],
-                unavailable_slot_ids=tuple(item.get("unavailable_slot_ids", ())),
-            )
-            for item in payload["teachers"]
-        ),
-        courses=tuple(
-            Course(
-                id=item["id"],
-                name=item["name"],
-                department_id=item["department_id"],
-                exam_type=ExamType(item["exam_type"]),
-            )
-            for item in payload["courses"]
-        ),
-        rooms=tuple(
-            Room(
-                id=item["id"],
-                name=item["name"],
-                building_id=item["building_id"],
-                capacity=item["capacity"],
-                room_type=RoomType(item["room_type"]),
-                equipment_tags=tuple(item.get("equipment_tags", ())),
-            )
-            for item in payload["rooms"]
-        ),
-        time_slots=tuple(
-            TimeSlot(
-                id=item["id"],
-                date=item["date"],
-                start_time=item["start_time"],
-                end_time=item["end_time"],
-                period_index=item["period_index"],
-            )
-            for item in payload["time_slots"]
-        ),
-        exam_tasks=tuple(
-            ExamTask(
-                id=item["id"],
-                course_id=item["course_id"],
-                student_group_ids=tuple(item["student_group_ids"]),
-                expected_count=item["expected_count"],
-                duration_minutes=item["duration_minutes"],
-                required_room_type=RoomType(item["required_room_type"]),
-                required_equipment_tags=tuple(item.get("required_equipment_tags", ())),
-                allowed_slot_ids=tuple(item.get("allowed_slot_ids", ())),
-                invigilator_count=item["invigilator_count"],
-            )
-            for item in payload["exam_tasks"]
-        ),
-        constraint_profile=ConstraintProfile(
-            hard_rules=tuple(payload["constraint_profile"]["hard_rules"]),
-            soft_weights=dict(payload["constraint_profile"]["soft_weights"]),
-            time_limit_seconds=payload["constraint_profile"]["time_limit_seconds"],
-        ),
-        fixed_assignments=tuple(
-            FixedAssignment(
-                exam_task_id=item["exam_task_id"],
-                room_id=item["room_id"],
-                time_slot_id=item["time_slot_id"],
-                teacher_ids=tuple(item.get("teacher_ids", ())),
-            )
-            for item in payload.get("fixed_assignments", ())
-        ),
-        reschedule_context=reschedule_context,
-    )
-
-
-def _to_jsonable(value: Any) -> Any:
-    if isinstance(value, Enum):
-        return value.value
-    if is_dataclass(value):
-        return {
-            key: _to_jsonable(item)
-            for key, item in asdict(value).items()
-        }
-    if isinstance(value, tuple):
-        return [_to_jsonable(item) for item in value]
-    if isinstance(value, list):
-        return [_to_jsonable(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _to_jsonable(item) for key, item in value.items()}
-    return value
 
 
 if __name__ == "__main__":

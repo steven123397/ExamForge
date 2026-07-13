@@ -14,7 +14,10 @@ import {
 import { createApp as createProductionApp, type AppOptions } from "../src/app.js";
 import { InMemoryPlatformRepository, type PlatformRepository } from "../src/repository.js";
 import { hashSessionToken } from "../src/auth/security.js";
-import type { SchedulerClient } from "../src/scheduler-client.js";
+import {
+  SchedulerClientError,
+  type SchedulerClient,
+} from "../src/scheduler-client.js";
 import {
   buildCompleteScheduleResult,
   buildTestAuthUsers,
@@ -155,6 +158,14 @@ class DraftWorkflowScheduler implements SchedulerClient {
   }
 }
 
+class FailingScheduler implements SchedulerClient {
+  constructor(private readonly error: SchedulerClientError) {}
+
+  async solve(): Promise<ScheduleResult> {
+    throw this.error;
+  }
+}
+
 describe("ExamForge API", () => {
   it("reports process health and repository readiness separately", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
@@ -195,6 +206,62 @@ describe("ExamForge API", () => {
     });
     assert.doesNotMatch(response.body, /secret/);
     await app.close();
+  });
+
+  it("maps scheduler client failures to stable sanitized HTTP errors", async () => {
+    const cases = [
+      {
+        failure: new SchedulerClientError(
+          "Schedule input failed semantic validation.",
+          "validation",
+          "scheduler_input_invalid",
+          false,
+          "trace-http-validation",
+        ),
+        expectedStatus: 422,
+      },
+      {
+        failure: new SchedulerClientError(
+          "Scheduler request exceeded its deadline.",
+          "timeout",
+          "scheduler_timeout",
+          true,
+          "trace-http-timeout",
+        ),
+        expectedStatus: 504,
+      },
+      {
+        failure: new SchedulerClientError(
+          "Scheduler service is unavailable.",
+          "unavailable",
+          "scheduler_unavailable",
+          true,
+          "trace-http-unavailable",
+        ),
+        expectedStatus: 503,
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const app = createApp({ scheduler: new FailingScheduler(testCase.failure) });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/schedule-runs",
+        headers: operatorHeaders,
+      });
+
+      assert.equal(response.statusCode, testCase.expectedStatus);
+      assert.deepEqual(response.json(), {
+        error: testCase.failure.code,
+        message: testCase.failure.message,
+        category: testCase.failure.category,
+        retryable: testCase.failure.retryable,
+        requestId: testCase.failure.requestId,
+      });
+      assert.doesNotMatch(response.body, /student_groups|constraint_profile/);
+      await app.close();
+    }
   });
 
   it("returns dashboard data", async () => {

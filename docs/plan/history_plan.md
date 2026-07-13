@@ -213,3 +213,16 @@
 - 浏览器与视觉证据：隔离 Compose/PostgreSQL smoke 完成真实登录、排考、持久化读取和 API 重启检查，Chromium E2E `17 passed`；桌面登录、1600 px 管理员页面和 375 px 教师门户截图均非空，桌面和移动页面宽度等于视口，移动端未发现可见溢出元素。临时 Compose 项目、网络和卷均在验证后清理，用户原有演示栈未修改。
 - 范围边界：未实现 Redis/BullMQ、Outbox Publisher、独立 Worker、FastAPI scheduler、SSE/WebSocket、完整任务中心或全量前端路由重构；API 仍以进程内执行器调用 Python CLI，Web 仍轮询作业状态。CR-002、CR-003、CR-007、CR-008 继续按审查状态文档维护。
 - 后续影响：下一阶段按 `docs/plan/第五版第二阶段计划.md` 将 scheduler 服务化；只处理 FastAPI、OpenAPI、HTTP 客户端、故障合同和独立容器，不提前混入可靠队列与实时事件。
+
+## 2026-07-13 第五版第二阶段：Scheduler 服务化
+
+- 原计划：`docs/plan/第五版第二阶段计划.md`。
+- 完成提交：未提交；按仓库规则保留当前工作树，不自动提交或推送。
+- 完成内容：抽取 CLI/HTTP 共用的输入解析、语义校验、预检、求解、冲突整理、报告和序列化 pipeline；新增 FastAPI `/health`、`/ready`、`/solve`、稳定错误 envelope、request ID 和完整 Pydantic 网络模型；生成受版本控制的确定性 OpenAPI，并在根脚本与 GitHub Actions 中检查漂移；API 新增运行时校验的 HTTP scheduler 客户端，区分 validation、timeout、cancelled、unavailable、protocol 和 internal，生产 Compose 显式使用 HTTP 且不静默回退 CLI；作业失败保留稳定类别、代码、可重试性和 trace ID。
+- 镜像与演示：新增独立 scheduler Dockerfile，使用 UID 10002 非 root 运行并设置 CPU、内存、进程数、停止宽限期和 readiness；API 镜像删除 Python、uv 和 scheduler 源码。Compose 新增 scheduler 健康依赖，smoke 先直连验证健康、可行和不可行结果，再以真实 Cookie 会话完成 HTTP 排考、PostgreSQL 持久化和 API 重启读取。
+- 合同与故障证据：固定可行、不可行、固定安排和增量重排样例证明 CLI、HTTP 与 application pipeline 规范化输出等价；API 客户端测试覆盖合同错误、业务不可行、超时、取消、服务不可用、非 JSON、schema 漂移和内部错误，不泄露请求输入或内部异常。scheduler 镜像 `/health`、`/ready` 均为 200、版本 `0.1.0`，容器 UID 为 10002；API 镜像探针确认不存在 Python 和 uv。
+- 性能证据：固定 seed `20260711`、30 秒上限下，直接 benchmark 的 50、100、150 场均 feasible、0 冲突，耗时 328、743、1183 ms；本机 HTTP benchmark 的 solver 耗时为 363、619、1099 ms，端到端耗时为 386、628、1109 ms，协议开销为 23、9、10 ms。仅记录单机单请求实测，不宣称并发容量或全局最优。
+- 全量验证：`npm run test:ci` 为 `7 passed`，`npm run check:ci`、`npm run typecheck`、`npm run check:scheduler-openapi` 和生产构建通过；shared `10 passed`、API/服务 `80 passed`、scheduler `93 passed`，scheduler 测试存在 1 条 FastAPI `TestClient` 上游弃用警告。可丢弃 PostgreSQL 16 中迁移测试 `5 passed`、12 个迁移首次全部应用且二次应用 0、迁移检查无缺失或双向不一致、正式迁移无待应用、真实集成测试 `13 passed`。隔离 Compose smoke 通过，Chromium E2E `17 passed`；临时容器、网络、卷和独立数据库均已清理，用户原有演示栈未修改。
+- 审查处置：CR-008 已移入已解决索引并记录服务化、合同、镜像和进程间证据；CR-007 仍保持暂缓，不能用同步 HTTP 服务替代可靠队列或实时事件结论。
+- 范围边界：未引入 Redis/BullMQ、Outbox Publisher、独立 Worker、可靠重试、SSE/WebSocket、完整任务中心或前端页面级重构；作业仍由 API 进程内执行器领取，Web 仍轮询。HTTP 取消只中止调用方等待，不宣称可强制终止已进入 OR-Tools 的线程。
+- 后续影响：下一阶段按 `docs/plan/第五版第三阶段计划.md` 实施可靠任务与实时事件；腾讯云私有试部署必须在用户单独授权后进行，不自动开始第三阶段。

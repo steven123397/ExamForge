@@ -28,9 +28,9 @@
 
 - `docs/plan/README.md`：计划文档模板和生命周期规则。
 - `docs/plan/history_plan.md`：已完成计划的历史摘要。
-- `docs/plan/第五版第二阶段计划.md`：第五版 FastAPI scheduler、OpenAPI、API HTTP 客户端、独立镜像和服务化验证计划。
+- `docs/plan/第五版第三阶段计划.md`：第五版 Redis/BullMQ、Outbox Publisher、独立 Worker、可靠重试/取消/超时、SSE 和私有试部署计划。
 
-第四版完成后的全量代码审查及整改、第五版第一阶段均已归档；当前唯一活动计划为第五版第二阶段 Scheduler 服务化。
+第四版完成后的全量代码审查及整改、第五版第一阶段和第二阶段均已归档；当前唯一活动计划为第五版第三阶段可靠任务与实时事件。
 
 ## 状态文档
 

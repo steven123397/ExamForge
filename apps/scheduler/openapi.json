@@ -1,0 +1,809 @@
+{
+  "components": {
+    "schemas": {
+      "AssignmentModel": {
+        "additionalProperties": false,
+        "properties": {
+          "exam_task_id": {
+            "minLength": 1,
+            "title": "Exam Task Id",
+            "type": "string"
+          },
+          "room_id": {
+            "minLength": 1,
+            "title": "Room Id",
+            "type": "string"
+          },
+          "teacher_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Teacher Ids",
+            "type": "array"
+          },
+          "time_slot_id": {
+            "minLength": 1,
+            "title": "Time Slot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "exam_task_id",
+          "room_id",
+          "time_slot_id"
+        ],
+        "title": "AssignmentModel",
+        "type": "object"
+      },
+      "ConflictRecordModel": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Affected Ids",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "suggestion": {
+            "title": "Suggestion",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "severity",
+          "affected_ids",
+          "message",
+          "suggestion"
+        ],
+        "title": "ConflictRecordModel",
+        "type": "object"
+      },
+      "ConstraintProfileModel": {
+        "additionalProperties": false,
+        "properties": {
+          "hard_rules": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Hard Rules",
+            "type": "array"
+          },
+          "soft_weights": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Soft Weights",
+            "type": "object"
+          },
+          "time_limit_seconds": {
+            "exclusiveMinimum": 0.0,
+            "title": "Time Limit Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "hard_rules",
+          "soft_weights",
+          "time_limit_seconds"
+        ],
+        "title": "ConstraintProfileModel",
+        "type": "object"
+      },
+      "CourseModel": {
+        "additionalProperties": false,
+        "properties": {
+          "department_id": {
+            "minLength": 1,
+            "title": "Department Id",
+            "type": "string"
+          },
+          "exam_type": {
+            "enum": [
+              "written",
+              "computer",
+              "oral"
+            ],
+            "title": "Exam Type",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "department_id",
+          "exam_type"
+        ],
+        "title": "CourseModel",
+        "type": "object"
+      },
+      "ErrorDetailModel": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "validation",
+              "internal"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "category",
+          "code",
+          "message",
+          "retryable"
+        ],
+        "title": "ErrorDetailModel",
+        "type": "object"
+      },
+      "ErrorResponseModel": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetailModel"
+          },
+          "issues": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issues"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "request_id"
+        ],
+        "title": "ErrorResponseModel",
+        "type": "object"
+      },
+      "ExamTaskModel": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_slot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Slot Ids",
+            "type": "array"
+          },
+          "course_id": {
+            "minLength": 1,
+            "title": "Course Id",
+            "type": "string"
+          },
+          "duration_minutes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Duration Minutes",
+            "type": "integer"
+          },
+          "expected_count": {
+            "exclusiveMinimum": 0.0,
+            "title": "Expected Count",
+            "type": "integer"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "invigilator_count": {
+            "exclusiveMinimum": 0.0,
+            "title": "Invigilator Count",
+            "type": "integer"
+          },
+          "required_equipment_tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Equipment Tags",
+            "type": "array"
+          },
+          "required_room_type": {
+            "enum": [
+              "standard",
+              "computer_lab",
+              "language_lab"
+            ],
+            "title": "Required Room Type",
+            "type": "string"
+          },
+          "student_group_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Student Group Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "course_id",
+          "student_group_ids",
+          "expected_count",
+          "duration_minutes",
+          "required_room_type",
+          "invigilator_count"
+        ],
+        "title": "ExamTaskModel",
+        "type": "object"
+      },
+      "RescheduleContextModel": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline_assignments": {
+            "items": {
+              "$ref": "#/components/schemas/AssignmentModel"
+            },
+            "minItems": 1,
+            "title": "Baseline Assignments",
+            "type": "array"
+          },
+          "movable_exam_task_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Movable Exam Task Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "baseline_assignments"
+        ],
+        "title": "RescheduleContextModel",
+        "type": "object"
+      },
+      "RoomModel": {
+        "additionalProperties": false,
+        "properties": {
+          "building_id": {
+            "minLength": 1,
+            "title": "Building Id",
+            "type": "string"
+          },
+          "capacity": {
+            "exclusiveMinimum": 0.0,
+            "title": "Capacity",
+            "type": "integer"
+          },
+          "equipment_tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Equipment Tags",
+            "type": "array"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "room_type": {
+            "enum": [
+              "standard",
+              "computer_lab",
+              "language_lab"
+            ],
+            "title": "Room Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "building_id",
+          "capacity",
+          "room_type"
+        ],
+        "title": "RoomModel",
+        "type": "object"
+      },
+      "ScheduleInputModel": {
+        "additionalProperties": false,
+        "properties": {
+          "constraint_profile": {
+            "$ref": "#/components/schemas/ConstraintProfileModel"
+          },
+          "courses": {
+            "items": {
+              "$ref": "#/components/schemas/CourseModel"
+            },
+            "title": "Courses",
+            "type": "array"
+          },
+          "exam_tasks": {
+            "items": {
+              "$ref": "#/components/schemas/ExamTaskModel"
+            },
+            "title": "Exam Tasks",
+            "type": "array"
+          },
+          "fixed_assignments": {
+            "items": {
+              "$ref": "#/components/schemas/AssignmentModel"
+            },
+            "title": "Fixed Assignments",
+            "type": "array"
+          },
+          "reschedule_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RescheduleContextModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rooms": {
+            "items": {
+              "$ref": "#/components/schemas/RoomModel"
+            },
+            "title": "Rooms",
+            "type": "array"
+          },
+          "student_groups": {
+            "items": {
+              "$ref": "#/components/schemas/StudentGroupModel"
+            },
+            "title": "Student Groups",
+            "type": "array"
+          },
+          "teachers": {
+            "items": {
+              "$ref": "#/components/schemas/TeacherModel"
+            },
+            "title": "Teachers",
+            "type": "array"
+          },
+          "time_slots": {
+            "items": {
+              "$ref": "#/components/schemas/TimeSlotModel"
+            },
+            "title": "Time Slots",
+            "type": "array"
+          }
+        },
+        "required": [
+          "student_groups",
+          "teachers",
+          "courses",
+          "rooms",
+          "time_slots",
+          "exam_tasks",
+          "constraint_profile"
+        ],
+        "title": "ScheduleInputModel",
+        "type": "object"
+      },
+      "ScheduleResultModel": {
+        "additionalProperties": false,
+        "properties": {
+          "assignments": {
+            "items": {
+              "$ref": "#/components/schemas/AssignmentModel"
+            },
+            "title": "Assignments",
+            "type": "array"
+          },
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/ConflictRecordModel"
+            },
+            "title": "Conflicts",
+            "type": "array"
+          },
+          "report": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Report"
+          },
+          "score": {
+            "$ref": "#/components/schemas/ScoreBreakdownModel"
+          },
+          "statistics": {
+            "$ref": "#/components/schemas/SolverStatisticsModel"
+          }
+        },
+        "required": [
+          "assignments",
+          "conflicts",
+          "score",
+          "statistics"
+        ],
+        "title": "ScheduleResultModel",
+        "type": "object"
+      },
+      "ScoreBreakdownModel": {
+        "additionalProperties": false,
+        "properties": {
+          "hard_violation_count": {
+            "minimum": 0.0,
+            "title": "Hard Violation Count",
+            "type": "integer"
+          },
+          "soft_penalty_items": {
+            "items": {
+              "$ref": "#/components/schemas/SoftPenaltyItemModel"
+            },
+            "title": "Soft Penalty Items",
+            "type": "array"
+          },
+          "total_score": {
+            "minimum": 0.0,
+            "title": "Total Score",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_score",
+          "hard_violation_count",
+          "soft_penalty_items"
+        ],
+        "title": "ScoreBreakdownModel",
+        "type": "object"
+      },
+      "ServiceStatusModel": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "const": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "service": {
+            "const": "examforge-scheduler",
+            "title": "Service",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "service",
+          "version"
+        ],
+        "title": "ServiceStatusModel",
+        "type": "object"
+      },
+      "SoftPenaltyItemModel": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "penalty": {
+            "minimum": 0.0,
+            "title": "Penalty",
+            "type": "integer"
+          },
+          "rule": {
+            "title": "Rule",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule",
+          "penalty",
+          "message"
+        ],
+        "title": "SoftPenaltyItemModel",
+        "type": "object"
+      },
+      "SolverStatisticsModel": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted_assignments": {
+            "minimum": 0.0,
+            "title": "Attempted Assignments",
+            "type": "integer"
+          },
+          "elapsed_ms": {
+            "minimum": 0.0,
+            "title": "Elapsed Ms",
+            "type": "integer"
+          },
+          "exam_count": {
+            "minimum": 0.0,
+            "title": "Exam Count",
+            "type": "integer"
+          },
+          "room_count": {
+            "minimum": 0.0,
+            "title": "Room Count",
+            "type": "integer"
+          },
+          "slot_count": {
+            "minimum": 0.0,
+            "title": "Slot Count",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "feasible",
+              "partial",
+              "infeasible",
+              "error"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "elapsed_ms",
+          "exam_count",
+          "room_count",
+          "slot_count",
+          "attempted_assignments"
+        ],
+        "title": "SolverStatisticsModel",
+        "type": "object"
+      },
+      "StudentGroupModel": {
+        "additionalProperties": false,
+        "properties": {
+          "department_id": {
+            "minLength": 1,
+            "title": "Department Id",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "exclusiveMinimum": 0.0,
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "size",
+          "department_id"
+        ],
+        "title": "StudentGroupModel",
+        "type": "object"
+      },
+      "TeacherModel": {
+        "additionalProperties": false,
+        "properties": {
+          "department_id": {
+            "minLength": 1,
+            "title": "Department Id",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "unavailable_slot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unavailable Slot Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "department_id"
+        ],
+        "title": "TeacherModel",
+        "type": "object"
+      },
+      "TimeSlotModel": {
+        "additionalProperties": false,
+        "properties": {
+          "date": {
+            "minLength": 1,
+            "title": "Date",
+            "type": "string"
+          },
+          "end_time": {
+            "minLength": 1,
+            "title": "End Time",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "period_index": {
+            "minimum": 0.0,
+            "title": "Period Index",
+            "type": "integer"
+          },
+          "start_time": {
+            "minLength": 1,
+            "title": "Start Time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "date",
+          "start_time",
+          "end_time",
+          "period_index"
+        ],
+        "title": "TimeSlotModel",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "ExamForge Scheduler API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceStatusModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/ready": {
+      "get": {
+        "operationId": "ready_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceStatusModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ready"
+      }
+    },
+    "/solve": {
+      "post": {
+        "operationId": "solve_solve_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleInputModel"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleResultModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseModel"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "summary": "Solve"
+      }
+    }
+  }
+}

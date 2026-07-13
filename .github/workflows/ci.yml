@@ -71,6 +71,9 @@ jobs:
       - name: Scheduler 测试
         run: npm run test:scheduler
 
+      - name: Scheduler OpenAPI 漂移检查
+        run: npm run check:scheduler-openapi
+
       - name: 生产构建
         run: npm run build
 

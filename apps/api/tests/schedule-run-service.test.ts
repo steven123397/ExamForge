@@ -6,7 +6,11 @@ import type {
   ScheduleResult,
 } from "@examforge/shared";
 import { InMemoryPlatformRepository } from "../src/repository.js";
-import type { SchedulerClient } from "../src/scheduler-client.js";
+import {
+  SchedulerClientError,
+  type SchedulerClient,
+  type SchedulerSolveOptions,
+} from "../src/scheduler-client.js";
 import { ScheduleRunService, type DeferredTask } from "../src/services/schedule-run-service.js";
 
 const fixedAssignments: FixedAssignment[] = [
@@ -37,11 +41,13 @@ const overrides = {
 
 class RecordingScheduler implements SchedulerClient {
   lastInput: ScheduleInput | null = null;
+  lastOptions: SchedulerSolveOptions | null = null;
 
   constructor(private readonly error?: Error) {}
 
-  async solve(input: ScheduleInput): Promise<ScheduleResult> {
+  async solve(input: ScheduleInput, options?: SchedulerSolveOptions): Promise<ScheduleResult> {
     this.lastInput = input;
+    this.lastOptions = options ?? null;
     if (this.error) {
       throw this.error;
     }
@@ -107,6 +113,7 @@ describe("schedule run service", () => {
     assert.equal(succeeded?.status, "succeeded");
     assert.deepEqual(scheduler.lastInput?.fixed_assignments, fixedAssignments);
     assert.deepEqual(scheduler.lastInput?.reschedule_context, rescheduleContext);
+    assert.equal(scheduler.lastOptions?.requestId, "trace-reschedule-context");
   });
 
   it("reuses idempotent submissions without scheduling duplicate execution", async () => {
@@ -211,7 +218,7 @@ describe("schedule run service", () => {
     assert.equal(scheduler.lastInput, null);
   });
 
-  it("marks asynchronous jobs as failed when the scheduler throws", async () => {
+  it("marks asynchronous jobs as failed without persisting internal error details", async () => {
     const repository = new InMemoryPlatformRepository();
     let deferredTask: DeferredTask | null = null;
     const service = new ScheduleRunService(
@@ -234,7 +241,70 @@ describe("schedule run service", () => {
     const failed = await repository.getScheduleJob(job.id);
     assert.equal(failed?.status, "failed");
     assert.equal(failed?.progress, 100);
-    assert.equal(failed?.error?.message, "scheduler unavailable");
+    assert.equal(failed?.error?.message, "Schedule job execution failed.");
+  });
+
+  it("maps scheduler timeout, cancellation and validation to stable job terminals", async () => {
+    const cases = [
+      {
+        error: new SchedulerClientError(
+          "Scheduler request exceeded its deadline.",
+          "timeout",
+          "scheduler_timeout",
+          true,
+          "trace-timeout",
+        ),
+        expectedStatus: "timed_out",
+      },
+      {
+        error: new SchedulerClientError(
+          "Scheduler request was cancelled.",
+          "cancelled",
+          "scheduler_cancelled",
+          false,
+          "trace-cancelled",
+        ),
+        expectedStatus: "cancelled",
+      },
+      {
+        error: new SchedulerClientError(
+          "Schedule input failed semantic validation.",
+          "validation",
+          "scheduler_input_invalid",
+          false,
+          "trace-validation",
+        ),
+        expectedStatus: "failed",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const repository = new InMemoryPlatformRepository();
+      let deferredTask: DeferredTask | null = null;
+      const service = new ScheduleRunService(
+        repository,
+        new RecordingScheduler(testCase.error),
+        (task) => {
+          deferredTask = task;
+        },
+      );
+      const job = await service.createScheduleJob({
+        fixed_assignments: [],
+        reschedule_context: null,
+      }, {
+        idempotencyKey: `job-${testCase.expectedStatus}`,
+        traceId: testCase.error.requestId,
+      });
+
+      await requireDeferredTask(deferredTask)();
+
+      const terminal = await repository.getScheduleJob(job.id);
+      assert.equal(terminal?.status, testCase.expectedStatus);
+      assert.equal(terminal?.error?.category, testCase.error.category);
+      assert.equal(terminal?.error?.code, testCase.error.code);
+      assert.equal(terminal?.error?.retryable, testCase.error.retryable);
+      assert.equal(terminal?.error?.message, testCase.error.message);
+    }
   });
 
   it("recovers interrupted jobs through the repository", async () => {

@@ -479,6 +479,9 @@ export const scheduleJobErrorCategorySchema = z.enum([
   "infrastructure",
   "timeout",
   "cancelled",
+  "unavailable",
+  "protocol",
+  "internal",
   "unknown",
 ]);
 
