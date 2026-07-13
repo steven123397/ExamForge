@@ -206,7 +206,7 @@
 ## 2026-07-12 第五版第一阶段：合同、数据与身份基础
 
 - 原计划：`docs/plan/第五版第一阶段计划.md`。
-- 完成提交：未提交；按用户要求保留当前工作树，不提交或推送。
+- 完成提交：`63afc36 feat(第五版): 完成合同数据与身份基础`；本地提交，未 push。
 - 完成内容：统一作业状态为 `queued`、`running`、`succeeded`、`failed`、`cancelled`、`timed_out`，新增作业尝试、持久化事件和 outbox，并以请求摘要、幂等键和原子终态防止重复运行；删除教师不可用、考试学生群体、正式监考和草稿监考四类旧 JSONB 列，关联表成为唯一事实源；新增用户、角色、用户角色和服务端会话，使用 scrypt 随机盐、会话摘要、HttpOnly Cookie、可信 Origin 和真实 actor 审计；Web 移除演示 Bearer token 与角色切换，管理员/排考员进入运营台，教师/学生进入受限已发布门户；形成第五版前端信息架构与视觉规范，并整理现有原型的基础设计 token、焦点和窄屏行为。
 - 迁移与数据库证据：可丢弃 PostgreSQL 16 中迁移测试 `5 passed`，12 个迁移首次全部应用、第二次应用数为 0；第四版 `completed` 作业升级为 `succeeded`，四类关系漂移会在删列前拒绝迁移，迁移检查确认旧关系列为空、关键表和约束无缺失、关联数据无双向不一致；正式迁移入口返回 `applied: []`，真实 PostgreSQL 集成测试 `13 passed`。
 - 应用与算法证据：`npm run test:ci` 为 `7 passed`，`npm run check:ci`、`npm run typecheck`、`LOG_LEVEL=silent npm test`（shared `9 passed`、API/服务共 `70 passed`）、`npm run test:scheduler`（`78 passed`）和生产构建通过。固定 seed 的 50、100、150 场 benchmark 均 feasible、0 冲突，耗时 419、767、1199 ms，教师负载极差均为 1。
@@ -217,7 +217,7 @@
 ## 2026-07-13 第五版第二阶段：Scheduler 服务化
 
 - 原计划：`docs/plan/第五版第二阶段计划.md`。
-- 完成提交：未提交；按仓库规则保留当前工作树，不自动提交或推送。
+- 完成提交：`5087066 feat(第五版): 完成第二阶段调度器服务化`；本地提交，未 push。
 - 完成内容：抽取 CLI/HTTP 共用的输入解析、语义校验、预检、求解、冲突整理、报告和序列化 pipeline；新增 FastAPI `/health`、`/ready`、`/solve`、稳定错误 envelope、request ID 和完整 Pydantic 网络模型；生成受版本控制的确定性 OpenAPI，并在根脚本与 GitHub Actions 中检查漂移；API 新增运行时校验的 HTTP scheduler 客户端，区分 validation、timeout、cancelled、unavailable、protocol 和 internal，生产 Compose 显式使用 HTTP 且不静默回退 CLI；作业失败保留稳定类别、代码、可重试性和 trace ID。
 - 镜像与演示：新增独立 scheduler Dockerfile，使用 UID 10002 非 root 运行并设置 CPU、内存、进程数、停止宽限期和 readiness；API 镜像删除 Python、uv 和 scheduler 源码。Compose 新增 scheduler 健康依赖，smoke 先直连验证健康、可行和不可行结果，再以真实 Cookie 会话完成 HTTP 排考、PostgreSQL 持久化和 API 重启读取。
 - 合同与故障证据：固定可行、不可行、固定安排和增量重排样例证明 CLI、HTTP 与 application pipeline 规范化输出等价；API 客户端测试覆盖合同错误、业务不可行、超时、取消、服务不可用、非 JSON、schema 漂移和内部错误，不泄露请求输入或内部异常。scheduler 镜像 `/health`、`/ready` 均为 200、版本 `0.1.0`，容器 UID 为 10002；API 镜像探针确认不存在 Python 和 uv。
@@ -230,7 +230,7 @@
 ## 2026-07-13 第五版第三阶段：可靠任务与实时事件
 
 - 原计划：`docs/plan/第五版第三阶段计划.md`。
-- 完成提交：未提交；按仓库规则保留当前工作树，不自动提交或推送。
+- 完成提交：`11b0336 feat(第五版): 完成可靠调度与多角色工作台`；本地提交，未 push。
 - 完成内容：新增可靠作业迁移、严格事件序列、请求快照、attempt 和 outbox 投递元数据；抽取 `packages/scheduling-application` 统一幂等提交与执行状态机；API 改为事务提交，独立 Publisher 通过 `FOR UPDATE SKIP LOCKED` 投递 BullMQ，独立 Worker 调用 FastAPI scheduler，并以数据库 CAS、稳定 job ID 和唯一约束治理重复投递、重试、取消、超时、stalled 回收与迟到结果。
 - 实时事件：SSE 以 PostgreSQL 历史为准，支持初始补发、`Last-Event-ID`、订阅窗口二次回读、Redis 唤醒、心跳和终态关闭；Web 已移除 1200 ms 主轮询，以 SSE 更新 TanStack Query cache，仅在断线期间执行不低于 5 秒的兜底查询。
 - 部署与故障证据：Compose 新增 AOF、`noeviction` Redis，以及独立非 root Publisher/Worker、健康检查和资源限制。隔离 Compose 从空卷完成 API 重启、SSE 重连、Redis 停止恢复、Publisher 重启、Worker 崩溃回收、scheduler 不可用重试和重复 outbox；各场景最终只生成 1 个运行，Worker 崩溃由第 2 个 attempt 回收，scheduler 不可用前 2 个 attempt 失败后第 3 个成功，重复 outbox 未增加作业 attempt 或运行。
@@ -242,7 +242,7 @@
 ## 2026-07-13 第五版第四阶段：任务中心与约束策略基础
 
 - 原计划：`docs/plan/第五版第四阶段计划.md`。
-- 完成提交：未提交；按仓库规则保留当前工作树，不自动提交或推送。
+- 完成提交：`11b0336 feat(第五版): 完成可靠调度与多角色工作台`；本地提交，未 push。
 - 完成内容：新增策略身份和不可变版本、启停、CAS 新版本、唯一默认版本、稳定摘要和真实 actor 审计；API 在作业创建事务内解析策略，作业 v2 请求与运行结果冻结同一版本、完整配置和摘要，Worker 不读取可变策略；同步排考和草稿重排也把实际调用策略与 scheduler 元数据传入运行持久化。迁移为旧数据生成显式 legacy 快照，幂等摘要覆盖策略语义。
 - 评分与诊断：shared、Python 和 OpenAPI 固定评分合同 v1，同时保留违反次数、原始/加权惩罚、适用机会数、归一化分项和归一化总分；零机会、舍入和等比例规模样例由跨语言测试锁定。结构化诊断覆盖容量、时段、教师、固定安排、学生群体、引用错误和求解不可行，可行性与发布资格不被数值分数覆盖。
 - 运营体验：现有根路由新增任务中心与策略治理区。任务中心支持状态、提交人、策略、日期筛选、8 条分页，并通过仅管理员/排考员可读的详情接口展示 PostgreSQL 持久化的 attempt 和完整有序事件，不从摘要时间戳伪造重试轨迹；同时保留 SSE 状态、错误解释、取消和运行跳转。策略区支持创建、不可变新版本、启停、默认切换、权重、硬规则与求解时限，禁用和默认切换均要求确认。任务中心按容器宽度切换单/双栏；桌面 1440 x 960 和移动 390 x 844 的页面宽度均为 0 溢出，新增检查器边界断言并经截图复核确认无裁切或重叠。
@@ -256,7 +256,7 @@
 ## 2026-07-14 第五版第五阶段：前端路由重构与多角色体验
 
 - 原计划：`docs/plan/第五版第五阶段计划.md`。
-- 完成提交：未提交；按仓库规则保留当前工作树，不自动提交或推送。
+- 完成提交：`11b0336 feat(第五版): 完成可靠调度与多角色工作台`；本地提交，未 push。
 - 本人作用域：新增 `0014_user_audience_scopes.sql`、教师单作用域和学生多群体作用域，演示账户通过 seed 建立正式关联。`/api/me/audience`、本人已发布日程和教师本人不可用时段 API 只根据服务端会话解析对象；旧按教师/学生群体 ID 的发布查询不再匿名，管理员/排考员预览与教师/学生本人入口明确分离。
 - 路由与权限：建立全局 AuthProvider、角色路由守卫、运营侧栏和受众顶栏；登录、管理员概览、基础数据、作业、运行、草稿、策略、审计、教师和学生十个路由均可深链刷新。筛选、分页、对比和选中对象进入 URL，匿名深链安全回跳，错误角色为 403，不存在页面或实体为 404，会话失效清理私有 Query cache。
 - 运营工作流：第四阶段任务中心、SSE、持久化 attempt/事件和策略治理合同直接迁入 `/scheduling/jobs`、`/scheduling/policies`，没有复制任务状态机；运行、对比、发布/回滚和审计迁入独立页面。草稿唯一编辑入口使用 dnd-kit pointer/keyboard sensor，同时保留检查器表单等价路径，锁定、终态和建议响应代次继续阻断无效 mutation。
