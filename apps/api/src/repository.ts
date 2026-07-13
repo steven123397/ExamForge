@@ -4,6 +4,7 @@ import {
   type AuditEventListResponse,
   type AuditEventFilter,
   type AuditEventSummary,
+  type AudienceScope,
   type DashboardResponse,
   type PublishedScheduleResponse,
   type ReferenceDeleteResponse,
@@ -12,6 +13,9 @@ import {
   type ReferenceDataResponse,
   type ReferenceResource,
   type ConflictRecord,
+  type ConstraintProfileSnapshot,
+  type ConstraintProfileRecord,
+  type ConstraintProfileStatus,
   type ScheduleDraftChangeEvent,
   type ScheduleDraftAdjustmentSuggestionsResponse,
   type ScheduleDraftComparisonResponse,
@@ -20,10 +24,17 @@ import {
   type ScheduleDraftListResponse,
   type ScheduleDraftPublishResponse,
   type ScheduleDraftSummary,
+  type ScheduleJobAttempt,
+  type ScheduleJobDetailResponse,
   type ScheduleJobSummary,
+  type ScheduleJobListQuery,
+  type ScheduleJobListResponse,
+  type ScheduleJobRequestSnapshot,
   type ScheduleJobError,
+  type ScheduleJobEventEnvelope,
   type ScheduleJobStatus,
   type ScheduleRunComparisonResponse,
+  type ScheduleRunListQuery,
   type ScheduleRunListResponse,
   type ScheduleRollbackResponse,
   type ScheduleResult,
@@ -32,12 +43,41 @@ import {
   type UserRole,
   resolveScheduleJobTransition,
   scheduleJobStatusForSolveResult,
+  scheduleJobEventTypeSchema,
 } from "@examforge/shared";
-import { randomUUID } from "node:crypto";
+import {
+  digestConstraintProfile,
+  ConstraintProfileSelectionError,
+  ScheduleJobIdempotencyConflictError,
+  type ClaimScheduleJobCommand,
+  type CompleteScheduleJobCommand,
+  type CreateScheduleJobCommand,
+  type CreateScheduleJobResult,
+  type FailScheduleJobAttemptCommand,
+  type ListScheduleJobEventsOptions,
+  type ScheduleJobClaimResult,
+  type ScheduleJobCancellationResult,
+  type ScheduleJobExecutionTransitionResult,
+  type ScheduleJobEventCursorResult,
+  type ScheduleJobEventRepository,
+  type ScheduleJobRepository,
+  type ScheduleResultWriter,
+  type ConstraintProfileRepository,
+  type CreateConstraintProfilePersistenceCommand,
+  type CreateConstraintProfileVersionPersistenceCommand,
+  type SetConstraintProfileDefaultPersistenceCommand,
+  type SetConstraintProfileStatusPersistenceCommand,
+  type ResolvedConstraintProfile,
+} from "@examforge/scheduling-application";
+import { createHash, randomUUID } from "node:crypto";
 import type { PasswordHash } from "./auth/security.js";
 import { getCurrentAuthContext } from "./auth/request-context.js";
 
-export interface PlatformRepository {
+export interface PlatformRepository
+  extends ScheduleJobRepository,
+    ScheduleResultWriter,
+    ScheduleJobEventRepository,
+    ConstraintProfileRepository {
   readonly storageMode: "memory" | "postgres";
   checkReadiness(): Promise<void>;
   getDashboard(): Promise<DashboardResponse>;
@@ -53,8 +93,11 @@ export interface PlatformRepository {
     records: ReferenceRecord[],
   ): Promise<ReferenceImportResponse>;
   deleteReferenceRecord(resource: ReferenceResource, id: string): Promise<ReferenceDeleteResponse | null>;
-  createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse>;
-  listScheduleRuns(): Promise<ScheduleRunListResponse>;
+  createScheduleRun(
+    result: ScheduleResult,
+    context?: ScheduleRunPersistenceContext,
+  ): Promise<ScheduleRunResponse>;
+  listScheduleRuns(query?: ScheduleRunListQuery): Promise<ScheduleRunListResponse>;
   getScheduleRun(id: string): Promise<ScheduleRunResponse | null>;
   compareScheduleRuns(
     baseId: string,
@@ -96,21 +139,26 @@ export interface PlatformRepository {
   rebalanceScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
   publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null>;
   discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null>;
-  createScheduleJob(command: CreateScheduleJobCommand): Promise<CreateScheduleJobResult>;
-  listScheduleJobs(): Promise<{ jobs: ScheduleJobSummary[] }>;
-  getScheduleJob(id: string): Promise<ScheduleJobSummary | null>;
   transitionScheduleJob(
     id: string,
     command: TransitionScheduleJobCommand,
   ): Promise<ScheduleJobTransitionResult>;
-  completeScheduleJob(id: string, result: ScheduleResult): Promise<ScheduleJobTransitionResult>;
+  getScheduleJobDetail(id: string): Promise<ScheduleJobDetailResponse | null>;
   createAuthUser(command: CreateAuthUserCommand): Promise<AuthUserRecord>;
   findAuthUserByUsername(username: string): Promise<AuthUserRecord | null>;
   createAuthSession(command: CreateAuthSessionCommand): Promise<AuthSessionRecord>;
   findAuthSessionByTokenDigest(tokenDigest: string): Promise<AuthSessionWithUser | null>;
   revokeAuthSession(id: string, revokedAt: string): Promise<boolean>;
-  recoverInterruptedScheduleJobs?(): Promise<ScheduleJobSummary[]>;
+  getAudienceScope(userId: string): Promise<AudienceScope | "invalid" | null>;
+  setTeacherAudienceScope(userId: string, teacherId: string): Promise<void>;
+  addStudentGroupAudienceScope(userId: string, studentGroupId: string): Promise<void>;
   close?(): Promise<void>;
+}
+
+export interface ScheduleRunPersistenceContext {
+  constraintProfileVersionId: string;
+  constraintProfileSnapshot: ConstraintProfileSnapshot;
+  schedulerVersion: string;
 }
 
 export interface AuthUserRecord {
@@ -144,18 +192,6 @@ export interface AuthSessionWithUser {
   user: AuthUserRecord;
 }
 
-export interface CreateScheduleJobCommand {
-  batchId: string;
-  idempotencyKey: string;
-  requestDigest: string;
-  traceId: string;
-}
-
-export interface CreateScheduleJobResult {
-  job: ScheduleJobSummary;
-  created: boolean;
-}
-
 export interface TransitionScheduleJobCommand {
   to: ScheduleJobStatus;
   progress: number;
@@ -167,12 +203,8 @@ export interface ScheduleJobTransitionResult {
   resolution: "apply" | "idempotent" | "reject" | "not_found";
 }
 
-export class ScheduleJobIdempotencyConflictError extends Error {
-  constructor(readonly idempotencyKey: string) {
-    super(`Schedule job idempotency key ${idempotencyKey} was reused with a different request.`);
-    this.name = "ScheduleJobIdempotencyConflictError";
-  }
-}
+export { ScheduleJobIdempotencyConflictError };
+export type { CreateScheduleJobCommand, CreateScheduleJobResult };
 
 export type PublishScheduleRunResult = PublishedScheduleResponse | "not_publishable" | null;
 
@@ -189,12 +221,17 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   private drafts = new Map<string, ScheduleDraftDetailResponse>();
   private draftLocks = new Map<string, Set<string>>();
   private scheduleJobs = new Map<string, ScheduleJobSummary>();
-  private scheduleJobAttempts = new Map<string, number>();
-  private scheduleJobEvents: Array<Record<string, unknown>> = [];
+  private scheduleJobRequests = new Map<string, ScheduleJobRequestSnapshot>();
+  private scheduleJobAttempts = new Map<string, ScheduleJobAttempt[]>();
+  private scheduleJobEvents: ScheduleJobEventEnvelope[] = [];
+  private scheduleJobEventSequence = 0;
   private outboxEvents: Array<Record<string, unknown>> = [];
   private authUsers = new Map<string, AuthUserRecord>();
   private authSessions = new Map<string, AuthSessionRecord>();
+  private teacherAudienceScopes = new Map<string, string>();
+  private studentGroupAudienceScopes = new Map<string, Set<string>>();
   private auditEvents: AuditEventSummary[] = [];
+  private constraintProfiles = new Map<string, ConstraintProfileRecord>();
   private batch = structuredClone(demoBatch);
   private publishedRunId: string | null = null;
   private scheduleInput = structuredClone(demoScheduleInput);
@@ -203,6 +240,29 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     for (const user of options.authUsers ?? []) {
       this.authUsers.set(user.id, structuredClone(user));
     }
+    const createdAt = new Date().toISOString();
+    const profileId = "constraint-profile-default";
+    const versionId = "constraint-profile-default-v1";
+    this.constraintProfiles.set(profileId, {
+      id: profileId,
+      name: "Default scheduling strategy",
+      status: "active",
+      ownerUserId: null,
+      currentVersionId: versionId,
+      isDefault: true,
+      createdAt,
+      updatedAt: createdAt,
+      versions: [{
+        id: versionId,
+        profileId,
+        versionNumber: 1,
+        schemaVersion: 1,
+        digest: digestConstraintProfile(this.scheduleInput.constraint_profile),
+        config: structuredClone(this.scheduleInput.constraint_profile),
+        createdByUserId: null,
+        createdAt,
+      }],
+    });
   }
 
   async checkReadiness(): Promise<void> {}
@@ -228,6 +288,170 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       batch: this.batch,
       scheduleInput: this.scheduleInput,
     };
+  }
+
+  async listConstraintProfiles(includeDisabled: boolean): Promise<ConstraintProfileRecord[]> {
+    return [...this.constraintProfiles.values()]
+      .filter((profile) => includeDisabled || profile.status === "active")
+      .sort((left, right) => Number(right.isDefault) - Number(left.isDefault)
+        || left.name.localeCompare(right.name)
+        || left.id.localeCompare(right.id))
+      .map((profile) => structuredClone(profile));
+  }
+
+  async getConstraintProfile(id: string): Promise<ConstraintProfileRecord | null> {
+    const profile = this.constraintProfiles.get(id);
+    return profile ? structuredClone(profile) : null;
+  }
+
+  async resolveConstraintProfile(versionId?: string): Promise<ResolvedConstraintProfile> {
+    const selectedProfile = versionId
+      ? [...this.constraintProfiles.values()].find((profile) => (
+        profile.versions.some((version) => version.id === versionId)
+      ))
+      : [...this.constraintProfiles.values()].find((profile) => profile.isDefault);
+    const selectedVersion = versionId
+      ? selectedProfile?.versions.find((version) => version.id === versionId)
+      : selectedProfile?.versions.find((version) => version.id === selectedProfile.currentVersionId);
+    if (!selectedProfile || !selectedVersion) {
+      throw new ConstraintProfileSelectionError("constraint_profile_version_not_found");
+    }
+    if (selectedProfile.status !== "active") {
+      throw new ConstraintProfileSelectionError("constraint_profile_disabled");
+    }
+    return {
+      versionId: selectedVersion.id,
+      snapshot: {
+        schemaVersion: 1,
+        profileId: selectedProfile.id,
+        profileVersionId: selectedVersion.id,
+        versionNumber: selectedVersion.versionNumber,
+        digest: selectedVersion.digest,
+        config: structuredClone(selectedVersion.config),
+      },
+    };
+  }
+
+  async createConstraintProfile(
+    command: CreateConstraintProfilePersistenceCommand,
+  ): Promise<ConstraintProfileRecord> {
+    const profileId = `constraint-profile-${randomUUID()}`;
+    const versionId = `${profileId}-v1`;
+    const now = new Date().toISOString();
+    const profile: ConstraintProfileRecord = {
+      id: profileId,
+      name: command.name,
+      status: "active",
+      ownerUserId: command.context.actor.userId,
+      currentVersionId: versionId,
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+      versions: [{
+        id: versionId,
+        profileId,
+        versionNumber: 1,
+        schemaVersion: 1,
+        digest: command.digest,
+        config: structuredClone(command.config),
+        createdByUserId: command.context.actor.userId,
+        createdAt: now,
+      }],
+    };
+    this.constraintProfiles.set(profileId, profile);
+    this.recordAuditEvent("constraint_profile.created", "constraint_profile", profileId, {
+      traceId: command.context.traceId,
+      actorUserId: command.context.actor.userId,
+      currentVersionId: versionId,
+      digest: command.digest,
+      result: "created",
+    }, command.context.actor.username);
+    return structuredClone(profile);
+  }
+
+  async createConstraintProfileVersion(
+    command: CreateConstraintProfileVersionPersistenceCommand,
+  ) {
+    const profile = this.constraintProfiles.get(command.profileId);
+    if (!profile) {
+      return { resolution: "not_found" as const };
+    }
+    if (profile.currentVersionId !== command.expectedCurrentVersionId) {
+      return { resolution: "version_conflict" as const };
+    }
+    const previousVersionId = profile.currentVersionId;
+    const versionNumber = Math.max(...profile.versions.map((version) => version.versionNumber)) + 1;
+    const versionId = `${profile.id}-v${versionNumber}-${randomUUID()}`;
+    const now = new Date().toISOString();
+    profile.versions.push({
+      id: versionId,
+      profileId: profile.id,
+      versionNumber,
+      schemaVersion: 1,
+      digest: command.digest,
+      config: structuredClone(command.config),
+      createdByUserId: command.context.actor.userId,
+      createdAt: now,
+    });
+    profile.currentVersionId = versionId;
+    profile.updatedAt = now;
+    this.recordAuditEvent("constraint_profile.version_created", "constraint_profile", profile.id, {
+      traceId: command.context.traceId,
+      actorUserId: command.context.actor.userId,
+      previousVersionId,
+      currentVersionId: versionId,
+      versionNumber,
+      digest: command.digest,
+      result: "created",
+    }, command.context.actor.username);
+    return { resolution: "created" as const, profile: structuredClone(profile) };
+  }
+
+  async setConstraintProfileStatus(command: SetConstraintProfileStatusPersistenceCommand) {
+    const profile = this.constraintProfiles.get(command.profileId);
+    if (!profile) {
+      return { resolution: "not_found" as const };
+    }
+    if (profile.isDefault && command.status === "disabled") {
+      return { resolution: "default_cannot_be_disabled" as const };
+    }
+    const previousStatus = profile.status;
+    profile.status = command.status;
+    profile.updatedAt = new Date().toISOString();
+    this.recordAuditEvent("constraint_profile.status_changed", "constraint_profile", profile.id, {
+      traceId: command.context.traceId,
+      actorUserId: command.context.actor.userId,
+      previousStatus,
+      status: command.status,
+      result: "updated",
+    }, command.context.actor.username);
+    return { resolution: "updated" as const, profile: structuredClone(profile) };
+  }
+
+  async setDefaultConstraintProfile(command: SetConstraintProfileDefaultPersistenceCommand) {
+    const profile = this.constraintProfiles.get(command.profileId);
+    if (!profile) {
+      return { resolution: "not_found" as const };
+    }
+    if (profile.status !== "active") {
+      return { resolution: "inactive" as const };
+    }
+    const previousDefault = [...this.constraintProfiles.values()].find((item) => item.isDefault);
+    const now = new Date().toISOString();
+    for (const candidate of this.constraintProfiles.values()) {
+      candidate.isDefault = candidate.id === profile.id;
+      if (candidate.id === profile.id || candidate.id === previousDefault?.id) {
+        candidate.updatedAt = now;
+      }
+    }
+    this.recordAuditEvent("constraint_profile.default_changed", "constraint_profile", profile.id, {
+      traceId: command.context.traceId,
+      actorUserId: command.context.actor.userId,
+      previousDefaultProfileId: previousDefault?.id ?? null,
+      defaultProfileId: profile.id,
+      result: "updated",
+    }, command.context.actor.username);
+    return { resolution: "updated" as const, profile: structuredClone(profile) };
   }
 
   async createReferenceRecord(
@@ -295,11 +519,18 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     };
   }
 
-  async createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse> {
-    return this.createScheduleRunInternal(result);
+  async createScheduleRun(
+    result: ScheduleResult,
+    context?: ScheduleRunPersistenceContext,
+  ): Promise<ScheduleRunResponse> {
+    const strategy = context ?? await this.defaultScheduleRunPersistenceContext();
+    return this.createScheduleRunInternal(result, strategy);
   }
 
-  private createScheduleRunInternal(result: ScheduleResult): ScheduleRunResponse {
+  private createScheduleRunInternal(
+    result: ScheduleResult,
+    context: ScheduleRunPersistenceContext,
+  ): ScheduleRunResponse {
     const id = `run-${randomUUID()}`;
     const run: ScheduleRunSummary = {
       id,
@@ -307,8 +538,13 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       createdAt: new Date().toISOString(),
       elapsedMs: result.statistics.elapsed_ms,
       score: result.score.total_score,
+      normalizedScore: result.score.normalized_score,
       conflictCount: result.conflicts.length,
       assignmentCount: result.assignments.length,
+      constraintProfileVersionId: context.constraintProfileVersionId,
+      constraintProfileSnapshot: structuredClone(context.constraintProfileSnapshot),
+      schedulerVersion: context.schedulerVersion,
+      scoringContractVersion: result.score.scoring_contract_version,
     };
     const response = { run, result };
     this.runs.set(id, response);
@@ -321,9 +557,20 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return response;
   }
 
-  async listScheduleRuns(): Promise<ScheduleRunListResponse> {
+  async listScheduleRuns(query: ScheduleRunListQuery = { page: 1, pageSize: 20 }): Promise<ScheduleRunListResponse> {
+    const runs = Array.from(this.runs.values())
+      .map((item) => item.run)
+      .filter((run) => !query.status || run.status === query.status)
+      .sort((left, right) => (
+        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+      ));
+    const total = runs.length;
     return {
-      runs: Array.from(this.runs.values()).map((item) => item.run).reverse(),
+      runs: runs.slice((query.page - 1) * query.pageSize, query.page * query.pageSize),
+      page: query.page,
+      pageSize: query.pageSize,
+      total,
+      pageCount: Math.ceil(total / query.pageSize),
     };
   }
 
@@ -341,11 +588,21 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   }
 
   async listAuditEvents(filter: AuditEventFilter = {}): Promise<AuditEventListResponse> {
+    const page = filter.page ?? 1;
+    const pageSize = filter.pageSize ?? filter.limit ?? 20;
     const events = [...this.auditEvents]
-      .reverse()
       .filter((event) => matchesAuditFilter(event, filter))
-      .slice(0, filter.limit ?? 50);
-    return { events };
+      .sort((left, right) => (
+        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+      ));
+    const total = events.length;
+    return {
+      events: events.slice((page - 1) * pageSize, page * pageSize),
+      page,
+      pageSize,
+      total,
+      pageCount: Math.ceil(total / pageSize),
+    };
   }
 
   async publishScheduleRun(id: string): Promise<PublishScheduleRunResult> {
@@ -710,11 +967,44 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   }
 
   async createScheduleJob(command: CreateScheduleJobCommand): Promise<CreateScheduleJobResult> {
+    const selectedProfile = command.constraintProfileVersionId
+      ? [...this.constraintProfiles.values()].find((profile) => (
+        profile.versions.some((version) => version.id === command.constraintProfileVersionId)
+      ))
+      : [...this.constraintProfiles.values()].find((profile) => profile.isDefault);
+    const selectedVersion = command.constraintProfileVersionId
+      ? selectedProfile?.versions.find((version) => version.id === command.constraintProfileVersionId)
+      : selectedProfile?.versions.find((version) => version.id === selectedProfile.currentVersionId);
+    if (!selectedProfile || !selectedVersion) {
+      throw new ConstraintProfileSelectionError("constraint_profile_version_not_found");
+    }
+    if (selectedProfile.status !== "active") {
+      throw new ConstraintProfileSelectionError("constraint_profile_disabled");
+    }
+    const constraintProfileSnapshot = {
+      schemaVersion: 1 as const,
+      profileId: selectedProfile.id,
+      profileVersionId: selectedVersion.id,
+      versionNumber: selectedVersion.versionNumber,
+      digest: selectedVersion.digest,
+      config: structuredClone(selectedVersion.config),
+    };
+    const requestSnapshot: ScheduleJobRequestSnapshot = {
+      version: 2,
+      input: {
+        ...structuredClone(command.requestSnapshot.input),
+        constraint_profile: structuredClone(selectedVersion.config),
+      },
+      constraintProfile: constraintProfileSnapshot,
+    };
+    const requestDigest = createHash("sha256")
+      .update(JSON.stringify(requestSnapshot))
+      .digest("hex");
     const existing = [...this.scheduleJobs.values()].find(
       (job) => job.idempotencyKey === command.idempotencyKey,
     );
     if (existing) {
-      if (existing.requestDigest !== command.requestDigest) {
+      if (existing.requestDigest !== requestDigest) {
         throw new ScheduleJobIdempotencyConflictError(command.idempotencyKey);
       }
       return { job: existing, created: false };
@@ -726,7 +1016,11 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       status: "queued",
       progress: 0,
       idempotencyKey: command.idempotencyKey,
-      requestDigest: command.requestDigest,
+      requestDigest,
+      constraintProfileVersionId: selectedVersion.id,
+      constraintProfileSnapshot,
+      submittedBy: command.submittedBy ?? "system",
+      submittedByUserId: command.submittedByUserId ?? null,
       traceId: command.traceId,
       runId: null,
       error: null,
@@ -738,15 +1032,33 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       updatedAt: now,
     };
     this.scheduleJobs.set(job.id, job);
+    this.scheduleJobRequests.set(job.id, structuredClone(requestSnapshot));
     this.recordScheduleJobEvent(job, "schedule_job.queued", { status: job.status });
     return { job, created: true };
   }
 
-  async listScheduleJobs(): Promise<{ jobs: ScheduleJobSummary[] }> {
+  async listScheduleJobs(query: ScheduleJobListQuery = {
+    page: 1,
+    pageSize: 20,
+  }): Promise<ScheduleJobListResponse> {
+    const filtered = [...this.scheduleJobs.values()]
+      .filter((job) => (!query.status || job.status === query.status)
+        && (!query.submittedBy || job.submittedBy === query.submittedBy)
+        && (!query.constraintProfileVersionId
+          || job.constraintProfileVersionId === query.constraintProfileVersionId)
+        && (!query.from || Date.parse(job.createdAt) >= Date.parse(query.from))
+        && (!query.to || Date.parse(job.createdAt) <= Date.parse(query.to)))
+      .sort((left, right) => (
+        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+      ));
+    const total = filtered.length;
+    const offset = (query.page - 1) * query.pageSize;
     return {
-      jobs: [...this.scheduleJobs.values()].sort((left, right) => (
-        right.createdAt.localeCompare(left.createdAt)
-      )),
+      jobs: filtered.slice(offset, offset + query.pageSize),
+      page: query.page,
+      pageSize: query.pageSize,
+      total,
+      pageCount: Math.ceil(total / query.pageSize),
     };
   }
 
@@ -754,10 +1066,266 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return this.scheduleJobs.get(id) ?? null;
   }
 
+  async getScheduleJobDetail(id: string): Promise<ScheduleJobDetailResponse | null> {
+    const job = this.scheduleJobs.get(id);
+    if (!job) {
+      return null;
+    }
+    const attempts = (this.scheduleJobAttempts.get(id) ?? [])
+      .slice()
+      .sort((left, right) => left.attemptNumber - right.attemptNumber)
+      .map((attempt) => structuredClone(attempt));
+    const events = this.scheduleJobEvents
+      .filter((event) => event.jobId === id)
+      .slice()
+      .sort((left, right) => left.sequence - right.sequence)
+      .map((event) => structuredClone(event));
+    return {
+      job: { ...structuredClone(job), attemptCount: attempts.length },
+      attempts,
+      events,
+    };
+  }
+
+  async requestScheduleJobCancellation(id: string): Promise<ScheduleJobCancellationResult> {
+    const current = this.scheduleJobs.get(id);
+    if (!current) {
+      return { job: null, resolution: "not_found" };
+    }
+    if (current.status === "cancelled" || current.cancellationRequestedAt !== null) {
+      return { job: current, resolution: "idempotent" };
+    }
+    const now = new Date().toISOString();
+    if (current.status === "queued") {
+      const job: ScheduleJobSummary = {
+        ...current,
+        status: "cancelled",
+        progress: 100,
+        cancellationRequestedAt: now,
+        finishedAt: now,
+        updatedAt: now,
+      };
+      this.scheduleJobs.set(id, job);
+      this.recordScheduleJobEvent(job, "schedule_job.cancelled", {
+        status: job.status,
+        progress: job.progress,
+        reason: "cancelled_before_execution",
+      });
+      return { job, resolution: "cancelled" };
+    }
+    if (current.status === "running") {
+      const job: ScheduleJobSummary = {
+        ...current,
+        cancellationRequestedAt: now,
+        updatedAt: now,
+      };
+      this.scheduleJobs.set(id, job);
+      this.recordScheduleJobEvent(job, "schedule_job.cancellation_requested", {
+        status: job.status,
+        attempt: "cooperative",
+      });
+      return { job, resolution: "requested" };
+    }
+    return { job: current, resolution: "terminal" };
+  }
+
+  async isScheduleJobCancellationRequested(id: string): Promise<boolean> {
+    return this.scheduleJobs.get(id)?.cancellationRequestedAt !== null
+      && this.scheduleJobs.get(id)?.cancellationRequestedAt !== undefined;
+  }
+
+  async listScheduleJobEvents(
+    jobId: string,
+    options: ListScheduleJobEventsOptions = {},
+  ): Promise<ScheduleJobEventEnvelope[]> {
+    const afterSequence = options.afterSequence ?? 0;
+    const limit = options.limit ?? 100;
+    return this.scheduleJobEvents
+      .filter((event) => event.jobId === jobId && event.sequence > afterSequence)
+      .sort((left, right) => left.sequence - right.sequence)
+      .slice(0, limit)
+      .map((event) => structuredClone(event));
+  }
+
+  async resolveScheduleJobEventCursor(
+    jobId: string,
+    eventId: string,
+  ): Promise<ScheduleJobEventCursorResult> {
+    const event = this.scheduleJobEvents.find((candidate) => candidate.eventId === eventId);
+    if (!event) {
+      return { resolution: "unknown", sequence: null };
+    }
+    return event.jobId === jobId
+      ? { resolution: "valid", sequence: event.sequence }
+      : { resolution: "wrong_job", sequence: null };
+  }
+
+  async claimScheduleJob(
+    id: string,
+    command: ClaimScheduleJobCommand = {},
+  ): Promise<ScheduleJobClaimResult> {
+    const current = this.scheduleJobs.get(id);
+    if (!current) {
+      return { job: null, resolution: "not_found" };
+    }
+    const requestSnapshot = this.scheduleJobRequests.get(id);
+    if (!requestSnapshot) {
+      throw new Error(`Schedule job ${id} does not contain a recoverable request snapshot.`);
+    }
+    const now = new Date().toISOString();
+    const attempts = this.scheduleJobAttempts.get(id) ?? [];
+    const previousAttempt = attempts.at(-1);
+    const attemptNumber = command.deliveryAttempt ?? (previousAttempt?.attemptNumber ?? 0) + 1;
+    const reclaimRunning = current.status === "running"
+      && command.reclaimRunning === true
+      && previousAttempt?.finishedAt === null
+      && attemptNumber > previousAttempt.attemptNumber;
+    const claimQueued = current.status === "queued"
+      && attemptNumber > (previousAttempt?.attemptNumber ?? 0);
+    if (!claimQueued && !reclaimRunning) {
+      return { job: current, resolution: "not_claimable" };
+    }
+    if (reclaimRunning && previousAttempt) {
+      const error: ScheduleJobError = {
+        category: "internal",
+        code: "worker_delivery_reclaimed",
+        message: "Worker delivery was reclaimed after execution stopped.",
+        retryable: true,
+      };
+      attempts[attempts.length - 1] = {
+        ...previousAttempt,
+        status: "failed",
+        finishedAt: now,
+        durationMs: Math.max(0, Date.parse(now) - Date.parse(previousAttempt.startedAt)),
+        error,
+      };
+      this.recordScheduleJobEvent(current, "schedule_job.retry_scheduled", {
+        status: current.status,
+        attemptId: previousAttempt.id,
+        attemptNumber: previousAttempt.attemptNumber,
+        error,
+        retryAt: now,
+        reason: "worker_delivery_reclaimed",
+      });
+    }
+    const attempt: ScheduleJobAttempt = {
+      id: `attempt-${randomUUID()}`,
+      jobId: id,
+      attemptNumber,
+      status: "started",
+      schedulerRequestId: `${current.traceId}:attempt:${attemptNumber}`,
+      startedAt: now,
+      finishedAt: null,
+      durationMs: null,
+      error: null,
+    };
+    const job: ScheduleJobSummary = {
+      ...current,
+      status: "running",
+      progress: 35,
+      error: null,
+      startedAt: current.startedAt ?? now,
+      finishedAt: null,
+      updatedAt: now,
+    };
+    this.scheduleJobs.set(id, job);
+    this.scheduleJobAttempts.set(id, [...attempts, attempt]);
+    this.recordScheduleJobEvent(job, "schedule_job.attempt_started", {
+      status: job.status,
+      attemptId: attempt.id,
+      attemptNumber,
+      schedulerRequestId: attempt.schedulerRequestId,
+    });
+    this.recordScheduleJobEvent(job, "schedule_job.running", {
+      status: job.status,
+      progress: job.progress,
+      attemptNumber,
+    });
+    return {
+      job,
+      attempt,
+      requestSnapshot: structuredClone(requestSnapshot),
+      resolution: "claimed",
+    };
+  }
+
+  async failScheduleJobAttempt(
+    id: string,
+    command: FailScheduleJobAttemptCommand,
+  ): Promise<ScheduleJobExecutionTransitionResult> {
+    const current = this.scheduleJobs.get(id);
+    if (!current) {
+      return { job: null, resolution: "not_found" };
+    }
+    const attempts = this.scheduleJobAttempts.get(id) ?? [];
+    const attemptIndex = attempts.findIndex((attempt) => attempt.id === command.attemptId);
+    const attempt = attempts[attemptIndex];
+    if (!attempt || attemptIndex !== attempts.length - 1) {
+      return { job: current, resolution: "stale_attempt" };
+    }
+    if (attempt.finishedAt !== null) {
+      const expectedStatus = command.outcome === "retry" ? "queued" : command.outcome;
+      return {
+        job: current,
+        resolution: current.status === expectedStatus ? "idempotent" : "stale_attempt",
+      };
+    }
+    if (current.status !== "running") {
+      return { job: current, resolution: "stale_attempt" };
+    }
+    const now = new Date().toISOString();
+    const status = command.outcome === "retry" ? "queued" : command.outcome;
+    const finishedAttempt: ScheduleJobAttempt = {
+      ...attempt,
+      status: command.outcome === "retry" ? "failed" : command.outcome,
+      finishedAt: now,
+      durationMs: Math.max(0, Date.parse(now) - Date.parse(attempt.startedAt)),
+      error: command.error,
+    };
+    attempts[attemptIndex] = finishedAttempt;
+    const job: ScheduleJobSummary = {
+      ...current,
+      status,
+      progress: command.outcome === "retry" ? 15 : 100,
+      error: command.error,
+      cancellationRequestedAt: command.outcome === "cancelled"
+        ? current.cancellationRequestedAt ?? now
+        : current.cancellationRequestedAt,
+      finishedAt: command.outcome === "retry" ? null : now,
+      updatedAt: now,
+    };
+    this.scheduleJobs.set(id, job);
+    this.recordScheduleJobEvent(
+      job,
+      command.outcome === "retry"
+        ? "schedule_job.retry_scheduled"
+        : `schedule_job.${command.outcome}`,
+      {
+        status,
+        attemptId: attempt.id,
+        attemptNumber: attempt.attemptNumber,
+        error: command.error,
+        retryAt: command.retryAt,
+      },
+    );
+    return { job, resolution: "apply" };
+  }
+
   async transitionScheduleJob(
     id: string,
     command: TransitionScheduleJobCommand,
   ): Promise<ScheduleJobTransitionResult> {
+    if (command.to === "running") {
+      const claim = await this.claimScheduleJob(id);
+      return {
+        job: claim.job,
+        resolution: claim.resolution === "claimed"
+          ? "apply"
+          : claim.resolution === "not_found"
+            ? "not_found"
+            : "reject",
+      };
+    }
     const current = this.scheduleJobs.get(id);
     if (!current) {
       return { job: null, resolution: "not_found" };
@@ -773,14 +1341,24 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       status: command.to,
       progress: command.progress,
       error: command.error ?? null,
-      startedAt: command.to === "running" ? now : current.startedAt,
+      startedAt: current.startedAt,
       finishedAt: terminal ? now : current.finishedAt,
       cancellationRequestedAt: command.to === "cancelled" ? now : current.cancellationRequestedAt,
       updatedAt: now,
     };
     this.scheduleJobs.set(id, next);
-    if (command.to === "running") {
-      this.scheduleJobAttempts.set(id, (this.scheduleJobAttempts.get(id) ?? 0) + 1);
+    if (terminal) {
+      const attempts = this.scheduleJobAttempts.get(id) ?? [];
+      const attempt = attempts.at(-1);
+      if (attempt && attempt.finishedAt === null) {
+        attempts[attempts.length - 1] = {
+          ...attempt,
+          status: command.to as ScheduleJobAttempt["status"],
+          finishedAt: now,
+          durationMs: Math.max(0, Date.parse(now) - Date.parse(attempt.startedAt)),
+          error: command.error ?? null,
+        };
+      }
     }
     this.recordScheduleJobEvent(next, `schedule_job.${command.to}`, {
       status: command.to,
@@ -792,18 +1370,40 @@ export class InMemoryPlatformRepository implements PlatformRepository {
 
   async completeScheduleJob(
     id: string,
-    result: ScheduleResult,
-  ): Promise<ScheduleJobTransitionResult> {
+    command: CompleteScheduleJobCommand,
+  ): Promise<ScheduleJobExecutionTransitionResult> {
     const current = this.scheduleJobs.get(id);
     if (!current) {
       return { job: null, resolution: "not_found" };
     }
-    const status = scheduleJobStatusForSolveResult(result.statistics.status);
+    const attempts = this.scheduleJobAttempts.get(id) ?? [];
+    const attemptIndex = attempts.findIndex((attempt) => attempt.id === command.attemptId);
+    const attempt = attempts[attemptIndex];
+    if (!attempt || attemptIndex !== attempts.length - 1) {
+      return { job: current, resolution: "stale_attempt" };
+    }
+    if (attempt.finishedAt !== null) {
+      return {
+        job: current,
+        resolution: current.runId ? "idempotent" : "stale_attempt",
+      };
+    }
+    if (current.status !== "running") {
+      return { job: current, resolution: "stale_attempt" };
+    }
+    const status = scheduleJobStatusForSolveResult(command.result.statistics.status);
     const resolution = resolveScheduleJobTransition(current.status, status);
     if (resolution !== "apply") {
       return { job: current, resolution };
     }
-    const response = this.createScheduleRunInternal(result);
+    if (!current.constraintProfileVersionId || !current.constraintProfileSnapshot) {
+      throw new Error(`Schedule job ${id} does not contain a current strategy snapshot.`);
+    }
+    const response = this.createScheduleRunInternal(command.result, {
+      constraintProfileVersionId: current.constraintProfileVersionId,
+      constraintProfileSnapshot: current.constraintProfileSnapshot,
+      schedulerVersion: command.schedulerVersion ?? "unknown",
+    });
     const now = new Date().toISOString();
     const next: ScheduleJobSummary = {
       ...current,
@@ -814,37 +1414,24 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       updatedAt: now,
     };
     this.scheduleJobs.set(id, next);
+    attempts[attemptIndex] = {
+      ...attempt,
+      status,
+      finishedAt: now,
+      durationMs: Math.max(0, Date.parse(now) - Date.parse(attempt.startedAt)),
+      error: null,
+    };
+    this.recordScheduleJobEvent(next, "schedule_job.run_created", {
+      status,
+      runId: response.run.id,
+      attemptId: attempt.id,
+      attemptNumber: attempt.attemptNumber,
+    });
     this.recordScheduleJobEvent(next, `schedule_job.${status}`, {
       status,
       runId: response.run.id,
     });
     return { job: next, resolution };
-  }
-
-  async recoverInterruptedScheduleJobs(): Promise<ScheduleJobSummary[]> {
-    const recovered: ScheduleJobSummary[] = [];
-    for (const job of this.scheduleJobs.values()) {
-      if (job.status !== "queued" && job.status !== "running") {
-        continue;
-      }
-      const failed = await this.transitionScheduleJob(job.id, {
-        to: "failed",
-        progress: 100,
-        error: {
-          category: "infrastructure",
-          code: "schedule_job_interrupted",
-          message: "Schedule job was interrupted before completion.",
-          retryable: true,
-        },
-      });
-      if (failed.job && failed.resolution === "apply") {
-        recovered.push(failed.job);
-        this.recordAuditEvent("schedule_job.interrupted", "schedule_job", failed.job.id, {
-          previousStatus: job.status,
-        });
-      }
-    }
-    return recovered;
   }
 
   async createAuthUser(command: CreateAuthUserCommand): Promise<AuthUserRecord> {
@@ -854,6 +1441,15 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     const user = structuredClone(command);
     this.authUsers.set(user.id, user);
     return structuredClone(user);
+  }
+
+  private async defaultScheduleRunPersistenceContext(): Promise<ScheduleRunPersistenceContext> {
+    const strategy = await this.resolveConstraintProfile();
+    return {
+      constraintProfileVersionId: strategy.versionId,
+      constraintProfileSnapshot: strategy.snapshot,
+      schedulerVersion: "unknown",
+    };
   }
 
   async findAuthUserByUsername(username: string): Promise<AuthUserRecord | null> {
@@ -890,6 +1486,53 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return true;
   }
 
+  async getAudienceScope(userId: string): Promise<AudienceScope | "invalid" | null> {
+    const teacherId = this.teacherAudienceScopes.get(userId);
+    const studentGroupIds = [...(this.studentGroupAudienceScopes.get(userId) ?? [])].sort();
+    if (teacherId && studentGroupIds.length > 0) {
+      return "invalid";
+    }
+    if (teacherId) {
+      const teacher = this.scheduleInput.teachers.find((candidate) => candidate.id === teacherId);
+      return teacher
+        ? { kind: "teacher", teacher: structuredClone(teacher) }
+        : "invalid";
+    }
+    if (studentGroupIds.length > 0) {
+      const groups = studentGroupIds.map((id) => (
+        this.scheduleInput.student_groups.find((candidate) => candidate.id === id)
+      ));
+      return groups.every((group) => group !== undefined)
+        ? { kind: "student", studentGroups: structuredClone(groups) }
+        : "invalid";
+    }
+    return null;
+  }
+
+  async setTeacherAudienceScope(userId: string, teacherId: string): Promise<void> {
+    if (!this.scheduleInput.teachers.some((teacher) => teacher.id === teacherId)) {
+      throw new ReferenceIntegrityError([`teacher ${teacherId} does not exist`]);
+    }
+    const conflictingUserId = [...this.teacherAudienceScopes.entries()].find(([, id]) => (
+      id === teacherId
+    ))?.[0];
+    if (conflictingUserId && conflictingUserId !== userId) {
+      throw new ReferenceIntegrityError([`teacher ${teacherId} already has an audience user`]);
+    }
+    this.studentGroupAudienceScopes.delete(userId);
+    this.teacherAudienceScopes.set(userId, teacherId);
+  }
+
+  async addStudentGroupAudienceScope(userId: string, studentGroupId: string): Promise<void> {
+    if (!this.scheduleInput.student_groups.some((group) => group.id === studentGroupId)) {
+      throw new ReferenceIntegrityError([`student group ${studentGroupId} does not exist`]);
+    }
+    this.teacherAudienceScopes.delete(userId);
+    const scopes = this.studentGroupAudienceScopes.get(userId) ?? new Set<string>();
+    scopes.add(studentGroupId);
+    this.studentGroupAudienceScopes.set(userId, scopes);
+  }
+
   private recordScheduleJobEvent(
     job: ScheduleJobSummary,
     type: string,
@@ -897,9 +1540,10 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   ) {
     const event = {
       eventId: `event-${randomUUID()}`,
+      sequence: ++this.scheduleJobEventSequence,
       jobId: job.id,
-      type,
-      version: 1,
+      type: scheduleJobEventTypeSchema.parse(type),
+      version: 1 as const,
       occurredAt: new Date().toISOString(),
       payload,
       traceId: job.traceId,
@@ -987,11 +1631,15 @@ export class InMemoryPlatformRepository implements PlatformRepository {
 }
 
 function matchesAuditFilter(event: AuditEventSummary, filter: AuditEventFilter) {
+  const from = filter.from ?? filter.since;
+  const to = filter.to ?? filter.until;
   return (!filter.entityType || event.entityType === filter.entityType)
     && (!filter.entityId || event.entityId === filter.entityId)
     && (!filter.actor || event.actor === filter.actor)
-    && (!filter.since || Date.parse(event.createdAt) >= Date.parse(filter.since))
-    && (!filter.until || Date.parse(event.createdAt) <= Date.parse(filter.until));
+    && (!filter.action || event.action === filter.action)
+    && (!filter.traceId || event.payload.traceId === filter.traceId)
+    && (!from || Date.parse(event.createdAt) >= Date.parse(from))
+    && (!to || Date.parse(event.createdAt) <= Date.parse(to));
 }
 
 export function buildRunComparison(
@@ -1494,6 +2142,11 @@ export function buildDraftScheduleResult(detail: ScheduleDraftDetailResponse): S
       total_score: detail.draft.score,
       hard_violation_count: detail.conflicts.filter((conflict) => conflict.severity === "error").length,
       soft_penalty_items: [],
+      scoring_contract_version: 1,
+      normalized_score: detail.draft.score,
+      total_raw_penalty: 0,
+      total_weighted_penalty: 0,
+      normalized_penalty_items: [],
     },
     statistics: {
       status: detail.conflicts.length > 0 ? "partial" : "feasible",
@@ -1503,6 +2156,7 @@ export function buildDraftScheduleResult(detail: ScheduleDraftDetailResponse): S
       slot_count: new Set(detail.assignments.map((assignment) => assignment.time_slot_id)).size,
       attempted_assignments: detail.assignments.length,
     },
+    diagnostics: [],
     report: {
       source: "schedule_draft",
       draft_id: detail.draft.id,

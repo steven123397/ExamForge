@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type {
+  ConstraintProfile,
   FixedAssignment,
   ScheduleInput,
   ScheduleResult,
 } from "@examforge/shared";
+import { ConstraintProfileService } from "@examforge/scheduling-application";
 import { InMemoryPlatformRepository } from "../src/repository.js";
 import {
-  SchedulerClientError,
   type SchedulerClient,
   type SchedulerSolveOptions,
 } from "../src/scheduler-client.js";
-import { ScheduleRunService, type DeferredTask } from "../src/services/schedule-run-service.js";
+import { ScheduleRunService } from "../src/services/schedule-run-service.js";
 
 const fixedAssignments: FixedAssignment[] = [
   {
@@ -39,18 +40,32 @@ const overrides = {
   reschedule_context: rescheduleContext,
 };
 
+const governedStrategy: ConstraintProfile = {
+  hard_rules: ["room_capacity", "teacher_time_unique"],
+  soft_weights: {
+    room_utilization: 37,
+    student_consecutive_exam: 11,
+  },
+  time_limit_seconds: 19,
+};
+
+const strategyContext = {
+  actor: {
+    userId: "user-admin",
+    username: "admin",
+    roles: ["admin" as const],
+  },
+  traceId: "trace-synchronous-strategy",
+};
+
 class RecordingScheduler implements SchedulerClient {
   lastInput: ScheduleInput | null = null;
   lastOptions: SchedulerSolveOptions | null = null;
 
-  constructor(private readonly error?: Error) {}
-
   async solve(input: ScheduleInput, options?: SchedulerSolveOptions): Promise<ScheduleResult> {
     this.lastInput = input;
     this.lastOptions = options ?? null;
-    if (this.error) {
-      throw this.error;
-    }
+    options?.onMetadata?.({ schedulerVersion: "scheduler-test-1" });
     return buildResult(input);
   }
 }
@@ -58,8 +73,9 @@ class RecordingScheduler implements SchedulerClient {
 class DraftRescheduleScheduler implements SchedulerClient {
   lastInput: ScheduleInput | null = null;
 
-  async solve(input: ScheduleInput): Promise<ScheduleResult> {
+  async solve(input: ScheduleInput, options?: SchedulerSolveOptions): Promise<ScheduleResult> {
     this.lastInput = structuredClone(input);
+    options?.onMetadata?.({ schedulerVersion: "scheduler-test-1" });
     const baseline = input.reschedule_context?.baseline_assignments ?? [];
     const frozen = new Set(
       baseline
@@ -94,34 +110,49 @@ describe("schedule run service", () => {
     assert.deepEqual(scheduler.lastInput?.reschedule_context, rescheduleContext);
   });
 
-  it("passes reschedule context through asynchronous schedule jobs", async () => {
+  it("uses and persists the selected strategy for synchronous schedule runs", async () => {
+    const repository = new InMemoryPlatformRepository();
+    const profileService = new ConstraintProfileService(repository);
+    const selected = await profileService.create({
+      name: "Governed synchronous strategy",
+      config: governedStrategy,
+    }, strategyContext);
+    const scheduler = new RecordingScheduler();
+    const service = new ScheduleRunService(repository, scheduler);
+
+    const response = await service.createScheduleRun({
+      ...overrides,
+      constraintProfileVersionId: selected.currentVersionId,
+    });
+
+    assert.deepEqual(scheduler.lastInput?.constraint_profile, governedStrategy);
+    assert.equal(response.run.constraintProfileVersionId, selected.currentVersionId);
+    assert.deepEqual(response.run.constraintProfileSnapshot?.config, governedStrategy);
+    assert.equal(response.run.schedulerVersion, "scheduler-test-1");
+  });
+
+  it("freezes reschedule context without executing the job in the API process", async () => {
     const repository = new InMemoryPlatformRepository();
     const scheduler = new RecordingScheduler();
-    let deferredTask: DeferredTask | null = null;
-    const service = new ScheduleRunService(repository, scheduler, (task) => {
-      deferredTask = task;
-    });
+    const service = new ScheduleRunService(repository, scheduler);
 
     const job = await service.createScheduleJob(overrides, {
       idempotencyKey: "job-reschedule-context",
       traceId: "trace-reschedule-context",
     });
     assert.equal(job.status, "queued");
-    await requireDeferredTask(deferredTask)();
-
-    const succeeded = await repository.getScheduleJob(job.id);
-    assert.equal(succeeded?.status, "succeeded");
-    assert.deepEqual(scheduler.lastInput?.fixed_assignments, fixedAssignments);
-    assert.deepEqual(scheduler.lastInput?.reschedule_context, rescheduleContext);
-    assert.equal(scheduler.lastOptions?.requestId, "trace-reschedule-context");
+    const claim = await repository.claimScheduleJob(job.id);
+    assert.equal(claim.resolution, "claimed");
+    assert.ok(claim.resolution === "claimed");
+    assert.deepEqual(claim.requestSnapshot.input.fixed_assignments, fixedAssignments);
+    assert.deepEqual(claim.requestSnapshot.input.reschedule_context, rescheduleContext);
+    assert.equal(scheduler.lastInput, null);
   });
 
-  it("reuses idempotent submissions without scheduling duplicate execution", async () => {
+  it("reuses idempotent submissions without executing them", async () => {
     const repository = new InMemoryPlatformRepository();
-    const deferredTasks: DeferredTask[] = [];
-    const service = new ScheduleRunService(repository, new RecordingScheduler(), (task) => {
-      deferredTasks.push(task);
-    });
+    const scheduler = new RecordingScheduler();
+    const service = new ScheduleRunService(repository, scheduler);
     const context = {
       idempotencyKey: "same-schedule-request",
       traceId: "trace-idempotent-request",
@@ -131,12 +162,12 @@ describe("schedule run service", () => {
     const second = await service.createScheduleJob(overrides, context);
 
     assert.equal(second.id, first.id);
-    assert.equal(deferredTasks.length, 1);
+    assert.equal(scheduler.lastInput, null);
   });
 
   it("rejects an idempotency key reused with a different request digest", async () => {
     const repository = new InMemoryPlatformRepository();
-    const service = new ScheduleRunService(repository, new RecordingScheduler(), () => {});
+    const service = new ScheduleRunService(repository, new RecordingScheduler());
     const context = {
       idempotencyKey: "conflicting-schedule-request",
       traceId: "trace-conflicting-request",
@@ -149,26 +180,6 @@ describe("schedule run service", () => {
     );
   });
 
-  it("does not create another run when a success callback is repeated", async () => {
-    const repository = new InMemoryPlatformRepository();
-    let deferredTask: DeferredTask | null = null;
-    const scheduler = new RecordingScheduler();
-    const service = new ScheduleRunService(repository, scheduler, (task) => {
-      deferredTask = task;
-    });
-    const job = await service.createScheduleJob(overrides, {
-      idempotencyKey: "repeat-success-callback",
-      traceId: "trace-repeat-success",
-    });
-    const execute = requireDeferredTask(deferredTask);
-
-    await execute();
-    await execute();
-
-    assert.equal((await repository.listScheduleRuns()).runs.length, 1);
-    assert.equal((await repository.getScheduleJob(job.id))?.status, "succeeded");
-  });
-
   it("builds a stable reschedule context from an editable draft without mutating it", async () => {
     const repository = new InMemoryPlatformRepository();
     const referenceData = await repository.getReferenceData();
@@ -179,6 +190,12 @@ describe("schedule run service", () => {
     const frozenExamId = examIds[0];
     await repository.lockScheduleDraftAssignment(draft.draft.id, frozenExamId);
     const before = structuredClone(await repository.getScheduleDraft(draft.draft.id));
+    const profileService = new ConstraintProfileService(repository);
+    const selected = await profileService.create({
+      name: "Governed draft strategy",
+      config: governedStrategy,
+    }, strategyContext);
+    await profileService.setDefault(selected.id, strategyContext);
     const scheduler = new DraftRescheduleScheduler();
     const service = new ScheduleRunService(repository, scheduler);
 
@@ -193,6 +210,10 @@ describe("schedule run service", () => {
       scheduler.lastInput?.reschedule_context?.movable_exam_task_ids,
       examIds.filter((examTaskId) => examTaskId !== frozenExamId),
     );
+    assert.deepEqual(scheduler.lastInput?.constraint_profile, governedStrategy);
+    assert.equal(response.run.constraintProfileVersionId, selected.currentVersionId);
+    assert.deepEqual(response.run.constraintProfileSnapshot?.config, governedStrategy);
+    assert.equal(response.run.schedulerVersion, "scheduler-test-1");
     assert.deepEqual(response.reschedule, {
       baseline_exam_count: examIds.length,
       frozen_exam_task_ids: [frozenExamId],
@@ -218,112 +239,6 @@ describe("schedule run service", () => {
     assert.equal(scheduler.lastInput, null);
   });
 
-  it("marks asynchronous jobs as failed without persisting internal error details", async () => {
-    const repository = new InMemoryPlatformRepository();
-    let deferredTask: DeferredTask | null = null;
-    const service = new ScheduleRunService(
-      repository,
-      new RecordingScheduler(new Error("scheduler unavailable")),
-      (task) => {
-        deferredTask = task;
-      },
-    );
-
-    const job = await service.createScheduleJob({
-      fixed_assignments: [],
-      reschedule_context: null,
-    }, {
-      idempotencyKey: "scheduler-failure",
-      traceId: "trace-scheduler-failure",
-    });
-    await requireDeferredTask(deferredTask)();
-
-    const failed = await repository.getScheduleJob(job.id);
-    assert.equal(failed?.status, "failed");
-    assert.equal(failed?.progress, 100);
-    assert.equal(failed?.error?.message, "Schedule job execution failed.");
-  });
-
-  it("maps scheduler timeout, cancellation and validation to stable job terminals", async () => {
-    const cases = [
-      {
-        error: new SchedulerClientError(
-          "Scheduler request exceeded its deadline.",
-          "timeout",
-          "scheduler_timeout",
-          true,
-          "trace-timeout",
-        ),
-        expectedStatus: "timed_out",
-      },
-      {
-        error: new SchedulerClientError(
-          "Scheduler request was cancelled.",
-          "cancelled",
-          "scheduler_cancelled",
-          false,
-          "trace-cancelled",
-        ),
-        expectedStatus: "cancelled",
-      },
-      {
-        error: new SchedulerClientError(
-          "Schedule input failed semantic validation.",
-          "validation",
-          "scheduler_input_invalid",
-          false,
-          "trace-validation",
-        ),
-        expectedStatus: "failed",
-      },
-    ] as const;
-
-    for (const testCase of cases) {
-      const repository = new InMemoryPlatformRepository();
-      let deferredTask: DeferredTask | null = null;
-      const service = new ScheduleRunService(
-        repository,
-        new RecordingScheduler(testCase.error),
-        (task) => {
-          deferredTask = task;
-        },
-      );
-      const job = await service.createScheduleJob({
-        fixed_assignments: [],
-        reschedule_context: null,
-      }, {
-        idempotencyKey: `job-${testCase.expectedStatus}`,
-        traceId: testCase.error.requestId,
-      });
-
-      await requireDeferredTask(deferredTask)();
-
-      const terminal = await repository.getScheduleJob(job.id);
-      assert.equal(terminal?.status, testCase.expectedStatus);
-      assert.equal(terminal?.error?.category, testCase.error.category);
-      assert.equal(terminal?.error?.code, testCase.error.code);
-      assert.equal(terminal?.error?.retryable, testCase.error.retryable);
-      assert.equal(terminal?.error?.message, testCase.error.message);
-    }
-  });
-
-  it("recovers interrupted jobs through the repository", async () => {
-    const repository = new InMemoryPlatformRepository();
-    const job = await repository.createScheduleJob({
-      batchId: "batch-2026-spring-final",
-      idempotencyKey: "recover-interrupted-job",
-      requestDigest: "c".repeat(64),
-      traceId: "trace-recover-interrupted",
-    });
-    await repository.transitionScheduleJob(job.job.id, { to: "running", progress: 35 });
-    const service = new ScheduleRunService(repository, new RecordingScheduler());
-
-    await service.recoverInterruptedJobs();
-
-    const recovered = await repository.getScheduleJob(job.job.id);
-    assert.equal(recovered?.status, "failed");
-    assert.equal(recovered?.error?.message, "Schedule job was interrupted before completion.");
-  });
 });
 
 function buildResult(input: ScheduleInput): ScheduleResult {
@@ -341,6 +256,11 @@ function buildResult(input: ScheduleInput): ScheduleResult {
       total_score: 100,
       hard_violation_count: 0,
       soft_penalty_items: [],
+      scoring_contract_version: 1,
+      normalized_score: 100,
+      total_raw_penalty: 0,
+      total_weighted_penalty: 0,
+      normalized_penalty_items: [],
     },
     statistics: {
       status: "feasible",
@@ -350,6 +270,7 @@ function buildResult(input: ScheduleInput): ScheduleResult {
       slot_count: input.time_slots.length,
       attempted_assignments: 1,
     },
+    diagnostics: [],
   };
 }
 
@@ -371,9 +292,4 @@ function buildDraftSourceResult(input: ScheduleInput): ScheduleResult {
       attempted_assignments: assignments.length,
     },
   };
-}
-
-function requireDeferredTask(task: DeferredTask | null): DeferredTask {
-  assert.ok(task, "Schedule job must register a deferred task.");
-  return task;
 }

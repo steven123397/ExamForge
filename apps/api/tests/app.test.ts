@@ -8,6 +8,7 @@ import {
   scheduleJobs,
 } from "@examforge/db";
 import {
+  demoScheduleInput,
   type ScheduleInput,
   type ScheduleResult,
 } from "@examforge/shared";
@@ -93,6 +94,11 @@ class IncompleteScheduler implements SchedulerClient {
         total_score: 0,
         hard_violation_count: 1,
         soft_penalty_items: [],
+        scoring_contract_version: 1,
+        normalized_score: 0,
+        total_raw_penalty: 0,
+        total_weighted_penalty: 0,
+        normalized_penalty_items: [],
       },
       statistics: {
         status: "infeasible",
@@ -102,6 +108,7 @@ class IncompleteScheduler implements SchedulerClient {
         slot_count: input.time_slots.length,
         attempted_assignments: 0,
       },
+      diagnostics: [],
       report: {
         summary: {
           status: "infeasible",
@@ -135,6 +142,11 @@ class DraftWorkflowScheduler implements SchedulerClient {
           total_score: 96,
           hard_violation_count: 0,
           soft_penalty_items: [],
+          scoring_contract_version: 1,
+          normalized_score: 96,
+          total_raw_penalty: 0,
+          total_weighted_penalty: 0,
+          normalized_penalty_items: [],
         },
         statistics: {
           status: "feasible",
@@ -144,6 +156,7 @@ class DraftWorkflowScheduler implements SchedulerClient {
           slot_count: input.time_slots.length,
           attempted_assignments: baseline.length,
         },
+        diagnostics: [],
         report: {
           reschedule: {
             baseline_exam_count: baseline.length,
@@ -331,8 +344,9 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
-  it("passes fixed assignments from schedule job requests to the scheduler", async () => {
+  it("freezes fixed assignments without executing schedule jobs in the API", async () => {
     const scheduler = new FakeScheduler();
+    const repository = new InMemoryPlatformRepository();
     const fixedAssignments = [
       {
         exam_task_id: "e-data-structures",
@@ -341,7 +355,7 @@ describe("ExamForge API", () => {
         teacher_ids: ["t-zhang"],
       },
     ];
-    const app = createApp({ scheduler });
+    const app = createApp({ scheduler, repository });
 
     const response = await app.inject({
       method: "POST",
@@ -352,10 +366,11 @@ describe("ExamForge API", () => {
       },
     });
     assert.equal(response.statusCode, 202);
-
-    await new Promise((resolve) => setTimeout(resolve, 25));
-
-    assert.deepEqual(scheduler.lastInput?.fixed_assignments, fixedAssignments);
+    const claim = await repository.claimScheduleJob(response.json().job.id);
+    assert.equal(claim.resolution, "claimed");
+    assert.ok(claim.resolution === "claimed");
+    assert.deepEqual(claim.requestSnapshot.input.fixed_assignments, fixedAssignments);
+    assert.equal(scheduler.lastInput, null);
     await app.close();
   });
 
@@ -379,9 +394,10 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
-  it("passes reschedule context from schedule job requests to the scheduler", async () => {
+  it("freezes reschedule context without executing schedule jobs in the API", async () => {
     const scheduler = new FakeScheduler();
-    const app = createApp({ scheduler });
+    const repository = new InMemoryPlatformRepository();
+    const app = createApp({ scheduler, repository });
     const rescheduleContext = buildRescheduleContext();
 
     const response = await app.inject({
@@ -394,10 +410,11 @@ describe("ExamForge API", () => {
       },
     });
     assert.equal(response.statusCode, 202);
-
-    await new Promise((resolve) => setTimeout(resolve, 25));
-
-    assert.deepEqual(scheduler.lastInput?.reschedule_context, rescheduleContext);
+    const claim = await repository.claimScheduleJob(response.json().job.id);
+    assert.equal(claim.resolution, "claimed");
+    assert.ok(claim.resolution === "claimed");
+    assert.deepEqual(claim.requestSnapshot.input.reschedule_context, rescheduleContext);
+    assert.equal(scheduler.lastInput, null);
     await app.close();
   });
 
@@ -544,6 +561,10 @@ describe("ExamForge API", () => {
 
   it("protects internal reads with session authentication", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
+    const operatorOnlyPaths = new Set([
+      "/api/schedule-jobs",
+      "/api/schedule-jobs/missing-job",
+    ]);
     const internalPaths = [
       "/api/dashboard",
       "/api/reference-data",
@@ -572,23 +593,39 @@ describe("ExamForge API", () => {
         headers: viewerHeaders,
       });
       assert.notEqual(viewerResponse.statusCode, 401, `${path} must accept student authentication`);
-      assert.notEqual(viewerResponse.statusCode, 403, `${path} must allow student reads`);
+      if (operatorOnlyPaths.has(path)) {
+        assert.equal(viewerResponse.statusCode, 403, `${path} must reject student reads`);
+      } else {
+        assert.notEqual(viewerResponse.statusCode, 403, `${path} must allow student reads`);
+      }
     }
 
     await app.close();
   });
 
-  it("keeps published audience reads anonymous while protecting CSV export", async () => {
+  it("keeps only aggregate published reads anonymous and protects audience previews", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
     for (const path of [
       "/api/published-schedule",
       "/api/published-schedule/notifications",
-      "/api/published-schedule/teachers/t-zhang",
-      "/api/published-schedule/student-groups/g-cs-2301",
     ]) {
       const response = await app.inject({ method: "GET", url: path });
       assert.equal(response.statusCode, 404);
       assert.notEqual(response.json().error, "not_authenticated");
+    }
+
+    for (const path of [
+      "/api/published-schedule/teachers/t-zhang",
+      "/api/published-schedule/student-groups/g-cs-2301",
+    ]) {
+      const anonymousResponse = await app.inject({ method: "GET", url: path });
+      assert.equal(anonymousResponse.statusCode, 401);
+      const audienceResponse = await app.inject({
+        method: "GET",
+        url: path,
+        headers: testAuthHeaders.teacher,
+      });
+      assert.equal(audienceResponse.statusCode, 403);
     }
 
     const exportResponse = await app.inject({
@@ -667,6 +704,93 @@ describe("ExamForge API", () => {
     assert.equal(compareResponse.json().baseRun.id, first.run.id);
     assert.equal(compareResponse.json().targetRun.id, second.run.id);
     assert.equal(compareResponse.json().deltas.score, 1);
+
+    await app.close();
+  });
+
+  it("filters and paginates schedule runs and audit events with stable metadata", async () => {
+    const repository = new InMemoryPlatformRepository({ authUsers: testAuthUsers });
+    const app = createApp({ repository, scheduler: new FakeScheduler() });
+    const profiles = await repository.listConstraintProfiles(true);
+    const profile = profiles.find((candidate) => candidate.isDefault) ?? profiles[0];
+    const version = profile?.versions.find((candidate) => candidate.id === profile.currentVersionId);
+    assert.ok(profile && version);
+    for (const [index, status] of ["feasible", "infeasible", "feasible"].entries()) {
+      const result = buildCompleteScheduleResult(demoScheduleInput);
+      result.statistics.status = status as ScheduleResult["statistics"]["status"];
+      await repository.createScheduleRun(result, {
+        constraintProfileVersionId: version.id,
+        constraintProfileSnapshot: {
+          schemaVersion: 1,
+          profileId: profile.id,
+          profileVersionId: version.id,
+          versionNumber: version.versionNumber,
+          digest: version.digest,
+          config: version.config,
+        },
+        schedulerVersion: `test-${index}`,
+      });
+    }
+
+    const feasiblePage = await app.inject({
+      method: "GET",
+      url: "/api/schedule-runs?status=feasible&page=1&pageSize=1",
+      headers: operatorHeaders,
+    });
+    assert.equal(feasiblePage.statusCode, 200);
+    assert.equal(feasiblePage.json().runs.length, 1);
+    assert.equal(feasiblePage.json().total, 2);
+    assert.equal(feasiblePage.json().pageCount, 2);
+
+    const emptyRunPage = await app.inject({
+      method: "GET",
+      url: "/api/schedule-runs?page=99&pageSize=20",
+      headers: operatorHeaders,
+    });
+    assert.deepEqual(emptyRunPage.json().runs, []);
+    assert.equal(emptyRunPage.json().total, 3);
+
+    const invalidRunFilter = await app.inject({
+      method: "GET",
+      url: "/api/schedule-runs?status=published",
+      headers: operatorHeaders,
+    });
+    assert.equal(invalidRunFilter.statusCode, 400);
+    assert.equal(invalidRunFilter.json().error, "invalid_schedule_run_filter");
+
+    await repository.recordAuditEvent?.(
+      "test.trace.created",
+      "schedule_run",
+      "trace-run-1",
+      { traceId: "trace-list-1" },
+      "operator",
+    );
+    await repository.recordAuditEvent?.(
+      "test.trace.updated",
+      "schedule_run",
+      "trace-run-2",
+      { traceId: "trace-list-2" },
+      "admin",
+    );
+    const auditPage = await app.inject({
+      method: "GET",
+      url: "/api/audit-events?action=test.trace.created&traceId=trace-list-1&page=1&pageSize=1",
+      headers: operatorHeaders,
+    });
+    assert.equal(auditPage.statusCode, 200);
+    assert.equal(auditPage.json().events.length, 1);
+    assert.equal(auditPage.json().events[0].action, "test.trace.created");
+    assert.equal(auditPage.json().total, 1);
+    assert.equal(auditPage.json().page, 1);
+    assert.equal(auditPage.json().pageSize, 1);
+
+    const emptyAuditPage = await app.inject({
+      method: "GET",
+      url: "/api/audit-events?action=test.trace.created&page=9&pageSize=20",
+      headers: operatorHeaders,
+    });
+    assert.deepEqual(emptyAuditPage.json().events, []);
+    assert.equal(emptyAuditPage.json().total, 1);
 
     await app.close();
   });
@@ -834,6 +958,7 @@ describe("ExamForge API", () => {
     const teacherResponse = await app.inject({
       method: "GET",
       url: `/api/published-schedule/teachers/${teacher.id}`,
+      headers: operatorHeaders,
     });
     assert.equal(teacherResponse.statusCode, 200);
     assert.equal(teacherResponse.json().viewer.id, teacher.id);
@@ -843,11 +968,227 @@ describe("ExamForge API", () => {
     const studentResponse = await app.inject({
       method: "GET",
       url: `/api/published-schedule/student-groups/${studentGroup.id}`,
+      headers: adminHeaders,
     });
     assert.equal(studentResponse.statusCode, 200);
     assert.equal(studentResponse.json().viewer.id, studentGroup.id);
     assert.ok(studentResponse.json().assignments.length > 0);
     assert.equal(studentResponse.json().assignments[0].studentGroups[0].id, studentGroup.id);
+
+    await app.close();
+  });
+
+  it("serves current audience schedules and teacher self-service without arbitrary IDs", async () => {
+    const repository = new InMemoryPlatformRepository({ authUsers: testAuthUsers });
+    await repository.setTeacherAudienceScope("user-teacher", "t-zhang");
+    await repository.addStudentGroupAudienceScope("user-student", "g-cs-2301");
+    await repository.addStudentGroupAudienceScope("user-student", "g-ai-2301");
+    const app = createApp({ repository, scheduler: new FakeScheduler() });
+
+    const created = (await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+    })).json();
+    await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${created.run.id}/publish`,
+      headers: adminHeaders,
+    });
+
+    const teacherAudience = await app.inject({
+      method: "GET",
+      url: "/api/me/audience",
+      headers: testAuthHeaders.teacher,
+    });
+    assert.equal(teacherAudience.statusCode, 200);
+    assert.equal(teacherAudience.json().kind, "teacher");
+    assert.equal(teacherAudience.json().teacher.id, "t-zhang");
+
+    const teacherSchedule = await app.inject({
+      method: "GET",
+      url: "/api/me/published-schedule",
+      headers: testAuthHeaders.teacher,
+    });
+    assert.equal(teacherSchedule.statusCode, 200);
+    assert.equal(teacherSchedule.json().kind, "teacher");
+    assert.ok(teacherSchedule.json().assignments.length > 0);
+
+    const teacherAvailability = await app.inject({
+      method: "GET",
+      url: "/api/me/teacher-unavailable-slots",
+      headers: testAuthHeaders.teacher,
+    });
+    assert.equal(teacherAvailability.statusCode, 200);
+    assert.equal(teacherAvailability.json().teacher.id, "t-zhang");
+    assert.equal(teacherAvailability.json().timeSlots.length, 6);
+    assert.equal("exam_tasks" in teacherAvailability.json(), false);
+
+    const studentAvailability = await app.inject({
+      method: "GET",
+      url: "/api/me/teacher-unavailable-slots",
+      headers: testAuthHeaders.student,
+    });
+    assert.equal(studentAvailability.statusCode, 403);
+    assert.equal(studentAvailability.json().error, "audience_scope_invalid");
+
+    const teacherMutation = await app.inject({
+      method: "PATCH",
+      url: "/api/me/teacher-unavailable-slots",
+      headers: testAuthHeaders.teacher,
+      payload: { unavailable_slot_ids: ["s-001", "s-004"] },
+    });
+    assert.equal(teacherMutation.statusCode, 200);
+    assert.equal(teacherMutation.json().teacher.id, "t-zhang");
+    assert.deepEqual(teacherMutation.json().teacher.unavailable_slot_ids, ["s-001", "s-004"]);
+
+    const arbitraryIdMutation = await app.inject({
+      method: "PATCH",
+      url: "/api/me/teacher-unavailable-slots",
+      headers: testAuthHeaders.teacher,
+      payload: { teacherId: "t-li", unavailable_slot_ids: ["s-002"] },
+    });
+    assert.equal(arbitraryIdMutation.statusCode, 400);
+
+    const studentSchedule = await app.inject({
+      method: "GET",
+      url: "/api/me/published-schedule",
+      headers: testAuthHeaders.student,
+    });
+    assert.equal(studentSchedule.statusCode, 200);
+    assert.equal(studentSchedule.json().kind, "student");
+    const studentAssignmentIds = studentSchedule.json().assignments.map(
+      (item: { assignment: { exam_task_id: string } }) => item.assignment.exam_task_id,
+    );
+    assert.equal(new Set(studentAssignmentIds).size, studentAssignmentIds.length);
+
+    const operatorAudience = await app.inject({
+      method: "GET",
+      url: "/api/me/audience",
+      headers: operatorHeaders,
+    });
+    assert.equal(operatorAudience.statusCode, 403);
+    assert.equal(operatorAudience.json().error, "audience_scope_missing");
+
+    const audit = await app.inject({
+      method: "GET",
+      url: "/api/audit-events?entityType=teacher&entityId=t-zhang",
+      headers: adminHeaders,
+    });
+    assert.equal(audit.statusCode, 200);
+    assert.equal(audit.json().events[0].action, "teacher.unavailable_slots_updated");
+    assert.equal(audit.json().events[0].actorUserId, "user-teacher");
+
+    await app.close();
+  });
+
+  it("governs constraint profiles with admin mutations and operator read access", async () => {
+    const app = createApp();
+
+    const operatorList = await app.inject({
+      method: "GET",
+      url: "/api/constraint-profiles",
+      headers: operatorHeaders,
+    });
+    assert.equal(operatorList.statusCode, 200);
+    assert.equal(operatorList.json().profiles.length, 1);
+    assert.equal(operatorList.json().profiles[0].isDefault, true);
+
+    const viewerList = await app.inject({
+      method: "GET",
+      url: "/api/constraint-profiles",
+      headers: viewerHeaders,
+    });
+    assert.equal(viewerList.statusCode, 403);
+
+    const operatorCreate = await app.inject({
+      method: "POST",
+      url: "/api/constraint-profiles",
+      headers: operatorHeaders,
+      payload: { name: "Operator cannot create", config: demoScheduleInput.constraint_profile },
+    });
+    assert.equal(operatorCreate.statusCode, 403);
+
+    const createdResponse = await app.inject({
+      method: "POST",
+      url: "/api/constraint-profiles",
+      headers: adminHeaders,
+      payload: {
+        name: "High quality",
+        config: {
+          ...demoScheduleInput.constraint_profile,
+          soft_weights: {
+            ...demoScheduleInput.constraint_profile.soft_weights,
+            room_utilization: 9,
+          },
+        },
+      },
+    });
+    assert.equal(createdResponse.statusCode, 201);
+    const created = createdResponse.json().profile;
+    assert.equal(created.name, "High quality");
+    assert.equal(created.versions.length, 1);
+
+    const versionResponse = await app.inject({
+      method: "POST",
+      url: `/api/constraint-profiles/${created.id}/versions`,
+      headers: adminHeaders,
+      payload: {
+        expectedCurrentVersionId: created.currentVersionId,
+        config: {
+          ...created.versions[0].config,
+          time_limit_seconds: 20,
+        },
+      },
+    });
+    assert.equal(versionResponse.statusCode, 201);
+    const versioned = versionResponse.json().profile;
+    assert.equal(versioned.versions.length, 2);
+    assert.equal(versioned.versions[1].versionNumber, 2);
+
+    const staleVersion = await app.inject({
+      method: "POST",
+      url: `/api/constraint-profiles/${created.id}/versions`,
+      headers: adminHeaders,
+      payload: {
+        expectedCurrentVersionId: created.currentVersionId,
+        config: created.versions[0].config,
+      },
+    });
+    assert.equal(staleVersion.statusCode, 409);
+    assert.equal(staleVersion.json().error, "constraint_profile_version_conflict");
+
+    const disableDefault = await app.inject({
+      method: "PATCH",
+      url: "/api/constraint-profiles/constraint-profile-default/status",
+      headers: adminHeaders,
+      payload: { status: "disabled" },
+    });
+    assert.equal(disableDefault.statusCode, 409);
+    assert.equal(disableDefault.json().error, "default_constraint_profile_cannot_be_disabled");
+
+    const setDefault = await app.inject({
+      method: "PUT",
+      url: `/api/constraint-profiles/${created.id}/default`,
+      headers: adminHeaders,
+    });
+    assert.equal(setDefault.statusCode, 200);
+    assert.equal(setDefault.json().profile.isDefault, true);
+
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/api/constraint-profiles",
+      headers: adminHeaders,
+      payload: {
+        name: "Invalid",
+        config: {
+          ...demoScheduleInput.constraint_profile,
+          soft_weights: { room_utilization: 1001 },
+        },
+      },
+    });
+    assert.equal(invalid.statusCode, 400);
+    assert.equal(invalid.json().error, "invalid_constraint_profile");
 
     await app.close();
   });
@@ -865,11 +1206,26 @@ describe("ExamForge API", () => {
         checkReadiness: () => repository.checkReadiness(),
         getDashboard: () => repository.getDashboard(),
         getReferenceData: async () => referenceData,
+        listConstraintProfiles: (includeDisabled) => (
+          repository.listConstraintProfiles(includeDisabled)
+        ),
+        getConstraintProfile: (id) => repository.getConstraintProfile(id),
+        resolveConstraintProfile: (versionId) => repository.resolveConstraintProfile(versionId),
+        createConstraintProfile: (command) => repository.createConstraintProfile(command),
+        createConstraintProfileVersion: (command) => (
+          repository.createConstraintProfileVersion(command)
+        ),
+        setConstraintProfileStatus: (command) => (
+          repository.setConstraintProfileStatus(command)
+        ),
+        setDefaultConstraintProfile: (command) => (
+          repository.setDefaultConstraintProfile(command)
+        ),
         createReferenceRecord: (resource, record) => repository.createReferenceRecord(resource, record),
         updateReferenceRecord: (resource, id, patch) => repository.updateReferenceRecord(resource, id, patch),
         importReferenceRecords: (resource, records) => repository.importReferenceRecords(resource, records),
         deleteReferenceRecord: (resource, id) => repository.deleteReferenceRecord(resource, id),
-        createScheduleRun: (result) => repository.createScheduleRun(result),
+        createScheduleRun: (result, context) => repository.createScheduleRun(result, context),
         listScheduleRuns: () => repository.listScheduleRuns(),
         getScheduleRun: (id) => repository.getScheduleRun(id),
         compareScheduleRuns: (baseId, targetId) => repository.compareScheduleRuns(baseId, targetId),
@@ -894,13 +1250,33 @@ describe("ExamForge API", () => {
         createScheduleJob: (command) => repository.createScheduleJob(command),
         listScheduleJobs: () => repository.listScheduleJobs(),
         getScheduleJob: (id) => repository.getScheduleJob(id),
+        getScheduleJobDetail: (id) => repository.getScheduleJobDetail(id),
+        requestScheduleJobCancellation: (id) => repository.requestScheduleJobCancellation(id),
+        isScheduleJobCancellationRequested: (id) => (
+          repository.isScheduleJobCancellationRequested(id)
+        ),
+        listScheduleJobEvents: (jobId, options) => (
+          repository.listScheduleJobEvents(jobId, options)
+        ),
+        resolveScheduleJobEventCursor: (jobId, eventId) => (
+          repository.resolveScheduleJobEventCursor(jobId, eventId)
+        ),
+        claimScheduleJob: (id, command) => repository.claimScheduleJob(id, command),
+        failScheduleJobAttempt: (id, command) => repository.failScheduleJobAttempt(id, command),
         transitionScheduleJob: (id, command) => repository.transitionScheduleJob(id, command),
-        completeScheduleJob: (id, result) => repository.completeScheduleJob(id, result),
+        completeScheduleJob: (id, command) => repository.completeScheduleJob(id, command),
         createAuthUser: (command) => repository.createAuthUser(command),
         findAuthUserByUsername: (username) => repository.findAuthUserByUsername(username),
         createAuthSession: (command) => repository.createAuthSession(command),
         findAuthSessionByTokenDigest: (digest) => repository.findAuthSessionByTokenDigest(digest),
         revokeAuthSession: (id, revokedAt) => repository.revokeAuthSession(id, revokedAt),
+        getAudienceScope: (userId) => repository.getAudienceScope(userId),
+        setTeacherAudienceScope: (userId, teacherId) => (
+          repository.setTeacherAudienceScope(userId, teacherId)
+        ),
+        addStudentGroupAudienceScope: (userId, studentGroupId) => (
+          repository.addStudentGroupAudienceScope(userId, studentGroupId)
+        ),
       },
     });
 
@@ -1529,8 +1905,9 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
-  it("creates asynchronous schedule jobs and exposes progress until a run is created", async () => {
-    const app = createApp({ scheduler: new FakeScheduler() });
+  it("creates durable queued jobs without an API process executor", async () => {
+    const scheduler = new FakeScheduler();
+    const app = createApp({ scheduler });
 
     const createResponse = await app.inject({
       method: "POST",
@@ -1542,31 +1919,223 @@ describe("ExamForge API", () => {
     assert.equal(created.job.status, "queued");
     assert.equal(created.job.progress, 0);
 
-    await waitFor(async () => {
-      const response = await app.inject({
-        method: "GET",
-        url: `/api/schedule-jobs/${created.job.id}`,
-        headers: viewerHeaders,
-      });
-      const payload = response.json();
-      return payload.job.status === "succeeded" && payload.job.runId;
-    });
-
     const jobResponse = await app.inject({
+      method: "GET",
+      url: `/api/schedule-jobs/${created.job.id}`,
+      headers: operatorHeaders,
+    });
+    assert.equal(jobResponse.statusCode, 200);
+    assert.equal(jobResponse.json().job.status, "queued");
+    assert.equal(jobResponse.json().job.progress, 0);
+    assert.equal(jobResponse.json().job.runId, null);
+    assert.deepEqual(jobResponse.json().attempts, []);
+    assert.equal(jobResponse.json().events.length, 1);
+    assert.equal(jobResponse.json().events[0].type, "schedule_job.queued");
+
+    const deniedList = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs",
+      headers: testAuthHeaders.teacher,
+    });
+    assert.equal(deniedList.statusCode, 403);
+
+    const deniedDetail = await app.inject({
       method: "GET",
       url: `/api/schedule-jobs/${created.job.id}`,
       headers: viewerHeaders,
     });
-    assert.equal(jobResponse.statusCode, 200);
-    assert.equal(jobResponse.json().job.status, "succeeded");
-    assert.equal(jobResponse.json().job.progress, 100);
+    assert.equal(deniedDetail.statusCode, 403);
+    assert.equal(scheduler.lastInput, null);
 
-    const runResponse = await app.inject({
-      method: "GET",
-      url: `/api/schedule-runs/${jobResponse.json().job.runId}`,
-      headers: viewerHeaders,
+    await app.close();
+  });
+
+  it("filters and paginates schedule jobs with stable metadata", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+    const created = [];
+    for (const [index, headers] of [operatorHeaders, adminHeaders, operatorHeaders].entries()) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/schedule-jobs",
+        headers: { ...headers, "idempotency-key": `filters-${index}` },
+      });
+      assert.equal(response.statusCode, 202);
+      created.push(response.json().job);
+    }
+    await app.inject({
+      method: "POST",
+      url: `/api/schedule-jobs/${created[0].id}/cancel`,
+      headers: operatorHeaders,
     });
-    assert.equal(runResponse.statusCode, 200);
+
+    const firstPage = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs?page=1&pageSize=1",
+      headers: operatorHeaders,
+    });
+    assert.equal(firstPage.statusCode, 200);
+    assert.equal(firstPage.json().jobs.length, 1);
+    assert.equal(firstPage.json().total, 3);
+    assert.equal(firstPage.json().page, 1);
+    assert.equal(firstPage.json().pageSize, 1);
+    assert.equal(firstPage.json().pageCount, 3);
+
+    const adminOnly = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs?submittedBy=admin",
+      headers: operatorHeaders,
+    });
+    assert.equal(adminOnly.json().total, 1);
+    assert.equal(adminOnly.json().jobs[0].submittedBy, "admin");
+
+    const cancelledOnly = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs?status=cancelled",
+      headers: operatorHeaders,
+    });
+    assert.equal(cancelledOnly.json().total, 1);
+    assert.equal(cancelledOnly.json().jobs[0].id, created[0].id);
+
+    const emptyPage = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs?page=99&pageSize=20",
+      headers: operatorHeaders,
+    });
+    assert.deepEqual(emptyPage.json().jobs, []);
+    assert.equal(emptyPage.json().total, 3);
+    assert.equal(emptyPage.json().page, 99);
+
+    const invalidDate = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs?from=not-a-date",
+      headers: operatorHeaders,
+    });
+    assert.equal(invalidDate.statusCode, 400);
+    assert.equal(invalidDate.json().error, "invalid_schedule_job_filter");
+
+    await app.close();
+  });
+
+  it("cancels queued jobs and records cooperative cancellation for running jobs", async () => {
+    const repository = new InMemoryPlatformRepository();
+    const app = createApp({ scheduler: new FakeScheduler(), repository });
+    const queued = await repository.createScheduleJob({
+      batchId: "batch-2026-spring-final",
+      idempotencyKey: "cancel-queued-job",
+      requestDigest: "d".repeat(64),
+      requestSnapshot: { version: 1, input: demoScheduleInput },
+      traceId: "trace-cancel-queued-job",
+    });
+    const running = await repository.createScheduleJob({
+      batchId: "batch-2026-spring-final",
+      idempotencyKey: "cancel-running-job",
+      requestDigest: "e".repeat(64),
+      requestSnapshot: { version: 1, input: demoScheduleInput },
+      traceId: "trace-cancel-running-job",
+    });
+    await repository.claimScheduleJob(running.job.id, { deliveryAttempt: 1 });
+
+    const denied = await app.inject({
+      method: "POST",
+      url: `/api/schedule-jobs/${queued.job.id}/cancel`,
+      headers: testAuthHeaders.teacher,
+    });
+    assert.equal(denied.statusCode, 403);
+
+    const queuedCancellation = await app.inject({
+      method: "POST",
+      url: `/api/schedule-jobs/${queued.job.id}/cancel`,
+      headers: operatorHeaders,
+    });
+    assert.equal(queuedCancellation.statusCode, 200);
+    assert.equal(queuedCancellation.json().job.status, "cancelled");
+    assert.equal(queuedCancellation.json().job.progress, 100);
+    assert.ok(queuedCancellation.json().job.cancellationRequestedAt);
+
+    const runningCancellation = await app.inject({
+      method: "POST",
+      url: `/api/schedule-jobs/${running.job.id}/cancel`,
+      headers: operatorHeaders,
+    });
+    assert.equal(runningCancellation.statusCode, 202);
+    assert.equal(runningCancellation.json().job.status, "running");
+    assert.ok(runningCancellation.json().job.cancellationRequestedAt);
+
+    const duplicateCancellation = await app.inject({
+      method: "POST",
+      url: `/api/schedule-jobs/${running.job.id}/cancel`,
+      headers: operatorHeaders,
+    });
+    assert.equal(duplicateCancellation.statusCode, 200);
+    assert.equal(duplicateCancellation.json().job.status, "running");
+
+    const missing = await app.inject({
+      method: "POST",
+      url: "/api/schedule-jobs/missing-job/cancel",
+      headers: operatorHeaders,
+    });
+    assert.equal(missing.statusCode, 404);
+
+    await app.close();
+  });
+
+  it("streams authorized schedule job history as versioned SSE frames", async () => {
+    const repository = new InMemoryPlatformRepository();
+    const created = await repository.createScheduleJob({
+      batchId: "batch-2026-spring-final",
+      idempotencyKey: "sse-terminal-job",
+      requestDigest: "f".repeat(64),
+      requestSnapshot: { version: 1, input: demoScheduleInput },
+      traceId: "trace-sse-terminal-job",
+    });
+    await repository.requestScheduleJobCancellation(created.job.id);
+    const history = await repository.listScheduleJobEvents(created.job.id);
+    const app = createApp({
+      scheduler: new FakeScheduler(),
+      repository,
+      eventNotifier: {
+        async subscribe() {
+          return async () => undefined;
+        },
+      },
+    });
+
+    const unauthenticated = await app.inject({
+      method: "GET",
+      url: `/api/schedule-jobs/${created.job.id}/events`,
+    });
+    assert.equal(unauthenticated.statusCode, 401);
+    const forbidden = await app.inject({
+      method: "GET",
+      url: `/api/schedule-jobs/${created.job.id}/events`,
+      headers: testAuthHeaders.teacher,
+    });
+    assert.equal(forbidden.statusCode, 403);
+    const unknownCursor = await app.inject({
+      method: "GET",
+      url: `/api/schedule-jobs/${created.job.id}/events`,
+      headers: { ...operatorHeaders, "last-event-id": "event-missing" },
+    });
+    assert.equal(unknownCursor.statusCode, 400);
+    assert.equal(unknownCursor.json().error, "schedule_job_event_cursor_unknown");
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/schedule-jobs/${created.job.id}/events`,
+      headers: operatorHeaders,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.match(String(response.headers["content-type"]), /^text\/event-stream/);
+    assert.match(response.body, new RegExp(`id: ${history[0].eventId}`));
+    assert.match(response.body, /event: schedule_job\.queued\.v1/);
+    assert.match(response.body, /event: schedule_job\.cancelled\.v1/);
+    const dataLines = response.body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "));
+    assert.deepEqual(
+      dataLines.map((line) => JSON.parse(line.slice(6)).eventId),
+      history.map((event) => event.eventId),
+    );
 
     await app.close();
   });
@@ -1603,7 +2172,7 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
-  it("persists asynchronous schedule jobs through app recreation", async () => {
+  it("preserves queued schedule jobs through app recreation", async () => {
     const repository = new InMemoryPlatformRepository();
     const firstApp = createApp({ scheduler: new FakeScheduler(), repository });
 
@@ -1615,41 +2184,35 @@ describe("ExamForge API", () => {
     assert.equal(createResponse.statusCode, 202);
     const created = createResponse.json();
 
-    await waitFor(async () => {
-      const response = await firstApp.inject({
-        method: "GET",
-        url: `/api/schedule-jobs/${created.job.id}`,
-        headers: viewerHeaders,
-      });
-      return response.json().job.status === "succeeded";
-    });
     await firstApp.close();
 
     const secondApp = createApp({ scheduler: new FakeScheduler(), repository });
     const restoredResponse = await secondApp.inject({
       method: "GET",
       url: `/api/schedule-jobs/${created.job.id}`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(restoredResponse.statusCode, 200);
-    assert.equal(restoredResponse.json().job.status, "succeeded");
-    assert.ok(restoredResponse.json().job.runId);
+    assert.equal(restoredResponse.json().job.status, "queued");
+    assert.equal(restoredResponse.json().job.runId, null);
 
     await secondApp.close();
   });
 
-  it("marks interrupted asynchronous schedule jobs as failed on startup", async () => {
+  it("does not rewrite queued or running jobs on API startup", async () => {
     const repository = new InMemoryPlatformRepository();
     const queuedJob = await repository.createScheduleJob({
       batchId: "batch-2026-spring-final",
       idempotencyKey: "recovery-queued-job",
       requestDigest: "a".repeat(64),
+      requestSnapshot: { version: 1, input: demoScheduleInput },
       traceId: "trace-recovery-queued",
     });
     const runningJob = await repository.createScheduleJob({
       batchId: "batch-2026-spring-final",
       idempotencyKey: "recovery-running-job",
       requestDigest: "b".repeat(64),
+      requestSnapshot: { version: 1, input: demoScheduleInput },
       traceId: "trace-recovery-running",
     });
     await repository.transitionScheduleJob(runningJob.job.id, {
@@ -1663,18 +2226,18 @@ describe("ExamForge API", () => {
     const response = await app.inject({
       method: "GET",
       url: "/api/schedule-jobs",
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(response.statusCode, 200);
     const jobs = response.json().jobs;
     const restoredQueuedJob = jobs.find((job: { id: string }) => job.id === queuedJob.job.id);
     const restoredRunningJob = jobs.find((job: { id: string }) => job.id === runningJob.job.id);
-    assert.equal(restoredQueuedJob.status, "failed");
-    assert.equal(restoredQueuedJob.progress, 100);
-    assert.match(restoredQueuedJob.error.message, /interrupted/i);
-    assert.equal(restoredRunningJob.status, "failed");
-    assert.equal(restoredRunningJob.progress, 100);
-    assert.match(restoredRunningJob.error.message, /interrupted/i);
+    assert.equal(restoredQueuedJob.status, "queued");
+    assert.equal(restoredQueuedJob.progress, 0);
+    assert.equal(restoredQueuedJob.error, null);
+    assert.equal(restoredRunningJob.status, "running");
+    assert.equal(restoredRunningJob.progress, 35);
+    assert.equal(restoredRunningJob.error, null);
 
     await app.close();
   });

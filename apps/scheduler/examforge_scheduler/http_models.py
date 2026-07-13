@@ -101,10 +101,52 @@ class SoftPenaltyItemModel(ContractModel):
     message: str
 
 
+class NormalizedPenaltyItemModel(ContractModel):
+    rule: str = Field(min_length=1)
+    violation_count: int = Field(ge=0)
+    weight: int = Field(gt=0)
+    raw_penalty: int = Field(ge=0)
+    weighted_penalty: int = Field(ge=0)
+    opportunity_count: int = Field(ge=0)
+    normalized_penalty: float = Field(ge=0, le=1)
+
+
 class ScoreBreakdownModel(ContractModel):
     total_score: int = Field(ge=0)
     hard_violation_count: int = Field(ge=0)
     soft_penalty_items: list[SoftPenaltyItemModel]
+    scoring_contract_version: Literal[1] = 1
+    normalized_score: float = Field(default=100.0, ge=0, le=100)
+    total_raw_penalty: int = Field(default=0, ge=0)
+    total_weighted_penalty: int = Field(default=0, ge=0)
+    normalized_penalty_items: list[NormalizedPenaltyItemModel] = Field(default_factory=list)
+
+
+class ScheduleDiagnosticModel(ContractModel):
+    code: Literal[
+        "room_capacity_shortage",
+        "time_slot_shortage",
+        "teacher_shortage",
+        "fixed_assignment_conflict",
+        "student_group_slot_conflict",
+        "invalid_reference",
+        "solver_infeasible",
+        "unclassified_conflict",
+    ]
+    severity: Literal["error", "warning"]
+    resource_dimension: Literal[
+        "room",
+        "time_slot",
+        "teacher",
+        "fixed_assignment",
+        "student_group",
+        "input",
+        "solver",
+    ]
+    affected_ids: list[str]
+    shortfall: int = Field(ge=0)
+    message: str
+    suggestion: str
 
 
 class SolverStatisticsModel(ContractModel):
@@ -121,6 +163,7 @@ class ScheduleResultModel(ContractModel):
     conflicts: list[ConflictRecordModel]
     score: ScoreBreakdownModel
     statistics: SolverStatisticsModel
+    diagnostics: list[ScheduleDiagnosticModel] = Field(default_factory=list)
     report: dict[str, Any] | None = None
 
 

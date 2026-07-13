@@ -3,17 +3,28 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
   fixedAssignmentSchema,
+  constraintProfileSchema,
+  constraintProfileStatusSchema,
   rescheduleContextSchema,
   referenceRecordCreateSchemas,
   referenceRecordUpdateSchemas,
   referenceResourceSchema,
   scheduledExamSchema,
+  scheduleJobListQuerySchema,
+  scheduleRunListQuerySchema,
   loginRequestSchema,
   type AuthContext,
   type ReferenceRecord,
   type ReferenceResource,
   type UserRole,
 } from "@examforge/shared";
+import {
+  ConstraintProfileConflictError,
+  ConstraintProfileNotFoundError,
+  ConstraintProfileService,
+  ConstraintProfileSelectionError,
+  ConstraintProfileValidationError,
+} from "@examforge/scheduling-application";
 import {
   ReferenceIntegrityError,
   ScheduleJobIdempotencyConflictError,
@@ -31,7 +42,17 @@ import {
 } from "./services/audit-service.js";
 import { DraftService } from "./services/draft-service.js";
 import { PublicationService } from "./services/publication-service.js";
+import { AudienceScopeError, AudienceScopeService } from "./services/audience-scope-service.js";
 import { ScheduleRunService } from "./services/schedule-run-service.js";
+import {
+  ScheduleJobEventService,
+  type ScheduleJobEventNotifier,
+} from "./services/schedule-job-event-service.js";
+import {
+  createScheduleJobEventNotifier,
+  createScheduleJobEventSink,
+  readLastEventId,
+} from "./schedule-job-events.js";
 import { AuthService } from "./auth/auth-service.js";
 import { initializeConfiguredAuthUsers } from "./auth/bootstrap.js";
 import { runWithAuthContext } from "./auth/request-context.js";
@@ -45,11 +66,13 @@ import {
 export interface AppOptions {
   repository?: PlatformRepository;
   scheduler?: SchedulerClient;
+  eventNotifier?: ScheduleJobEventNotifier;
 }
 
 const scheduleRequestSchema = z.object({
   fixed_assignments: z.array(fixedAssignmentSchema).default([]),
   reschedule_context: rescheduleContextSchema.nullable().default(null),
+  constraintProfileVersionId: z.string().min(1).optional(),
 }).strict();
 
 const anonymousReadRoutes = new Set([
@@ -58,8 +81,6 @@ const anonymousReadRoutes = new Set([
   "/api/auth/login",
   "/api/published-schedule",
   "/api/published-schedule/notifications",
-  "/api/published-schedule/teachers/:teacherId",
-  "/api/published-schedule/student-groups/:studentGroupId",
 ]);
 
 const requestAuthContexts = new WeakMap<FastifyRequest, AuthContext>();
@@ -73,8 +94,12 @@ export function createApp(options: AppOptions = {}) {
   const repository = options.repository ?? createPlatformRepository();
   const scheduler = options.scheduler ?? createSchedulerClient();
   const scheduleRunService = new ScheduleRunService(repository, scheduler);
+  const constraintProfileService = new ConstraintProfileService(repository);
+  const eventNotifier = options.eventNotifier ?? createScheduleJobEventNotifier();
+  const scheduleJobEventService = new ScheduleJobEventService(repository, eventNotifier);
   const draftService = new DraftService(repository);
   const publicationService = new PublicationService(repository);
+  const audienceScopeService = new AudienceScopeService(repository);
   const cookieConfig = getSessionCookieConfig();
   const authService = new AuthService(repository, cookieConfig.maxAgeSeconds * 1000);
   const trustedOrigins = getTrustedOrigins();
@@ -87,6 +112,40 @@ export function createApp(options: AppOptions = {}) {
         category: error.category,
         retryable: error.retryable,
         requestId: error.requestId,
+      });
+    }
+    if (error instanceof ConstraintProfileValidationError) {
+      return reply.code(400).send({
+        error: "invalid_constraint_profile",
+        message: "Constraint profile payload is invalid.",
+        issues: error.issues,
+      });
+    }
+    if (error instanceof AudienceScopeError) {
+      return reply.code(403).send({
+        error: error.code,
+        message: error.message,
+      });
+    }
+    if (error instanceof ConstraintProfileNotFoundError) {
+      return reply.code(404).send({
+        error: error.code,
+        message: "The requested constraint profile does not exist.",
+      });
+    }
+    if (error instanceof ConstraintProfileConflictError) {
+      return reply.code(409).send({
+        error: error.code,
+        message: "The constraint profile mutation conflicts with current state.",
+      });
+    }
+    if (error instanceof ConstraintProfileSelectionError) {
+      const notFound = error.code === "constraint_profile_version_not_found";
+      return reply.code(notFound ? 404 : 409).send({
+        error: error.code,
+        message: notFound
+          ? "The selected constraint profile version does not exist."
+          : "The selected constraint profile is disabled.",
       });
     }
     if (isDatabaseIntegrityError(error)) {
@@ -148,6 +207,7 @@ export function createApp(options: AppOptions = {}) {
     try {
       await repository.checkReadiness();
       await scheduler.checkReadiness?.();
+      await eventNotifier.checkReadiness?.();
       return {
         ok: true,
         service: "examforge-api",
@@ -203,6 +263,45 @@ export function createApp(options: AppOptions = {}) {
     return getRequestAuthContext(request);
   });
 
+  app.get("/api/me/audience", async (request) => (
+    audienceScopeService.getAudience(requireAuthContext(request))
+  ));
+
+  app.get("/api/me/published-schedule", async (request, reply) => {
+    const schedule = await audienceScopeService.getCurrentPublishedSchedule(
+      requireAuthContext(request),
+    );
+    if (!schedule) {
+      return reply.code(404).send({
+        error: "published_schedule_not_found",
+        message: "No schedule has been published.",
+      });
+    }
+    return schedule;
+  });
+
+  app.get("/api/me/teacher-unavailable-slots", async (request) => (
+    audienceScopeService.getCurrentTeacherAvailability(requireAuthContext(request))
+  ));
+
+  app.patch("/api/me/teacher-unavailable-slots", async (request, reply) => {
+    const parsed = z.object({
+      unavailable_slot_ids: z.array(z.string()).max(200),
+    }).strict().safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_teacher_unavailable_slots",
+        message: "Teacher unavailable slots payload is invalid.",
+        issues: parsed.error.issues,
+      });
+    }
+    const teacher = await audienceScopeService.updateCurrentTeacherUnavailableSlots(
+      requireAuthContext(request),
+      parsed.data.unavailable_slot_ids,
+    );
+    return { teacher };
+  });
+
   app.post("/api/auth/logout", async (request, reply) => {
     const context = getRequestAuthContext(request);
     if (context) {
@@ -215,17 +314,130 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.addHook("onClose", async () => {
+    await eventNotifier.close?.();
     await repository.close?.();
   });
 
   app.addHook("onReady", async () => {
     await initializeConfiguredAuthUsers(repository);
-    await scheduleRunService.recoverInterruptedJobs();
   });
 
   app.get("/api/dashboard", async () => repository.getDashboard());
 
   app.get("/api/reference-data", async () => repository.getReferenceData());
+
+  app.get("/api/constraint-profiles", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin", "operator"])) {
+      return reply;
+    }
+    const context = getRequestAuthContext(request);
+    return {
+      profiles: await constraintProfileService.list(context?.user.roles.includes("admin") ?? false),
+    };
+  });
+
+  app.get<{ Params: { id: string } }>(
+    "/api/constraint-profiles/:id",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
+      const profile = await constraintProfileService.get(request.params.id);
+      const context = getRequestAuthContext(request);
+      if (profile.status === "disabled" && !context?.user.roles.includes("admin")) {
+        return reply.code(404).send({
+          error: "constraint_profile_not_found",
+          message: "The requested constraint profile does not exist.",
+        });
+      }
+      return { profile };
+    },
+  );
+
+  app.post("/api/constraint-profiles", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin"])) {
+      return reply;
+    }
+    const parsed = z.object({
+      name: z.string(),
+      config: constraintProfileSchema,
+    }).strict().safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_constraint_profile",
+        message: "Constraint profile payload is invalid.",
+        issues: parsed.error.issues,
+      });
+    }
+    const profile = await constraintProfileService.create(
+      parsed.data,
+      constraintProfileMutationContext(request),
+    );
+    return reply.code(201).send({ profile });
+  });
+
+  app.post<{ Params: { id: string } }>(
+    "/api/constraint-profiles/:id/versions",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin"])) {
+        return reply;
+      }
+      const parsed = z.object({
+        expectedCurrentVersionId: z.string().min(1),
+        config: constraintProfileSchema,
+      }).strict().safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: "invalid_constraint_profile",
+          message: "Constraint profile version payload is invalid.",
+          issues: parsed.error.issues,
+        });
+      }
+      const profile = await constraintProfileService.createVersion(
+        request.params.id,
+        parsed.data,
+        constraintProfileMutationContext(request),
+      );
+      return reply.code(201).send({ profile });
+    },
+  );
+
+  app.patch<{ Params: { id: string } }>(
+    "/api/constraint-profiles/:id/status",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin"])) {
+        return reply;
+      }
+      const parsed = z.object({ status: constraintProfileStatusSchema }).strict().safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: "invalid_constraint_profile_status",
+          message: "Constraint profile status payload is invalid.",
+          issues: parsed.error.issues,
+        });
+      }
+      const profile = await constraintProfileService.setStatus(
+        request.params.id,
+        parsed.data.status,
+        constraintProfileMutationContext(request),
+      );
+      return { profile };
+    },
+  );
+
+  app.put<{ Params: { id: string } }>(
+    "/api/constraint-profiles/:id/default",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin"])) {
+        return reply;
+      }
+      const profile = await constraintProfileService.setDefault(
+        request.params.id,
+        constraintProfileMutationContext(request),
+      );
+      return { profile };
+    },
+  );
 
   app.post<{ Params: { resource: string } }>(
     "/api/reference-data/:resource/import",
@@ -452,9 +664,13 @@ export function createApp(options: AppOptions = {}) {
     }
     let job;
     try {
+      const authContext = getRequestAuthContext(request);
       job = await scheduleRunService.createScheduleJob(parsed.data, {
         idempotencyKey: request.headers["idempotency-key"] as string | undefined,
         traceId: request.id,
+        constraintProfileVersionId: parsed.data.constraintProfileVersionId,
+        submittedBy: authContext?.user.username,
+        submittedByUserId: authContext?.user.id,
       });
     } catch (error) {
       if (error instanceof ScheduleJobIdempotencyConflictError) {
@@ -468,20 +684,109 @@ export function createApp(options: AppOptions = {}) {
     return reply.code(202).send({ job });
   });
 
-  app.get("/api/schedule-jobs", async () => scheduleRunService.listScheduleJobs());
+  app.get("/api/schedule-jobs", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin", "operator"])) {
+      return reply;
+    }
+    const parsed = scheduleJobListQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_schedule_job_filter",
+        message: "Schedule job list filters are invalid.",
+        issues: parsed.error.issues,
+      });
+    }
+    return scheduleRunService.listScheduleJobs(parsed.data);
+  });
 
   app.get<{ Params: { id: string } }>("/api/schedule-jobs/:id", async (request, reply) => {
-    const job = await scheduleRunService.getScheduleJob(request.params.id);
-    if (!job) {
+    if (!requireRole(request, reply, ["admin", "operator"])) {
+      return reply;
+    }
+    const detail = await scheduleRunService.getScheduleJobDetail(request.params.id);
+    if (!detail) {
       return reply.code(404).send({
         error: "schedule_job_not_found",
         message: `Schedule job ${request.params.id} does not exist.`,
       });
     }
-    return { job };
+    return detail;
   });
 
-  app.get("/api/schedule-runs", async () => repository.listScheduleRuns());
+  app.get<{ Params: { id: string } }>(
+    "/api/schedule-jobs/:id/events",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
+      const disconnected = new AbortController();
+      const onClose = () => disconnected.abort();
+      reply.raw.once("close", onClose);
+      const result = await scheduleJobEventService.stream({
+        jobId: request.params.id,
+        lastEventId: readLastEventId(request.headers["last-event-id"]),
+        signal: disconnected.signal,
+      }, createScheduleJobEventSink(reply));
+      reply.raw.off("close", onClose);
+      if (result.resolution === "not_found") {
+        return reply.code(404).send({
+          error: "schedule_job_not_found",
+          message: `Schedule job ${request.params.id} does not exist.`,
+        });
+      }
+      if (result.resolution === "unknown_cursor") {
+        return reply.code(400).send({
+          error: "schedule_job_event_cursor_unknown",
+          message: "Last-Event-ID does not identify a known schedule job event.",
+        });
+      }
+      if (result.resolution === "wrong_job_cursor") {
+        return reply.code(409).send({
+          error: "schedule_job_event_cursor_mismatch",
+          message: "Last-Event-ID belongs to another schedule job.",
+        });
+      }
+      return reply;
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/schedule-jobs/:id/cancel",
+    async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
+      const result = await scheduleRunService.cancelScheduleJob(request.params.id);
+      if (result.resolution === "not_found") {
+        return reply.code(404).send({
+          error: "schedule_job_not_found",
+          message: `Schedule job ${request.params.id} does not exist.`,
+        });
+      }
+      if (result.resolution === "terminal") {
+        return reply.code(409).send({
+          error: "schedule_job_already_terminal",
+          message: "The schedule job has already reached a terminal state.",
+          job: result.job,
+        });
+      }
+      return reply
+        .code(result.resolution === "requested" ? 202 : 200)
+        .send({ job: result.job });
+    },
+  );
+
+  app.get<{ Querystring: Record<string, unknown> }>("/api/schedule-runs", async (request, reply) => {
+    const parsed = scheduleRunListQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_schedule_run_filter",
+        message: "Schedule run list filters are invalid.",
+        issues: parsed.error.issues,
+      });
+    }
+    return repository.listScheduleRuns(parsed.data);
+  });
 
   app.post<{ Params: { id: string } }>(
     "/api/schedule-runs/:id/drafts",
@@ -859,6 +1164,9 @@ export function createApp(options: AppOptions = {}) {
   app.get<{ Params: { teacherId: string } }>(
     "/api/published-schedule/teachers/:teacherId",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
       const result = await publicationService.getAudience("teacher", request.params.teacherId);
       if (result.status === "not_published") {
         return reply.code(404).send({
@@ -879,6 +1187,9 @@ export function createApp(options: AppOptions = {}) {
   app.get<{ Params: { studentGroupId: string } }>(
     "/api/published-schedule/student-groups/:studentGroupId",
     async (request, reply) => {
+      if (!requireRole(request, reply, ["admin", "operator"])) {
+        return reply;
+      }
       const result = await publicationService.getAudience(
         "student_group",
         request.params.studentGroupId,
@@ -926,6 +1237,29 @@ function parseScheduleRequest(body: unknown) {
 
 function getRequestAuthContext(request: FastifyRequest) {
   return requestAuthContexts.get(request) ?? null;
+}
+
+function requireAuthContext(request: FastifyRequest) {
+  const context = getRequestAuthContext(request);
+  if (!context) {
+    throw new Error("Authenticated route has no request auth context.");
+  }
+  return context;
+}
+
+function constraintProfileMutationContext(request: FastifyRequest) {
+  const context = getRequestAuthContext(request);
+  if (!context) {
+    throw new Error("Constraint profile mutation requires an authenticated context.");
+  }
+  return {
+    actor: {
+      userId: context.user.id,
+      username: context.user.username,
+      roles: context.user.roles,
+    },
+    traceId: request.id,
+  };
 }
 
 function requireRole(

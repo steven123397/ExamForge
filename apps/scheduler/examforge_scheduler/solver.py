@@ -3,6 +3,7 @@ from time import perf_counter
 
 from ortools.sat.python import cp_model
 
+from .diagnostics import build_diagnostics
 from .models import (
     ConflictRecord,
     ConflictSeverity,
@@ -540,15 +541,10 @@ def _build_result(
             total_score=0,
             hard_violation_count=hard_violation_count,
             soft_penalty_items=(),
+            normalized_score=0.0,
         )
-    elif assignments:
-        score = calculate_score(schedule_input, assignments)
     else:
-        score = ScoreBreakdown(
-            total_score=100,
-            hard_violation_count=0,
-            soft_penalty_items=(),
-        )
+        score = calculate_score(schedule_input, assignments)
     return ScheduleResult(
         assignments=assignments,
         conflicts=conflicts,
@@ -561,4 +557,5 @@ def _build_result(
             slot_count=len(schedule_input.time_slots),
             attempted_assignments=attempted_assignments,
         ),
+        diagnostics=build_diagnostics(schedule_input, conflicts),
     )

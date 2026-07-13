@@ -1,0 +1,35 @@
+:where(button, input, select, textarea, a):focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--focus) 38%, transparent);
+  outline-offset: 2px;
+}
+
+input,
+select,
+textarea {
+  background-color: var(--panel);
+  color: var(--ink);
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 1000;
+  padding: 9px 12px;
+  border-radius: 6px;
+  color: var(--panel);
+  background: var(--focus);
+  transform: translateY(calc(-100% - 16px));
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
+}

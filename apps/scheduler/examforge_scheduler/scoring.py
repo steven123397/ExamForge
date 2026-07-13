@@ -3,6 +3,7 @@ from math import ceil
 
 from .models import (
     ExamTask,
+    NormalizedPenaltyItem,
     Room,
     ScheduledExam,
     ScheduleInput,
@@ -15,6 +16,15 @@ from .time_slots import are_consecutive_time_slots
 
 BASE_SCORE = 100
 LOW_ROOM_UTILIZATION_THRESHOLD = 0.5
+SCORING_CONTRACT_VERSION = 1
+SUPPORTED_SOFT_RULES = (
+    "student_consecutive_exam",
+    "teacher_workload_balance",
+    "teacher_consecutive_invigilation",
+    "schedule_stability",
+    "room_utilization",
+    "exam_distribution_balance",
+)
 
 
 def calculate_score(
@@ -36,12 +46,105 @@ def calculate_score(
     )
     active_penalty_items = tuple(item for item in penalty_items if item is not None)
     total_penalty = sum(item.penalty for item in active_penalty_items)
+    normalized_penalty_items = _build_normalized_penalty_items(
+        schedule_input,
+        assignments,
+        active_penalty_items,
+    )
+    total_raw_penalty = sum(
+        item.raw_penalty for item in normalized_penalty_items
+    )
+    active_weight = sum(item.weight for item in normalized_penalty_items)
+    normalized_penalty = (
+        sum(
+            item.normalized_penalty * item.weight
+            for item in normalized_penalty_items
+        ) / active_weight
+        if active_weight
+        else 0.0
+    )
 
     return ScoreBreakdown(
         total_score=max(0, BASE_SCORE - total_penalty),
         hard_violation_count=0,
         soft_penalty_items=active_penalty_items,
+        scoring_contract_version=SCORING_CONTRACT_VERSION,
+        normalized_score=round(
+            max(0.0, min(100.0, 100 * (1 - normalized_penalty))),
+            2,
+        ),
+        total_raw_penalty=total_raw_penalty,
+        total_weighted_penalty=total_penalty,
+        normalized_penalty_items=normalized_penalty_items,
     )
+
+
+def _build_normalized_penalty_items(
+    schedule_input: ScheduleInput,
+    assignments: tuple[ScheduledExam, ...],
+    penalty_items: tuple[SoftPenaltyItem, ...],
+) -> tuple[NormalizedPenaltyItem, ...]:
+    penalty_by_rule = {item.rule: item for item in penalty_items}
+    opportunities = _opportunity_counts(schedule_input, assignments)
+    normalized_items = []
+    for rule in SUPPORTED_SOFT_RULES:
+        weight = schedule_input.constraint_profile.soft_weights.get(rule, 0)
+        if weight <= 0:
+            continue
+        legacy_item = penalty_by_rule.get(rule)
+        weighted_penalty = legacy_item.penalty if legacy_item else 0
+        violation_count = weighted_penalty // weight
+        opportunity_count = opportunities[rule]
+        normalized_items.append(NormalizedPenaltyItem(
+            rule=rule,
+            violation_count=violation_count,
+            weight=weight,
+            raw_penalty=violation_count,
+            weighted_penalty=weighted_penalty,
+            opportunity_count=opportunity_count,
+            normalized_penalty=round(
+                min(1.0, violation_count / opportunity_count)
+                if opportunity_count > 0
+                else 0.0,
+                6,
+            ),
+        ))
+    return tuple(normalized_items)
+
+
+def _opportunity_counts(
+    schedule_input: ScheduleInput,
+    assignments: tuple[ScheduledExam, ...],
+) -> dict[str, int]:
+    task_by_id = {task.id: task for task in schedule_input.exam_tasks}
+    slot_by_id = {slot.id: slot for slot in schedule_input.time_slots}
+    group_exam_counts: Counter[str] = Counter()
+    teacher_assignment_counts: Counter[str] = Counter()
+    teacher_slot_counts: Counter[str] = Counter()
+    valid_room_assignments = 0
+    valid_slot_assignments = 0
+    for assignment in assignments:
+        task = task_by_id.get(assignment.exam_task_id)
+        if task is not None:
+            group_exam_counts.update(task.student_group_ids)
+            valid_room_assignments += 1
+        if assignment.time_slot_id in slot_by_id:
+            valid_slot_assignments += 1
+            teacher_slot_counts.update(assignment.teacher_ids)
+        teacher_assignment_counts.update(assignment.teacher_ids)
+    context = schedule_input.reschedule_context
+    return {
+        "student_consecutive_exam": sum(
+            max(0, count - 1) for count in group_exam_counts.values()
+        ),
+        "teacher_workload_balance": sum(teacher_assignment_counts.values()),
+        "teacher_consecutive_invigilation": sum(
+            max(0, count - 1) for count in teacher_slot_counts.values()
+        ),
+        "schedule_stability": len(context.baseline_assignments) if context else 0,
+        "room_utilization": valid_room_assignments,
+        "exam_distribution_balance": valid_slot_assignments,
+    }
 
 
 def _student_consecutive_exam_penalty(

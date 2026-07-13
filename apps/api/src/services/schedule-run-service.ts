@@ -2,40 +2,57 @@ import {
   rescheduleReportSchema,
   type ScheduleDraftRescheduleResponse,
   type ScheduleInput,
+  type ScheduleJobListQuery,
 } from "@examforge/shared";
+import { JobSubmissionService } from "@examforge/scheduling-application";
 import type { PlatformRepository } from "../repository.js";
-import {
-  SchedulerClientError,
-  type SchedulerClient,
-} from "../scheduler-client.js";
-import { createHash, randomUUID } from "node:crypto";
-
-export type DeferredTask = () => Promise<void>;
-export type DeferScheduleTask = (task: DeferredTask) => void;
+import type { SchedulerClient } from "../scheduler-client.js";
+import { randomUUID } from "node:crypto";
 export type ScheduleRunOverrides = Pick<
   ScheduleInput,
   "fixed_assignments" | "reschedule_context"
->;
+> & {
+  constraintProfileVersionId?: string;
+};
 
 export interface ScheduleJobRequestContext {
   idempotencyKey?: string;
   traceId?: string;
+  constraintProfileVersionId?: string;
+  submittedBy?: string;
+  submittedByUserId?: string;
 }
 
 export class ScheduleRunService {
+  private readonly jobSubmissionService: JobSubmissionService;
+
   constructor(
     private readonly repository: PlatformRepository,
     private readonly scheduler: SchedulerClient,
-    private readonly defer: DeferScheduleTask = deferWithTimer,
-  ) {}
+  ) {
+    this.jobSubmissionService = new JobSubmissionService(repository);
+  }
 
   async createScheduleRun(overrides: ScheduleRunOverrides) {
     const referenceData = await this.repository.getReferenceData();
-    const result = await this.scheduler.solve(
-      withScheduleOverrides(referenceData.scheduleInput, overrides),
-      { requestId: `trace-${randomUUID()}` },
+    const strategy = await this.repository.resolveConstraintProfile(
+      overrides.constraintProfileVersionId,
     );
-    return this.repository.createScheduleRun(result);
+    let schedulerVersion = "unknown";
+    const result = await this.scheduler.solve(
+      withScheduleOverrides(referenceData.scheduleInput, overrides, strategy.snapshot.config),
+      {
+        requestId: `trace-${randomUUID()}`,
+        onMetadata: (metadata) => {
+          schedulerVersion = metadata.schedulerVersion;
+        },
+      },
+    );
+    return this.repository.createScheduleRun(result, {
+      constraintProfileVersionId: strategy.versionId,
+      constraintProfileSnapshot: strategy.snapshot,
+      schedulerVersion,
+    });
   }
 
   async createScheduleRunFromDraft(
@@ -53,8 +70,11 @@ export class ScheduleRunService {
       .sort((left, right) => left.exam_task_id.localeCompare(right.exam_task_id));
     const lockedExamTaskIds = new Set(draft.lockedExamTaskIds ?? []);
     const referenceData = await this.repository.getReferenceData();
+    const strategy = await this.repository.resolveConstraintProfile();
+    let schedulerVersion = "unknown";
     const result = await this.scheduler.solve({
       ...referenceData.scheduleInput,
+      constraint_profile: structuredClone(strategy.snapshot.config),
       fixed_assignments: [],
       reschedule_context: {
         baseline_assignments: baselineAssignments,
@@ -62,9 +82,18 @@ export class ScheduleRunService {
           .map((assignment) => assignment.exam_task_id)
           .filter((examTaskId) => !lockedExamTaskIds.has(examTaskId)),
       },
-    }, { requestId: `trace-${randomUUID()}` });
+    }, {
+      requestId: `trace-${randomUUID()}`,
+      onMetadata: (metadata) => {
+        schedulerVersion = metadata.schedulerVersion;
+      },
+    });
     const reschedule = rescheduleReportSchema.parse(result.report?.reschedule);
-    const response = await this.repository.createScheduleRun(result);
+    const response = await this.repository.createScheduleRun(result, {
+      constraintProfileVersionId: strategy.versionId,
+      constraintProfileSnapshot: strategy.snapshot,
+      schedulerVersion,
+    });
     return {
       sourceDraftId: draftId,
       ...response,
@@ -77,106 +106,42 @@ export class ScheduleRunService {
     context: ScheduleJobRequestContext = {},
   ) {
     const referenceData = await this.repository.getReferenceData();
-    const requestDigest = createHash("sha256")
-      .update(JSON.stringify(overrides))
-      .digest("hex");
-    const result = await this.repository.createScheduleJob({
+    const scheduleInput = withScheduleOverrides(referenceData.scheduleInput, overrides);
+    const result = await this.jobSubmissionService.submit({
       batchId: referenceData.batch.id,
+      input: scheduleInput,
       idempotencyKey: context.idempotencyKey ?? `job-request-${randomUUID()}`,
-      requestDigest,
       traceId: context.traceId ?? `trace-${randomUUID()}`,
+      constraintProfileVersionId: context.constraintProfileVersionId,
+      submittedBy: context.submittedBy,
+      submittedByUserId: context.submittedByUserId,
     });
-    if (result.created) {
-      this.defer(() => this.executeScheduleJob(
-        result.job.id,
-        overrides,
-        result.job.traceId,
-      ));
-    }
     return result.job;
   }
 
-  listScheduleJobs() {
-    return this.repository.listScheduleJobs();
+  listScheduleJobs(query?: ScheduleJobListQuery) {
+    return this.repository.listScheduleJobs(query);
   }
 
-  getScheduleJob(id: string) {
-    return this.repository.getScheduleJob(id);
+  getScheduleJobDetail(id: string) {
+    return this.repository.getScheduleJobDetail(id);
   }
 
-  async recoverInterruptedJobs() {
-    return this.repository.recoverInterruptedScheduleJobs?.();
+  cancelScheduleJob(id: string) {
+    return this.repository.requestScheduleJobCancellation(id);
   }
 
-  private async executeScheduleJob(
-    id: string,
-    overrides: ScheduleRunOverrides,
-    traceId: string,
-  ) {
-    const started = await this.repository.transitionScheduleJob(id, {
-      to: "running",
-      progress: 35,
-    });
-    if (started.resolution !== "apply") {
-      return;
-    }
-    try {
-      const referenceData = await this.repository.getReferenceData();
-      const result = await this.scheduler.solve(
-        withScheduleOverrides(referenceData.scheduleInput, overrides),
-        { requestId: traceId },
-      );
-      await this.repository.completeScheduleJob(id, result);
-    } catch (error) {
-      const failure = scheduleJobFailure(error);
-      await this.repository.transitionScheduleJob(id, {
-        to: failure.status,
-        progress: 100,
-        error: failure.error,
-      });
-    }
-  }
-}
-
-function scheduleJobFailure(error: unknown) {
-  if (error instanceof SchedulerClientError) {
-    return {
-      status: error.category === "timeout"
-        ? "timed_out" as const
-        : error.category === "cancelled"
-          ? "cancelled" as const
-          : "failed" as const,
-      error: {
-        category: error.category,
-        code: error.code,
-        message: error.message,
-        retryable: error.retryable,
-      },
-    };
-  }
-  return {
-    status: "failed" as const,
-    error: {
-      category: "scheduler" as const,
-      code: "schedule_job_execution_failed",
-      message: "Schedule job execution failed.",
-      retryable: true,
-    },
-  };
-}
-
-function deferWithTimer(task: DeferredTask) {
-  setTimeout(() => {
-    void task();
-  }, 0);
 }
 
 function withScheduleOverrides(
   scheduleInput: ScheduleInput,
   overrides: ScheduleRunOverrides,
+  constraintProfile = scheduleInput.constraint_profile,
 ): ScheduleInput {
   return {
     ...scheduleInput,
-    ...overrides,
+    constraint_profile: structuredClone(constraintProfile),
+    fixed_assignments: overrides.fixed_assignments,
+    reschedule_context: overrides.reschedule_context,
   };
 }

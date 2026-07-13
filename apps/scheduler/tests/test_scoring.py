@@ -279,8 +279,75 @@ def test_total_score_never_goes_below_zero():
     assert score.hard_violation_count == 0
 
 
+def test_normalized_score_is_scale_stable_for_proportional_room_violations():
+    data = make_schedule_input()
+    data = replace(
+        data,
+        constraint_profile=replace(
+            data.constraint_profile,
+            soft_weights={"room_utilization": 30},
+        ),
+    )
+
+    small = calculate_score(
+        data,
+        (
+            ScheduledExam("e1", "r1", "s1", ("t1",)),
+            ScheduledExam("e2", "r2", "s3", ("t2",)),
+        ),
+    )
+    large = calculate_score(
+        data,
+        (
+            ScheduledExam("e1", "r1", "s1", ("t1",)),
+            ScheduledExam("e2", "r2", "s3", ("t2",)),
+            ScheduledExam("e3", "r1", "s4", ("t2",)),
+            ScheduledExam("e4", "r2", "s2", ("t3",)),
+        ),
+    )
+
+    assert small.normalized_score == 50.0
+    assert large.normalized_score == 50.0
+    assert small.total_score == 70
+    assert large.total_score == 40
+    assert _normalized_penalty(small, "room_utilization").normalized_penalty == 0.5
+    assert _normalized_penalty(large, "room_utilization").normalized_penalty == 0.5
+
+
+def test_normalized_score_handles_zero_opportunities_and_disabled_rules():
+    data = make_schedule_input()
+    data = replace(
+        data,
+        constraint_profile=replace(
+            data.constraint_profile,
+            soft_weights={
+                "room_utilization": 30,
+                "student_consecutive_exam": 0,
+            },
+        ),
+    )
+
+    score = calculate_score(data, ())
+
+    room_item = _normalized_penalty(score, "room_utilization")
+    assert room_item.opportunity_count == 0
+    assert room_item.normalized_penalty == 0.0
+    assert score.normalized_score == 100.0
+    assert all(
+        item.rule != "student_consecutive_exam"
+        for item in score.normalized_penalty_items
+    )
+
+
 def _penalty(score, rule):
     for item in score.soft_penalty_items:
         if item.rule == rule:
             return item
     pytest.fail(f"missing penalty item for {rule}")
+
+
+def _normalized_penalty(score, rule):
+    for item in score.normalized_penalty_items:
+        if item.rule == rule:
+            return item
+    pytest.fail(f"missing normalized penalty item for {rule}")

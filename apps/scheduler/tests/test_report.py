@@ -8,6 +8,7 @@ from examforge_scheduler.models import (
     Course,
     ExamTask,
     ExamType,
+    NormalizedPenaltyItem,
     Room,
     RoomType,
     RescheduleContext,
@@ -95,6 +96,20 @@ def test_build_schedule_report_contains_summary_score_and_conflicts():
                     message="考场利用率偏低",
                 ),
             ),
+            normalized_score=75.0,
+            total_raw_penalty=1,
+            total_weighted_penalty=30,
+            normalized_penalty_items=(
+                NormalizedPenaltyItem(
+                    rule="room_utilization",
+                    violation_count=1,
+                    weight=30,
+                    raw_penalty=1,
+                    weighted_penalty=30,
+                    opportunity_count=4,
+                    normalized_penalty=0.25,
+                ),
+            ),
         ),
         statistics=SolverStatistics(
             status=SolveStatus.PARTIAL,
@@ -122,6 +137,21 @@ def test_build_schedule_report_contains_summary_score_and_conflicts():
                 "rule": "room_utilization",
                 "penalty": 30,
                 "message": "考场利用率偏低",
+            }
+        ],
+        "scoring_contract_version": 1,
+        "normalized_score": 75.0,
+        "total_raw_penalty": 1,
+        "total_weighted_penalty": 30,
+        "normalized_penalty_items": [
+            {
+                "rule": "room_utilization",
+                "violation_count": 1,
+                "weight": 30,
+                "raw_penalty": 1,
+                "weighted_penalty": 30,
+                "opportunity_count": 4,
+                "normalized_penalty": 0.25,
             }
         ],
     }

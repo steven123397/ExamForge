@@ -1,44 +1,29 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import path from "node:path";
+import {
+  HttpSchedulerClient,
+  SchedulerClientError,
+  type HttpSchedulerClientOptions,
+  type SchedulerClient,
+  type SchedulerErrorCategory,
+  type SchedulerSolveOptions,
+} from "@examforge/scheduling-application";
 import {
   scheduleResultSchema,
   type ScheduleInput,
   type ScheduleResult,
 } from "@examforge/shared";
-import { z } from "zod";
 
-export type SchedulerErrorCategory =
-  | "validation"
-  | "timeout"
-  | "cancelled"
-  | "unavailable"
-  | "protocol"
-  | "internal";
-
-export interface SchedulerSolveOptions {
-  requestId?: string;
-  signal?: AbortSignal;
-}
-
-export interface SchedulerClient {
-  solve(input: ScheduleInput, options?: SchedulerSolveOptions): Promise<ScheduleResult>;
-  checkReadiness?(): Promise<void>;
-}
-
-export class SchedulerClientError extends Error {
-  constructor(
-    message: string,
-    readonly category: SchedulerErrorCategory,
-    readonly code: string,
-    readonly retryable: boolean,
-    readonly requestId?: string,
-    options?: ErrorOptions,
-  ) {
-    super(message, options);
-    this.name = "SchedulerClientError";
-  }
-}
+export {
+  HttpSchedulerClient,
+  SchedulerClientError,
+};
+export type {
+  HttpSchedulerClientOptions,
+  SchedulerClient,
+  SchedulerErrorCategory,
+  SchedulerSolveOptions,
+};
 
 export class PythonSchedulerClient implements SchedulerClient {
   constructor(
@@ -46,7 +31,7 @@ export class PythonSchedulerClient implements SchedulerClient {
     private readonly executable = process.env.SCHEDULER_PYTHON ?? "uv",
   ) {}
 
-  solve(input: ScheduleInput): Promise<ScheduleResult> {
+  solve(input: ScheduleInput, options: SchedulerSolveOptions = {}): Promise<ScheduleResult> {
     return new Promise((resolve, reject) => {
       const child = spawn(
         this.executable,
@@ -79,8 +64,9 @@ export class PythonSchedulerClient implements SchedulerClient {
           return;
         }
         try {
-          const parsed = scheduleResultSchema.parse(JSON.parse(stdout));
-          resolve(parsed);
+          const result = scheduleResultSchema.parse(JSON.parse(stdout));
+          options.onMetadata?.({ schedulerVersion: "0.1.0" });
+          resolve(result);
         } catch (error) {
           reject(error);
         }
@@ -88,135 +74,6 @@ export class PythonSchedulerClient implements SchedulerClient {
 
       child.stdin.end(JSON.stringify(input));
     });
-  }
-}
-
-export interface HttpSchedulerClientOptions {
-  baseUrl: string;
-  timeoutMs?: number;
-  fetch?: typeof fetch;
-}
-
-const schedulerErrorEnvelopeSchema = z.object({
-  error: z.object({
-    category: z.enum(["validation", "internal"]),
-    code: z.string(),
-    message: z.string(),
-    retryable: z.boolean(),
-  }).strict(),
-  request_id: z.string(),
-  issues: z.array(z.unknown()).optional(),
-}).strict();
-
-const schedulerStatusSchema = z.object({
-  ok: z.literal(true),
-  service: z.literal("examforge-scheduler"),
-  version: z.string().min(1),
-}).strict();
-
-export class HttpSchedulerClient implements SchedulerClient {
-  private readonly baseUrl: string;
-  private readonly timeoutMs: number;
-  private readonly fetchImpl: typeof fetch;
-
-  constructor(options: HttpSchedulerClientOptions) {
-    this.baseUrl = normalizeBaseUrl(options.baseUrl);
-    this.timeoutMs = options.timeoutMs ?? 35_000;
-    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) {
-      throw new Error("Scheduler HTTP timeout must be a positive number.");
-    }
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
-  }
-
-  async solve(
-    input: ScheduleInput,
-    options: SchedulerSolveOptions = {},
-  ): Promise<ScheduleResult> {
-    const requestId = options.requestId ?? `scheduler-client-${randomUUID()}`;
-    const response = await this.request("/solve", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-request-id": requestId,
-      },
-      body: JSON.stringify(input),
-    }, options.signal, requestId);
-    const payload = await readJson(response, requestId);
-
-    if (!response.ok) {
-      throw errorFromResponse(response, payload, requestId);
-    }
-    const parsed = scheduleResultSchema.strict().safeParse(payload);
-    if (!parsed.success) {
-      throw protocolError(requestId);
-    }
-    return parsed.data;
-  }
-
-  async checkReadiness(): Promise<void> {
-    const requestId = `scheduler-readiness-${randomUUID()}`;
-    const response = await this.request("/ready", {
-      headers: { "x-request-id": requestId },
-    }, undefined, requestId);
-    const payload = await readJson(response, requestId);
-    if (!response.ok) {
-      throw errorFromResponse(response, payload, requestId);
-    }
-    if (!schedulerStatusSchema.safeParse(payload).success) {
-      throw protocolError(requestId);
-    }
-  }
-
-  private async request(
-    pathname: string,
-    init: RequestInit,
-    callerSignal: AbortSignal | undefined,
-    requestId: string,
-  ) {
-    const timeoutController = new AbortController();
-    const timeout = setTimeout(() => {
-      timeoutController.abort(new DOMException("Scheduler request timed out.", "TimeoutError"));
-    }, this.timeoutMs);
-    const signal = callerSignal
-      ? AbortSignal.any([callerSignal, timeoutController.signal])
-      : timeoutController.signal;
-    try {
-      return await this.fetchImpl(`${this.baseUrl}${pathname}`, {
-        ...init,
-        signal,
-      });
-    } catch (error) {
-      if (callerSignal?.aborted) {
-        throw new SchedulerClientError(
-          "Scheduler request was cancelled.",
-          "cancelled",
-          "scheduler_cancelled",
-          false,
-          requestId,
-          { cause: error },
-        );
-      }
-      if (timeoutController.signal.aborted) {
-        throw new SchedulerClientError(
-          "Scheduler request exceeded its deadline.",
-          "timeout",
-          "scheduler_timeout",
-          true,
-          requestId,
-          { cause: error },
-        );
-      }
-      throw new SchedulerClientError(
-        "Scheduler service is unavailable.",
-        "unavailable",
-        "scheduler_unavailable",
-        true,
-        requestId,
-        { cause: error },
-      );
-    } finally {
-      clearTimeout(timeout);
-    }
   }
 }
 
@@ -243,68 +100,4 @@ export function createSchedulerClient(
     });
   }
   throw new Error(`Unsupported scheduler transport: ${transport}`);
-}
-
-async function readJson(response: Response, requestId: string): Promise<unknown> {
-  try {
-    return JSON.parse(await response.text());
-  } catch (error) {
-    throw protocolError(requestId, error);
-  }
-}
-
-function errorFromResponse(
-  response: Response,
-  payload: unknown,
-  fallbackRequestId: string,
-): SchedulerClientError {
-  const parsed = schedulerErrorEnvelopeSchema.safeParse(payload);
-  if (parsed.success) {
-    return new SchedulerClientError(
-      parsed.data.error.message,
-      parsed.data.error.category,
-      parsed.data.error.code,
-      parsed.data.error.retryable,
-      parsed.data.request_id,
-    );
-  }
-  const requestId = response.headers.get("x-request-id") ?? fallbackRequestId;
-  if (response.status === 408 || response.status === 504) {
-    return new SchedulerClientError(
-      "Scheduler request exceeded its deadline.",
-      "timeout",
-      "scheduler_timeout",
-      true,
-      requestId,
-    );
-  }
-  if (response.status === 502 || response.status === 503) {
-    return new SchedulerClientError(
-      "Scheduler service is unavailable.",
-      "unavailable",
-      "scheduler_unavailable",
-      true,
-      requestId,
-    );
-  }
-  return protocolError(requestId);
-}
-
-function protocolError(requestId: string, cause?: unknown): SchedulerClientError {
-  return new SchedulerClientError(
-    "Scheduler response does not match the HTTP contract.",
-    "protocol",
-    "scheduler_protocol_invalid",
-    false,
-    requestId,
-    cause === undefined ? undefined : { cause },
-  );
-}
-
-function normalizeBaseUrl(value: string) {
-  const url = new URL(value);
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Scheduler base URL must use HTTP or HTTPS.");
-  }
-  return url.toString().replace(/\/$/, "");
 }

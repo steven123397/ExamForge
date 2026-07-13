@@ -30,7 +30,7 @@
 - 建议处理：保留审计记录；后续升级 Next 或等待其依赖 PostCSS 修复版本，避免盲目执行降级式自动修复。
 - 验证方式：运行 `npm audit`，确认公告状态；升级后运行 `npm test`、`npm run typecheck`、`npm run build`、`npm run test:e2e`。
 - 解决记录：未解决。
-- 本轮处置：暂缓。2026-07-12 运行 `npm audit --audit-level=moderate`，当前 `next@15.5.20 -> postcss@8.4.31` 仍命中 `postcss <8.5.10` 的 2 个 moderate 公告；npm 官方元数据显示 `next@15.5.20` 与最新 `next@16.2.10` 都精确依赖 `postcss@8.4.31`。隔离探针尝试覆盖到官方 `postcss@8.5.17` 后 audit 为 0，但 `npm ls` 以 `ELSPROBLEMS` 判定该依赖不满足 Next 的精确声明，故未保留 override 或 lock 变更。重新评估条件为 Next 官方升级或放宽 PostCSS 依赖；不得执行会降级到 `next@9.3.3` 的自动修复。
+- 本轮处置：暂缓。2026-07-14 运行 `npm audit --audit-level=moderate`，当前 `next@15.5.20 -> postcss@8.4.31` 仍命中 `postcss <8.5.10` 的 2 个 moderate 公告。隔离探针覆盖到 `postcss@8.5.19` 后虽然 audit 为 0，但 `npm ls` 以 `ELSPROBLEMS` 判定该版本不满足 Next 的精确声明；`npm audit fix --force` 又会错误降级到 `next@9.3.3`，故两类试验均未保留。重新评估条件为升级到经过完整回归且不再携带该精确依赖的 Next 版本，或形成明确的生产风险接受决定；第六阶段正式发布前必须处置。
 
 ### CR-003：Docker daemon 拉取镜像依赖当前 WSL 到 Windows 代理
 
@@ -45,20 +45,6 @@
 - 验证方式：执行 `docker compose pull` 或重新创建 PostgreSQL 容器并确认健康检查通过。
 - 解决记录：未解决。
 - 本轮处置：暂缓。2026-07-12 `docker info` 显示 daemon 的 HTTP/HTTPS 代理仍为 `http://172.22.112.1:7897`，且没有 Docker Hub 镜像源；`docker pull postgres:16-alpine` 通过该路径从 Docker Hub 拉取新 digest `sha256:57c72fd...` 成功，说明代理当前可用。未经用户单独授权不修改 machine-level systemd/Windows 代理；代理地址变化、Docker Hub 拉取失败或迁移到独立服务器时重新评估。
-
-### CR-007：排考进度仍使用轮询，没有 WebSocket 或 SSE 实时推送
-
-- 状态：暂缓
-- 严重级别：P2 中优先级
-- 所属模块：`apps/api`、`apps/web`
-- 发现来源：`docs/design/总体设计与技术选型.md`
-- 位置：`apps/web/features/async-jobs/`、`apps/api/src/app.ts`
-- 问题描述：当前异步排考进度通过 Web 轮询 `/api/schedule-jobs` 获取，没有 WebSocket 或 SSE。
-- 影响：当前体验可演示；长任务、高频进度和多用户场景下效率和实时性不足。
-- 建议处理：在持久化队列完成后再评估 SSE 或 WebSocket，避免先做实时通道但缺少可靠任务状态。
-- 验证方式：新增浏览器端实时进度测试或 API 事件流测试。
-- 解决记录：未解决。
-- 本轮处置：暂缓。2026-07-13 第五版第二阶段完成后，活动作业仍以 1200 ms `refetchInterval` 轮询，尚无 Publisher、可靠 Worker 和可补发事件流；独立 FastAPI scheduler 与同步 HTTP 调用不能替代这些能力。SSE 继续按当前 `docs/plan/第五版第三阶段计划.md` 与 Redis/BullMQ、Outbox Publisher 和 Worker 成组实施，待真实队列、断线补发和浏览器证据齐全后重评。
 
 ## 4. 已解决问题索引
 
@@ -86,8 +72,13 @@
 - CR-026：发布、回滚、废弃和删除等高影响操作没有确认步骤
 - CR-027：草稿矩阵 ARIA 网格语义和异步错误播报不完整
 - CR-008：Python 调度器尚未独立 FastAPI 服务化
+- CR-007：排考进度仍使用轮询，没有 WebSocket 或 SSE 实时推送
 
 ## 5. 审查记录
+
+- 2026-07-14：第五版第五阶段完成后复核存留问题。真实 PostgreSQL/Redis、15 个迁移、Worker 故障恢复、完整构建和 35 项 Playwright 场景均通过既定门禁，未发现新的 P0/P1 或需要单独编号的实现缺陷。`npm audit --audit-level=moderate` 仍返回 2 个 PostCSS moderate 公告，强制 override 会造成依赖树无效，自动修复会错误降级，因此 CR-002 保持暂缓但提升为第六阶段正式发布前置门禁；CR-003 未发生机器级变更，仍在本地代理变化或远程部署时重评。问题明细保持 2 项，无待解决 P0/P1。
+
+- 2026-07-13：第五版第三阶段解决 CR-007。API 已停止进程内计时器执行，改为 PostgreSQL 事务 outbox、独立 Publisher、Redis/BullMQ 和独立 Worker；作业事件以严格序列持久化，SSE 先补发 PostgreSQL 历史并支持 `Last-Event-ID`，Redis 只用于唤醒。Web 已移除 1200 ms 主轮询，以 SSE 更新 Query cache，仅在断线期间执行不低于 5 秒的兜底查询。真实 PostgreSQL/Redis Worker 测试 `14 passed`；隔离 Compose 从空卷完成 API 重启、Redis 停止恢复、Publisher 重启、Worker 崩溃回收、scheduler 不可用重试、重复 outbox 和 SSE 重连，所有场景最终只生成一个运行结果，Chromium E2E `21 passed`。CR-007 移入已解决索引；当前问题明细仅保留 CR-002 和 CR-003。腾讯云私有试部署未获单独授权，未作为关闭该本地架构问题的虚假证据。
 
 - 2026-07-13：第五版第二阶段解决 CR-008。新增独立 FastAPI scheduler 的 `/health`、`/ready`、`/solve` 和确定性 OpenAPI，CLI/HTTP 共用解析、求解、报告与序列化 pipeline；API 生产 Compose 显式使用 HTTP 客户端并稳定分类合同错误、业务不可行、超时、取消、不可用、协议损坏和内部错误，不进行 CLI 回退。独立 scheduler 镜像以 UID 10002 运行并设置 CPU、内存、进程数和健康检查，API 镜像探针确认不含 Python/uv。固定样例等价测试覆盖可行、不可行、固定安排和增量重排；隔离 Compose smoke 直连 scheduler 后完成真实会话排考、PostgreSQL 持久化和 API 重启读取，Chromium E2E `17 passed`。CR-007 仍保留到第三阶段，不能用同步 HTTP 服务替代可靠队列或 SSE 结论。
 

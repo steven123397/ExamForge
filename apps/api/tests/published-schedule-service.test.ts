@@ -127,6 +127,11 @@ function buildPublishedSchedule(): PublishedScheduleResponse {
         total_score: 92,
         hard_violation_count: 0,
         soft_penalty_items: [],
+        scoring_contract_version: 1,
+        normalized_score: 92,
+        total_raw_penalty: 0,
+        total_weighted_penalty: 0,
+        normalized_penalty_items: [],
       },
       statistics: {
         status: "feasible",
@@ -136,6 +141,7 @@ function buildPublishedSchedule(): PublishedScheduleResponse {
         slot_count: 2,
         attempted_assignments: 2,
       },
+      diagnostics: [],
       report: {
         summary: {
           status: "feasible",

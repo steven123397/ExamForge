@@ -15,6 +15,7 @@ def build_schedule_report(
         "statistics": _build_statistics(result),
         "score": _build_score(result),
         "conflicts": _build_conflicts(result),
+        "diagnostics": _build_diagnostics(result),
         "room_utilization": _build_room_utilization(result, task_by_id, room_by_id),
         "teacher_workload": _build_teacher_workload(schedule_input, result),
     }
@@ -59,6 +60,22 @@ def _build_score(result: ScheduleResult) -> dict[str, object]:
             }
             for item in result.score.soft_penalty_items
         ],
+        "scoring_contract_version": result.score.scoring_contract_version,
+        "normalized_score": result.score.normalized_score,
+        "total_raw_penalty": result.score.total_raw_penalty,
+        "total_weighted_penalty": result.score.total_weighted_penalty,
+        "normalized_penalty_items": [
+            {
+                "rule": item.rule,
+                "violation_count": item.violation_count,
+                "weight": item.weight,
+                "raw_penalty": item.raw_penalty,
+                "weighted_penalty": item.weighted_penalty,
+                "opportunity_count": item.opportunity_count,
+                "normalized_penalty": item.normalized_penalty,
+            }
+            for item in result.score.normalized_penalty_items
+        ],
     }
 
 
@@ -72,6 +89,21 @@ def _build_conflicts(result: ScheduleResult) -> list[dict[str, object]]:
             "suggestion": conflict.suggestion,
         }
         for conflict in result.conflicts
+    ]
+
+
+def _build_diagnostics(result: ScheduleResult) -> list[dict[str, object]]:
+    return [
+        {
+            "code": diagnostic.code,
+            "severity": diagnostic.severity.value,
+            "resource_dimension": diagnostic.resource_dimension,
+            "affected_ids": list(diagnostic.affected_ids),
+            "shortfall": diagnostic.shortfall,
+            "message": diagnostic.message,
+            "suggestion": diagnostic.suggestion,
+        }
+        for diagnostic in result.diagnostics
     ]
 
 

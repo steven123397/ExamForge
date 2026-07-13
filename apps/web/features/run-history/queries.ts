@@ -1,14 +1,17 @@
 import { apiClient } from "../../lib/api-client";
 import { queryKeys } from "../../lib/query-keys";
+import type { AuditEventListQuery, ScheduleRunListQuery } from "@examforge/shared";
 
 export const runHistoryQueries = {
-  runs: () => ({
-    queryKey: queryKeys.scheduleRuns,
-    queryFn: () => apiClient.listScheduleRuns(),
+  runs: (query: ScheduleRunListQuery = { page: 1, pageSize: 20 }) => ({
+    queryKey: queryKeys.scheduleRuns(query),
+    queryFn: () => apiClient.listScheduleRuns(query),
+    retry: false,
   }),
-  auditEvents: () => ({
-    queryKey: queryKeys.auditEvents,
-    queryFn: () => apiClient.listAuditEvents(),
+  auditEvents: (query: AuditEventListQuery = { page: 1, pageSize: 20 }) => ({
+    queryKey: queryKeys.auditEvents(query),
+    queryFn: () => apiClient.listAuditEvents(query),
+    retry: false,
   }),
   comparison: (baseId: string, targetId: string) => ({
     queryKey: queryKeys.scheduleRunComparison(baseId, targetId),

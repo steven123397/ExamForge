@@ -4,14 +4,18 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
+COPY apps/worker/package.json apps/worker/package.json
 COPY packages/db/package.json packages/db/package.json
+COPY packages/scheduling-application/package.json packages/scheduling-application/package.json
 COPY packages/shared/package.json packages/shared/package.json
 RUN npm ci
 
 COPY apps/api apps/api
 COPY packages/db packages/db
+COPY packages/scheduling-application packages/scheduling-application
 COPY packages/shared packages/shared
 RUN npm run build --workspace @examforge/shared \
+    && npm run build --workspace @examforge/scheduling-application \
     && npm run build --workspace @examforge/db \
     && npm run build --workspace @examforge/api \
     && npm prune --omit=dev --workspaces
@@ -29,6 +33,8 @@ COPY --from=build --chown=10001:10001 /app/apps/api/dist /app/apps/api/dist
 COPY --from=build --chown=10001:10001 /app/packages/db/package.json /app/packages/db/package.json
 COPY --from=build --chown=10001:10001 /app/packages/db/dist /app/packages/db/dist
 COPY --from=build --chown=10001:10001 /app/packages/db/drizzle /app/packages/db/drizzle
+COPY --from=build --chown=10001:10001 /app/packages/scheduling-application/package.json /app/packages/scheduling-application/package.json
+COPY --from=build --chown=10001:10001 /app/packages/scheduling-application/dist /app/packages/scheduling-application/dist
 COPY --from=build --chown=10001:10001 /app/packages/shared/package.json /app/packages/shared/package.json
 COPY --from=build --chown=10001:10001 /app/packages/shared/dist /app/packages/shared/dist
 

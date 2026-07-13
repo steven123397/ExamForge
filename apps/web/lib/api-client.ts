@@ -1,6 +1,12 @@
 import type {
   AuditEventListResponse,
+  AuditEventListQuery,
+  AudienceScope,
   AuthContext,
+  ConstraintProfile,
+  ConstraintProfileRecord,
+  CurrentPublishedScheduleResponse,
+  CurrentTeacherAvailabilityResponse,
   DashboardResponse,
   PublishedScheduleAudienceResponse,
   PublishedScheduleNotificationsResponse,
@@ -17,11 +23,14 @@ import type {
   ScheduleDraftListResponse,
   ScheduleDraftPublishResponse,
   ScheduleDraftRescheduleResponse,
+  ScheduleJobListQuery,
   ScheduleJobListResponse,
+  ScheduleJobDetailResponse,
   ScheduleJobResponse,
   ScheduleRollbackResponse,
   ScheduleRunComparisonResponse,
   ScheduleRunListResponse,
+  ScheduleRunListQuery,
   ScheduleRunResponse,
   ScheduledExam,
   TeacherUnavailableSlotsResponse,
@@ -64,7 +73,7 @@ export async function requestJson<T>(
 }
 
 function jsonInit(
-  method: "POST" | "PATCH" | "DELETE",
+  method: "POST" | "PATCH" | "PUT" | "DELETE",
   body?: unknown,
 ): RequestInit {
   return {
@@ -76,6 +85,16 @@ function jsonInit(
 
 function internalReadInit(): RequestInit {
   return {};
+}
+
+function queryString(query: Record<string, unknown>) {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined) {
+      search.set(key, String(value));
+    }
+  }
+  return search.toString();
 }
 
 async function readErrorMessage(response: Response): Promise<string> {
@@ -100,8 +119,72 @@ export const apiClient = {
     return requestJson<DashboardResponse>("/api/dashboard", internalReadInit());
   },
 
+  getCurrentAudience() {
+    return requestJson<AudienceScope>("/api/me/audience", internalReadInit());
+  },
+
+  getCurrentPublishedSchedule() {
+    return requestJson<CurrentPublishedScheduleResponse>(
+      "/api/me/published-schedule",
+      internalReadInit(),
+    );
+  },
+
+  getCurrentTeacherAvailability() {
+    return requestJson<CurrentTeacherAvailabilityResponse>(
+      "/api/me/teacher-unavailable-slots",
+      internalReadInit(),
+    );
+  },
+
+  updateCurrentTeacherUnavailableSlots(slotIds: string[]) {
+    return requestJson<TeacherUnavailableSlotsResponse>(
+      "/api/me/teacher-unavailable-slots",
+      jsonInit("PATCH", { unavailable_slot_ids: slotIds }),
+    );
+  },
+
   getReferenceData() {
     return requestJson<ReferenceDataResponse>("/api/reference-data", internalReadInit());
+  },
+
+  listConstraintProfiles() {
+    return requestJson<{ profiles: ConstraintProfileRecord[] }>(
+      "/api/constraint-profiles",
+      internalReadInit(),
+    );
+  },
+
+  createConstraintProfile(name: string, config: ConstraintProfile) {
+    return requestJson<{ profile: ConstraintProfileRecord }>(
+      "/api/constraint-profiles",
+      jsonInit("POST", { name, config }),
+    );
+  },
+
+  createConstraintProfileVersion(
+    profileId: string,
+    expectedCurrentVersionId: string,
+    config: ConstraintProfile,
+  ) {
+    return requestJson<{ profile: ConstraintProfileRecord }>(
+      `/api/constraint-profiles/${encodeURIComponent(profileId)}/versions`,
+      jsonInit("POST", { expectedCurrentVersionId, config }),
+    );
+  },
+
+  setConstraintProfileStatus(profileId: string, status: "active" | "disabled") {
+    return requestJson<{ profile: ConstraintProfileRecord }>(
+      `/api/constraint-profiles/${encodeURIComponent(profileId)}/status`,
+      jsonInit("PATCH", { status }),
+    );
+  },
+
+  setDefaultConstraintProfile(profileId: string) {
+    return requestJson<{ profile: ConstraintProfileRecord }>(
+      `/api/constraint-profiles/${encodeURIComponent(profileId)}/default`,
+      jsonInit("PUT"),
+    );
   },
 
   createReferenceRecord(
@@ -146,8 +229,11 @@ export const apiClient = {
     return requestJson<ScheduleRunResponse>("/api/schedule-runs", jsonInit("POST"));
   },
 
-  listScheduleRuns() {
-    return requestJson<ScheduleRunListResponse>("/api/schedule-runs", internalReadInit());
+  listScheduleRuns(query: ScheduleRunListQuery = { page: 1, pageSize: 20 }) {
+    return requestJson<ScheduleRunListResponse>(
+      `/api/schedule-runs?${queryString(query)}`,
+      internalReadInit(),
+    );
   },
 
   getScheduleRun(id: string) {
@@ -178,8 +264,11 @@ export const apiClient = {
     );
   },
 
-  listAuditEvents() {
-    return requestJson<AuditEventListResponse>("/api/audit-events", internalReadInit());
+  listAuditEvents(query: AuditEventListQuery = { page: 1, pageSize: 20 }) {
+    return requestJson<AuditEventListResponse>(
+      `/api/audit-events?${queryString(query)}`,
+      internalReadInit(),
+    );
   },
 
   getPublishedSchedule() {
@@ -300,21 +389,32 @@ export const apiClient = {
     );
   },
 
-  createScheduleJob() {
-    return requestJson<ScheduleJobResponse>("/api/schedule-jobs", jsonInit("POST"));
-  },
-
-  listScheduleJobs() {
-    return requestJson<ScheduleJobListResponse>("/api/schedule-jobs", internalReadInit());
-  },
-
-  updateTeacherUnavailableSlots(
-    teacherId: string,
-    slotIds: string[],
-  ) {
-    return requestJson<TeacherUnavailableSlotsResponse>(
-      `/api/teachers/${encodeURIComponent(teacherId)}/unavailable-slots`,
-      jsonInit("PATCH", { unavailable_slot_ids: slotIds }),
+  createScheduleJob(constraintProfileVersionId?: string) {
+    return requestJson<ScheduleJobResponse>(
+      "/api/schedule-jobs",
+      jsonInit("POST", constraintProfileVersionId ? { constraintProfileVersionId } : {}),
     );
   },
+
+  listScheduleJobs(query: ScheduleJobListQuery = { page: 1, pageSize: 20 }) {
+    return requestJson<ScheduleJobListResponse>(
+      `/api/schedule-jobs?${queryString(query)}`,
+      internalReadInit(),
+    );
+  },
+
+  getScheduleJob(id: string) {
+    return requestJson<ScheduleJobDetailResponse>(
+      `/api/schedule-jobs/${encodeURIComponent(id)}`,
+      internalReadInit(),
+    );
+  },
+
+  cancelScheduleJob(id: string) {
+    return requestJson<ScheduleJobResponse>(
+      `/api/schedule-jobs/${encodeURIComponent(id)}/cancel`,
+      jsonInit("POST"),
+    );
+  },
+
 };

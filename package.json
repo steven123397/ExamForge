@@ -9,11 +9,11 @@
   ],
   "scripts": {
     "dev": "npm run build --workspace @examforge/shared && (npm run dev --workspace @examforge/api & npm run dev --workspace @examforge/web)",
-    "build": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run build --workspace @examforge/api && npm run build --workspace @examforge/web",
+    "build": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/scheduling-application && npm run build --workspace @examforge/db && npm run build --workspace @examforge/worker && npm run build --workspace @examforge/api && npm run build --workspace @examforge/web",
     "check:ci": "node scripts/ci/check-repository.mjs",
-    "test": "npm test --workspace @examforge/shared && npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm test --workspace @examforge/api",
-    "test:postgres": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run test:postgres --workspace @examforge/api",
-    "test:migrations": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run test:migrations --workspace @examforge/db",
+    "test": "npm test --workspace @examforge/shared && npm run build --workspace @examforge/shared && npm test --workspace @examforge/scheduling-application && npm run build --workspace @examforge/scheduling-application && npm run build --workspace @examforge/db && npm test --workspace @examforge/api && npm test --workspace @examforge/web",
+    "test:postgres": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/scheduling-application && npm run build --workspace @examforge/db && npm run test:postgres --workspace @examforge/api",
+    "test:migrations": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/scheduling-application && npm run build --workspace @examforge/db && npm run test:migrations --workspace @examforge/db",
     "test:ci": "node --test scripts/ci/*.test.mjs",
     "db:migrate": "npm run migrate --workspace @examforge/db",
     "db:check-migrations": "npm run check:migrations --workspace @examforge/db",
@@ -28,9 +28,10 @@
     "demo:smoke": "node --env-file-if-exists=.env scripts/demo-smoke.mjs",
     "test:e2e": "playwright test",
     "test:e2e:demo": "bash scripts/test-demo-e2e.sh",
-    "typecheck": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/db && npm run typecheck --workspace @examforge/db && npm run typecheck --workspace @examforge/api && npm run typecheck --workspace @examforge/web"
+    "typecheck": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/scheduling-application && npm run typecheck --workspace @examforge/scheduling-application && npm run build --workspace @examforge/db && npm run typecheck --workspace @examforge/db && npm run typecheck --workspace @examforge/worker && npm run typecheck --workspace @examforge/api && npm run typecheck --workspace @examforge/web"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "^1.61.1",
     "@types/node": "^24.0.0",
     "tsx": "^4.19.0",

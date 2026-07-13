@@ -23,11 +23,11 @@ import {
   type ExamForgeDbClient,
 } from "@examforge/db";
 import type { ScheduleInput, ScheduleResult } from "@examforge/shared";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { createApp } from "../../src/app.js";
 import { PostgresPlatformRepository } from "../../src/postgres-repository.js";
 import { hashSessionToken } from "../../src/auth/security.js";
-import type { SchedulerClient } from "../../src/scheduler-client.js";
+import type { SchedulerClient, SchedulerSolveOptions } from "../../src/scheduler-client.js";
 import {
   buildCompleteScheduleResult,
   seedTestAuth,
@@ -43,7 +43,11 @@ const testDatabaseUrl = getTestDatabaseUrl();
 let client: ExamForgeDbClient | null = null;
 
 class PostgresDraftScheduler implements SchedulerClient {
-  async solve(input: ScheduleInput): Promise<ScheduleResult> {
+  lastInput: ScheduleInput | null = null;
+
+  async solve(input: ScheduleInput, options?: SchedulerSolveOptions): Promise<ScheduleResult> {
+    this.lastInput = structuredClone(input);
+    options?.onMetadata?.({ schedulerVersion: "scheduler-postgres-test" });
     return buildScheduleResult(input);
   }
 }
@@ -113,6 +117,22 @@ describe("PostgreSQL platform integration", () => {
     assert.equal(invigilatorRows.length, 7);
     assert.equal(conflictRows.length, 1);
     assert.ok(auditRows.some((event) => event.action === "schedule_run.created"));
+    const [createdRunRow] = await dbClient.db
+      .select()
+      .from(scheduleRuns)
+      .where(eq(scheduleRuns.id, created.run.id));
+    assert.equal(createdRunRow.constraintProfileVersionId, "constraint-profile-default-v1");
+    assert.equal(createdRunRow.constraintProfileSnapshot.schemaVersion, 1);
+    assert.deepEqual(
+      createdRunRow.constraintProfileSnapshot.config,
+      (await repository.getReferenceData()).scheduleInput.constraint_profile,
+    );
+    assert.equal(createdRunRow.schedulerVersion, "scheduler-postgres-test");
+    assert.equal(createdRunRow.scoringContractVersion, 1);
+    assert.equal(createdRunRow.normalizedScore, created.result.score.normalized_score);
+    assert.equal(created.run.constraintProfileVersionId, "constraint-profile-default-v1");
+    assert.equal(created.run.schedulerVersion, "scheduler-postgres-test");
+    assert.equal(created.run.normalizedScore, created.result.score.normalized_score);
 
     const readResponse = await app.inject({
       method: "GET",
@@ -221,6 +241,168 @@ describe("PostgreSQL platform integration", () => {
     client = null;
   });
 
+  it("filters and paginates PostgreSQL schedule runs and audit events", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const referenceData = await repository.getReferenceData();
+    const profiles = await repository.listConstraintProfiles(true);
+    const profile = profiles.find((candidate) => candidate.isDefault) ?? profiles[0];
+    const version = profile?.versions.find((candidate) => candidate.id === profile.currentVersionId);
+    assert.ok(profile && version);
+    const created = [];
+    for (const [index, status] of ["feasible", "infeasible", "feasible"].entries()) {
+      const result = buildScheduleResult(referenceData.scheduleInput);
+      result.statistics.status = status as ScheduleResult["statistics"]["status"];
+      const response = await repository.createScheduleRun(result, {
+        constraintProfileVersionId: version.id,
+        constraintProfileSnapshot: {
+          schemaVersion: 1,
+          profileId: profile.id,
+          profileVersionId: version.id,
+          versionNumber: version.versionNumber,
+          digest: version.digest,
+          config: version.config,
+        },
+        schedulerVersion: `postgres-list-${index}`,
+      });
+      created.push(response.run);
+    }
+
+    const firstPage = await repository.listScheduleRuns({
+      status: "feasible",
+      page: 1,
+      pageSize: 1,
+    });
+    const secondPage = await repository.listScheduleRuns({
+      status: "feasible",
+      page: 2,
+      pageSize: 1,
+    });
+    assert.equal(firstPage.total, 2);
+    assert.equal(firstPage.pageCount, 2);
+    assert.equal(secondPage.runs.length, 1);
+    const expectedFeasible = created
+      .filter((run) => run.status === "feasible")
+      .sort((left, right) => (
+        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+      ))
+      .map((run) => run.id);
+    assert.deepEqual(
+      [...firstPage.runs, ...secondPage.runs].map((run) => run.id),
+      expectedFeasible,
+    );
+
+    await repository.recordAuditEvent(
+      "postgres.trace.created",
+      "schedule_run",
+      created[0].id,
+      { traceId: "postgres-trace-list" },
+      "operator",
+    );
+    await repository.recordAuditEvent(
+      "postgres.trace.created",
+      "schedule_run",
+      created[1].id,
+      { traceId: "postgres-trace-other" },
+      "admin",
+    );
+    const auditPage = await repository.listAuditEvents({
+      action: "postgres.trace.created",
+      traceId: "postgres-trace-list",
+      page: 1,
+      pageSize: 1,
+    });
+    assert.equal(auditPage.total, 1);
+    assert.equal(auditPage.events[0].entityId, created[0].id);
+    assert.deepEqual((await repository.listAuditEvents({
+      action: "postgres.trace.created",
+      page: 9,
+      pageSize: 20,
+    })).events, []);
+
+    await repository.close();
+    client = null;
+  });
+
+  it("persists current audience scopes, self-service audits, and restart reads", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+
+    const run = (await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+    })).json();
+    await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${run.run.id}/publish`,
+      headers: adminHeaders,
+    });
+
+    const teacherAudience = await app.inject({
+      method: "GET",
+      url: "/api/me/audience",
+      headers: testAuthHeaders.teacher,
+    });
+    assert.equal(teacherAudience.statusCode, 200);
+    assert.equal(teacherAudience.json().teacher.id, "t-zhang");
+
+    const teacherMutation = await app.inject({
+      method: "PATCH",
+      url: "/api/me/teacher-unavailable-slots",
+      headers: testAuthHeaders.teacher,
+      payload: { unavailable_slot_ids: ["s-001", "s-004"] },
+    });
+    assert.equal(teacherMutation.statusCode, 200);
+    assert.deepEqual(teacherMutation.json().teacher.unavailable_slot_ids, ["s-001", "s-004"]);
+
+    const [audit] = await dbClient.db.select().from(auditEvents)
+      .where(eq(auditEvents.action, "teacher.unavailable_slots_updated"));
+    assert.equal(audit.actor, "teacher");
+    assert.equal(audit.actorUserId, "user-teacher");
+    assert.deepEqual(audit.actorRoles, ["teacher"]);
+
+    const anonymousPreview = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/teachers/t-zhang",
+    });
+    assert.equal(anonymousPreview.statusCode, 401);
+
+    await app.close();
+    client = null;
+
+    client = createDbClient(testDatabaseUrl);
+    const restartedRepository = new PostgresPlatformRepository(client);
+    const restartedApp = createApp({
+      repository: restartedRepository,
+      scheduler: new PostgresDraftScheduler(),
+    });
+    const restartedTeacherSchedule = await restartedApp.inject({
+      method: "GET",
+      url: "/api/me/published-schedule",
+      headers: testAuthHeaders.teacher,
+    });
+    assert.equal(restartedTeacherSchedule.statusCode, 200);
+    assert.equal(restartedTeacherSchedule.json().kind, "teacher");
+    assert.ok(restartedTeacherSchedule.json().assignments.length > 0);
+
+    const restartedStudentSchedule = await restartedApp.inject({
+      method: "GET",
+      url: "/api/me/published-schedule",
+      headers: testAuthHeaders.student,
+    });
+    assert.equal(restartedStudentSchedule.statusCode, 200);
+    assert.equal(restartedStudentSchedule.json().kind, "student");
+    assert.deepEqual(
+      restartedStudentSchedule.json().audience.studentGroups.map((group: { id: string }) => group.id),
+      ["g-cs-2301"],
+    );
+
+    await restartedApp.close();
+    client = null;
+  });
+
   it("builds scheduler reference data from association tables", async () => {
     const dbClient = requireClient();
     const repository = new PostgresPlatformRepository(dbClient);
@@ -321,6 +503,7 @@ describe("PostgreSQL platform integration", () => {
     const teacherScheduleResponse = await app.inject({
       method: "GET",
       url: "/api/published-schedule/teachers/t-zhang",
+      headers: operatorHeaders,
     });
     assert.equal(teacherScheduleResponse.statusCode, 200);
     assert.ok(teacherScheduleResponse.json().assignments.some(
@@ -422,6 +605,7 @@ describe("PostgreSQL platform integration", () => {
     const teacherScheduleResponse = await app.inject({
       method: "GET",
       url: `/api/published-schedule/teachers/${teacherRow.id}`,
+      headers: operatorHeaders,
     });
     assert.equal(teacherScheduleResponse.statusCode, 200);
     assert.equal(teacherScheduleResponse.json().assignments.some(
@@ -699,6 +883,10 @@ describe("PostgreSQL platform integration", () => {
       batchId: referenceData.batch.id,
       idempotencyKey: "postgres-idempotent-job",
       requestDigest: "a".repeat(64),
+      requestSnapshot: {
+        version: 1 as const,
+        input: referenceData.scheduleInput,
+      },
       traceId: "trace-postgres-idempotent-job",
     };
     const [first, second] = await Promise.all([
@@ -716,19 +904,83 @@ describe("PostgreSQL platform integration", () => {
     const pendingOutbox = await dbClient.db.select().from(outboxEvents);
     assert.equal(pendingOutbox.length, 1);
     assert.equal(pendingOutbox[0].publishedAt, null);
+    assert.equal(typeof pendingOutbox[0].payload.sequence, "number");
 
-    const running = await repository.transitionScheduleJob(job.id, {
-      to: "running",
-      progress: 50,
+    const [createdRow] = await dbClient.db
+      .select()
+      .from(scheduleJobs)
+      .where(eq(scheduleJobs.id, job.id));
+    assert.equal(createdRow.requestVersion, 2);
+    assert.ok("version" in createdRow.requestPayload);
+    assert.equal(createdRow.requestPayload.version, 2);
+    assert.deepEqual(createdRow.requestPayload.input, command.requestSnapshot.input);
+    assert.equal(
+      createdRow.requestPayload.version === 2
+        ? createdRow.requestPayload.constraintProfile.profileVersionId
+        : null,
+      "constraint-profile-default-v1",
+    );
+    assert.equal(createdRow.constraintProfileVersionId, "constraint-profile-default-v1");
+    assert.equal(createdRow.constraintProfileSnapshot.schemaVersion, 1);
+    assert.deepEqual(
+      createdRow.constraintProfileSnapshot.config,
+      referenceData.scheduleInput.constraint_profile,
+    );
+
+    const claims = await Promise.all([
+      repository.claimScheduleJob(job.id),
+      repository.claimScheduleJob(job.id),
+    ]);
+    assert.deepEqual(
+      claims.map((claim) => claim.resolution).sort(),
+      ["claimed", "not_claimable"],
+    );
+    const firstClaim = claims.find((claim) => claim.resolution === "claimed");
+    assert.ok(firstClaim && firstClaim.resolution === "claimed");
+    assert.equal(firstClaim.job.status, "running");
+    assert.equal(firstClaim.requestSnapshot.version, 2);
+    assert.deepEqual(firstClaim.requestSnapshot.input, command.requestSnapshot.input);
+    assert.equal(firstClaim.attempt.status, "started");
+    assert.equal(firstClaim.attempt.schedulerRequestId, `${job.traceId}:attempt:1`);
+
+    const retryAt = "2026-07-13T08:00:01.000Z";
+    const retry = await repository.failScheduleJobAttempt(job.id, {
+      attemptId: firstClaim.attempt.id,
+      error: {
+        category: "unavailable",
+        code: "scheduler_unavailable",
+        message: "Scheduler service is unavailable.",
+        retryable: true,
+      },
+      outcome: "retry",
+      retryAt,
     });
-    assert.equal(running.resolution, "apply");
-    assert.equal(running.job?.status, "running");
-    assert.equal((await dbClient.db.select().from(scheduleJobAttempts)).length, 1);
+    assert.equal(retry.resolution, "apply");
+    assert.equal(retry.job?.status, "queued");
+    const retryOutbox = (await dbClient.db.select().from(outboxEvents))
+      .find((event) => event.eventType === "schedule_job.retry_scheduled");
+    assert.equal(retryOutbox?.availableAt.toISOString(), retryAt);
+
+    const secondClaim = await repository.claimScheduleJob(job.id);
+    assert.equal(secondClaim.resolution, "claimed");
+    assert.ok(secondClaim.resolution === "claimed");
+    assert.equal(secondClaim.attempt.attemptNumber, 2);
 
     const result = buildScheduleResult(referenceData.scheduleInput);
+    const staleCompletion = await repository.completeScheduleJob(job.id, {
+      attemptId: firstClaim.attempt.id,
+      result,
+    });
+    assert.equal(staleCompletion.resolution, "stale_attempt");
     const [firstCompletion, duplicateCompletion] = await Promise.all([
-      repository.completeScheduleJob(job.id, result),
-      repository.completeScheduleJob(job.id, result),
+      repository.completeScheduleJob(job.id, {
+        attemptId: secondClaim.attempt.id,
+        result,
+      }),
+      repository.completeScheduleJob(job.id, {
+        attemptId: secondClaim.attempt.id,
+        result,
+      }),
     ]);
     assert.deepEqual(
       [firstCompletion.resolution, duplicateCompletion.resolution].sort(),
@@ -736,12 +988,513 @@ describe("PostgreSQL platform integration", () => {
     );
     assert.equal(firstCompletion.job?.runId, duplicateCompletion.job?.runId);
     assert.equal((await dbClient.db.select().from(scheduleRuns)).length, 1);
+    const [completedRun] = await dbClient.db
+      .select()
+      .from(scheduleRuns)
+      .where(eq(scheduleRuns.id, firstCompletion.job?.runId ?? ""));
+    assert.equal(completedRun.constraintProfileVersionId, createdRow.constraintProfileVersionId);
+    assert.deepEqual(
+      completedRun.constraintProfileSnapshot,
+      createdRow.constraintProfileSnapshot,
+    );
+    assert.equal(completedRun.schedulerVersion, "unknown");
+    assert.equal(completedRun.scoringContractVersion, result.score.scoring_contract_version);
+    assert.equal(completedRun.normalizedScore, result.score.normalized_score);
+    const attempts = await dbClient.db
+      .select()
+      .from(scheduleJobAttempts)
+      .orderBy(asc(scheduleJobAttempts.attemptNumber));
+    assert.deepEqual(attempts.map((attempt) => attempt.status), ["failed", "succeeded"]);
+    assert.ok(attempts.every(
+      (attempt) => attempt.durationMs !== null && attempt.durationMs >= 0,
+    ));
 
     const [jobRow] = await dbClient.db.select().from(scheduleJobs).where(eq(scheduleJobs.id, job.id));
     assert.equal(jobRow.runId, firstCompletion.job?.runId);
 
     const jobList = await repository.listScheduleJobs();
     assert.deepEqual(jobList.jobs.map((item) => item.id), [job.id]);
+    const detail = await repository.getScheduleJobDetail(job.id);
+    assert.ok(detail);
+    assert.equal(detail.job.attemptCount, 2);
+    assert.deepEqual(detail.attempts.map((attempt) => attempt.status), ["failed", "succeeded"]);
+    assert.deepEqual(detail.events.map((event) => event.type), [
+      "schedule_job.queued",
+      "schedule_job.attempt_started",
+      "schedule_job.running",
+      "schedule_job.retry_scheduled",
+      "schedule_job.attempt_started",
+      "schedule_job.running",
+      "schedule_job.run_created",
+      "schedule_job.succeeded",
+    ]);
+    assert.ok(detail.events.every((event, index) => (
+      index === 0 || event.sequence > detail.events[index - 1].sequence
+    )));
+
+    await repository.close();
+    client = null;
+  });
+
+  it("filters and paginates schedule jobs in PostgreSQL with stable metadata", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+    const created = [];
+    for (const [index, headers] of [operatorHeaders, adminHeaders, operatorHeaders].entries()) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/schedule-jobs",
+        headers: { ...headers, "idempotency-key": `postgres-filters-${index}` },
+      });
+      assert.equal(response.statusCode, 202);
+      created.push(response.json().job);
+    }
+    assert.equal((await app.inject({
+      method: "POST",
+      url: `/api/schedule-jobs/${created[0].id}/cancel`,
+      headers: operatorHeaders,
+    })).statusCode, 200);
+
+    const firstPage = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs?page=1&pageSize=2",
+      headers: operatorHeaders,
+    });
+    const secondPage = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs?page=2&pageSize=2",
+      headers: operatorHeaders,
+    });
+    assert.equal(firstPage.statusCode, 200);
+    assert.equal(firstPage.json().total, 3);
+    assert.equal(firstPage.json().pageCount, 2);
+    assert.equal(secondPage.json().jobs.length, 1);
+    const expectedIds = created
+      .slice()
+      .sort((left, right) => (
+        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+      ))
+      .map((job) => job.id);
+    assert.deepEqual([
+      ...firstPage.json().jobs,
+      ...secondPage.json().jobs,
+    ].map((job) => job.id), expectedIds);
+
+    const adminOnly = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs?submittedBy=admin",
+      headers: operatorHeaders,
+    });
+    assert.equal(adminOnly.json().total, 1);
+    assert.equal(adminOnly.json().jobs[0].submittedBy, "admin");
+
+    const cancelledOnly = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs?status=cancelled",
+      headers: operatorHeaders,
+    });
+    assert.equal(cancelledOnly.json().total, 1);
+    assert.equal(cancelledOnly.json().jobs[0].id, created[0].id);
+
+    const bounded = new URLSearchParams({
+      from: created[0].createdAt,
+      to: created.at(-1).createdAt,
+      constraintProfileVersionId: created[0].constraintProfileVersionId,
+    });
+    const boundedResponse = await app.inject({
+      method: "GET",
+      url: `/api/schedule-jobs?${bounded}`,
+      headers: operatorHeaders,
+    });
+    assert.equal(boundedResponse.json().total, 3);
+
+    const emptyPage = await app.inject({
+      method: "GET",
+      url: "/api/schedule-jobs?page=99&pageSize=20",
+      headers: operatorHeaders,
+    });
+    assert.deepEqual(emptyPage.json().jobs, []);
+    assert.equal(emptyPage.json().total, 3);
+    assert.equal(emptyPage.json().page, 99);
+
+    await app.close();
+    client = null;
+  });
+
+  it("persists constraint profile governance with CAS and actor audits", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+
+    const createdResponse = await app.inject({
+      method: "POST",
+      url: "/api/constraint-profiles",
+      headers: adminHeaders,
+      payload: {
+        name: "PostgreSQL governed profile",
+        config: {
+          hard_rules: ["room_capacity", "teacher_time_unique"],
+          soft_weights: { room_utilization: 4 },
+          time_limit_seconds: 12,
+        },
+      },
+    });
+    assert.equal(createdResponse.statusCode, 201);
+    const created = createdResponse.json().profile;
+
+    const versionPayload = {
+      expectedCurrentVersionId: created.currentVersionId,
+      config: {
+        ...created.versions[0].config,
+        time_limit_seconds: 18,
+      },
+    };
+    const concurrentVersions = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: `/api/constraint-profiles/${created.id}/versions`,
+        headers: adminHeaders,
+        payload: versionPayload,
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/constraint-profiles/${created.id}/versions`,
+        headers: adminHeaders,
+        payload: versionPayload,
+      }),
+    ]);
+    assert.deepEqual(
+      concurrentVersions.map((response) => response.statusCode).sort(),
+      [201, 409],
+    );
+
+    const detailResponse = await app.inject({
+      method: "GET",
+      url: `/api/constraint-profiles/${created.id}`,
+      headers: adminHeaders,
+    });
+    assert.equal(detailResponse.statusCode, 200);
+    assert.equal(detailResponse.json().profile.versions.length, 2);
+    assert.equal(detailResponse.json().profile.versions[1].versionNumber, 2);
+
+    const defaultConflict = await app.inject({
+      method: "PATCH",
+      url: "/api/constraint-profiles/constraint-profile-default/status",
+      headers: adminHeaders,
+      payload: { status: "disabled" },
+    });
+    assert.equal(defaultConflict.statusCode, 409);
+
+    const defaultResponse = await app.inject({
+      method: "PUT",
+      url: `/api/constraint-profiles/${created.id}/default`,
+      headers: adminHeaders,
+    });
+    assert.equal(defaultResponse.statusCode, 200);
+    const disableOldDefault = await app.inject({
+      method: "PATCH",
+      url: "/api/constraint-profiles/constraint-profile-default/status",
+      headers: adminHeaders,
+      payload: { status: "disabled" },
+    });
+    assert.equal(disableOldDefault.statusCode, 200);
+
+    const operatorList = await app.inject({
+      method: "GET",
+      url: "/api/constraint-profiles",
+      headers: operatorHeaders,
+    });
+    assert.equal(operatorList.statusCode, 200);
+    assert.ok(operatorList.json().profiles.every((profile: { status: string }) => (
+      profile.status === "active"
+    )));
+
+    const profileAudits = await dbClient.db.select().from(auditEvents)
+      .where(eq(auditEvents.entityId, created.id));
+    assert.deepEqual(
+      profileAudits.map((event) => event.action).sort(),
+      [
+        "constraint_profile.created",
+        "constraint_profile.default_changed",
+        "constraint_profile.version_created",
+      ],
+    );
+    assert.ok(profileAudits.every((event) => event.actorUserId === "user-admin"));
+    assert.ok(profileAudits.every((event) => {
+      const payload = event.payload as Record<string, unknown>;
+      return typeof payload.traceId === "string" && payload.traceId.length > 0;
+    }));
+
+    await app.close();
+    client = null;
+  });
+
+  it("freezes a selected strategy across default changes, disablement, and retries", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const scheduler = new PostgresDraftScheduler();
+    const app = createApp({ repository, scheduler });
+    const referenceData = await repository.getReferenceData();
+
+    const profileResponse = await app.inject({
+      method: "POST",
+      url: "/api/constraint-profiles",
+      headers: adminHeaders,
+      payload: {
+        name: "Frozen selected strategy",
+        config: {
+          ...referenceData.scheduleInput.constraint_profile,
+          soft_weights: {
+            ...referenceData.scheduleInput.constraint_profile.soft_weights,
+            room_utilization: 17,
+          },
+        },
+      },
+    });
+    const profile = profileResponse.json().profile;
+    const selectedVersion = profile.versions[0];
+    const synchronousResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+      payload: { constraintProfileVersionId: selectedVersion.id },
+    });
+    assert.equal(synchronousResponse.statusCode, 201);
+    const synchronousRun = synchronousResponse.json().run;
+    assert.deepEqual(scheduler.lastInput?.constraint_profile, selectedVersion.config);
+    assert.equal(synchronousRun.constraintProfileVersionId, selectedVersion.id);
+    assert.deepEqual(synchronousRun.constraintProfileSnapshot.config, selectedVersion.config);
+    assert.equal(synchronousRun.schedulerVersion, "scheduler-postgres-test");
+    const [synchronousRunRow] = await dbClient.db.select().from(scheduleRuns)
+      .where(eq(scheduleRuns.id, synchronousRun.id));
+    assert.equal(synchronousRunRow.constraintProfileVersionId, selectedVersion.id);
+    assert.deepEqual(synchronousRunRow.constraintProfileSnapshot.config, selectedVersion.config);
+    assert.equal(synchronousRunRow.schedulerVersion, "scheduler-postgres-test");
+
+    const idempotencyKey = "postgres-selected-strategy";
+    const jobResponse = await app.inject({
+      method: "POST",
+      url: "/api/schedule-jobs",
+      headers: { ...operatorHeaders, "idempotency-key": idempotencyKey },
+      payload: { constraintProfileVersionId: selectedVersion.id },
+    });
+    assert.equal(jobResponse.statusCode, 202);
+    const job = jobResponse.json().job;
+
+    assert.equal((await app.inject({
+      method: "PUT",
+      url: `/api/constraint-profiles/${profile.id}/default`,
+      headers: adminHeaders,
+    })).statusCode, 200);
+    assert.equal((await app.inject({
+      method: "PUT",
+      url: "/api/constraint-profiles/constraint-profile-default/default",
+      headers: adminHeaders,
+    })).statusCode, 200);
+    assert.equal((await app.inject({
+      method: "PATCH",
+      url: `/api/constraint-profiles/${profile.id}/status`,
+      headers: adminHeaders,
+      payload: { status: "disabled" },
+    })).statusCode, 200);
+
+    const conflictingSubmission = await app.inject({
+      method: "POST",
+      url: "/api/schedule-jobs",
+      headers: { ...operatorHeaders, "idempotency-key": idempotencyKey },
+      payload: {},
+    });
+    assert.equal(conflictingSubmission.statusCode, 409);
+    assert.equal(conflictingSubmission.json().error, "schedule_job_idempotency_conflict");
+
+    const [jobRow] = await dbClient.db.select().from(scheduleJobs)
+      .where(eq(scheduleJobs.id, job.id));
+    assert.equal(jobRow.requestVersion, 2);
+    assert.equal(jobRow.constraintProfileVersionId, selectedVersion.id);
+    assert.equal(jobRow.constraintProfileSnapshot.schemaVersion, 1);
+    assert.deepEqual(jobRow.constraintProfileSnapshot.config, selectedVersion.config);
+    assert.ok("version" in jobRow.requestPayload);
+    assert.equal(jobRow.requestPayload.version, 2);
+    assert.deepEqual(jobRow.requestPayload.input.constraint_profile, selectedVersion.config);
+
+    const claim = await repository.claimScheduleJob(job.id);
+    assert.equal(claim.resolution, "claimed");
+    assert.ok(claim.resolution === "claimed");
+    assert.equal(claim.requestSnapshot.version, 2);
+    assert.deepEqual(claim.requestSnapshot.input.constraint_profile, selectedVersion.config);
+    const result = buildScheduleResult({
+      ...referenceData.scheduleInput,
+      constraint_profile: selectedVersion.config,
+    });
+    const completion = await repository.completeScheduleJob(job.id, {
+      attemptId: claim.attempt.id,
+      result,
+      schedulerVersion: "0.1.0-test",
+    });
+    assert.equal(completion.resolution, "apply");
+    const [runRow] = await dbClient.db.select().from(scheduleRuns)
+      .where(eq(scheduleRuns.id, completion.job?.runId ?? ""));
+    assert.equal(runRow.constraintProfileVersionId, selectedVersion.id);
+    assert.deepEqual(runRow.constraintProfileSnapshot, jobRow.constraintProfileSnapshot);
+    assert.equal(runRow.schedulerVersion, "0.1.0-test");
+    assert.equal(runRow.scoringContractVersion, result.score.scoring_contract_version);
+    assert.equal(runRow.normalizedScore, result.score.normalized_score);
+
+    await app.close();
+    client = null;
+  });
+
+  it("reclaims a stalled running job only for a newer delivery attempt", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const referenceData = await repository.getReferenceData();
+    const created = await repository.createScheduleJob({
+      batchId: referenceData.batch.id,
+      idempotencyKey: "postgres-stalled-job-reclaim",
+      requestDigest: "c".repeat(64),
+      requestSnapshot: {
+        version: 1,
+        input: referenceData.scheduleInput,
+      },
+      traceId: "trace-postgres-stalled-job-reclaim",
+    });
+
+    const first = await repository.claimScheduleJob(created.job.id, {
+      deliveryAttempt: 1,
+      reclaimRunning: true,
+    });
+    assert.equal(first.resolution, "claimed");
+
+    const duplicate = await repository.claimScheduleJob(created.job.id, {
+      deliveryAttempt: 1,
+      reclaimRunning: true,
+    });
+    assert.equal(duplicate.resolution, "not_claimable");
+
+    const reclaimResults = await Promise.all([
+      repository.claimScheduleJob(created.job.id, {
+        deliveryAttempt: 2,
+        reclaimRunning: true,
+      }),
+      repository.claimScheduleJob(created.job.id, {
+        deliveryAttempt: 2,
+        reclaimRunning: true,
+      }),
+    ]);
+    assert.deepEqual(
+      reclaimResults.map((result) => result.resolution).sort(),
+      ["claimed", "not_claimable"],
+    );
+    const reclaimed = reclaimResults.find((result) => result.resolution === "claimed");
+    assert.ok(reclaimed?.resolution === "claimed");
+    assert.equal(reclaimed.attempt.attemptNumber, 2);
+
+    const attempts = await dbClient.db
+      .select()
+      .from(scheduleJobAttempts)
+      .orderBy(asc(scheduleJobAttempts.attemptNumber));
+    assert.deepEqual(attempts.map((attempt) => attempt.status), ["failed", "started"]);
+    assert.equal(attempts[0]?.error?.code, "worker_delivery_reclaimed");
+    assert.equal(attempts[0]?.error?.retryable, true);
+    const retryEvents = (await dbClient.db.select().from(scheduleJobEvents))
+      .filter((event) => event.eventType === "schedule_job.retry_scheduled");
+    assert.equal(retryEvents.length, 1);
+
+    await repository.close();
+    client = null;
+  });
+
+  it("serializes queued and running cancellation requests", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const referenceData = await repository.getReferenceData();
+    const createJob = (suffix: string) => repository.createScheduleJob({
+      batchId: referenceData.batch.id,
+      idempotencyKey: `postgres-cancel-${suffix}`,
+      requestDigest: suffix.repeat(64).slice(0, 64),
+      requestSnapshot: { version: 1 as const, input: referenceData.scheduleInput },
+      traceId: `trace-postgres-cancel-${suffix}`,
+    });
+    const queued = await createJob("q");
+    const running = await createJob("r");
+    await repository.claimScheduleJob(running.job.id, { deliveryAttempt: 1 });
+
+    const queuedResults = await Promise.all([
+      repository.requestScheduleJobCancellation(queued.job.id),
+      repository.requestScheduleJobCancellation(queued.job.id),
+    ]);
+    assert.deepEqual(
+      queuedResults.map((result) => result.resolution).sort(),
+      ["cancelled", "idempotent"],
+    );
+    assert.equal(queuedResults[0]?.job?.status, "cancelled");
+
+    const runningResults = await Promise.all([
+      repository.requestScheduleJobCancellation(running.job.id),
+      repository.requestScheduleJobCancellation(running.job.id),
+    ]);
+    assert.deepEqual(
+      runningResults.map((result) => result.resolution).sort(),
+      ["idempotent", "requested"],
+    );
+    assert.equal(runningResults[0]?.job?.status, "running");
+    assert.equal(await repository.isScheduleJobCancellationRequested(running.job.id), true);
+
+    const events = await dbClient.db.select().from(scheduleJobEvents);
+    assert.equal(events.filter((event) => (
+      event.jobId === queued.job.id && event.eventType === "schedule_job.cancelled"
+    )).length, 1);
+    assert.equal(events.filter((event) => (
+      event.jobId === running.job.id && event.eventType === "schedule_job.cancellation_requested"
+    )).length, 1);
+
+    await repository.close();
+    client = null;
+  });
+
+  it("replays ordered job events and validates event cursors", async () => {
+    const repository = new PostgresPlatformRepository(requireClient());
+    const referenceData = await repository.getReferenceData();
+    const createJob = (suffix: string) => repository.createScheduleJob({
+      batchId: referenceData.batch.id,
+      idempotencyKey: `postgres-events-${suffix}`,
+      requestDigest: suffix.repeat(64).slice(0, 64),
+      requestSnapshot: { version: 1 as const, input: referenceData.scheduleInput },
+      traceId: `trace-postgres-events-${suffix}`,
+    });
+    const firstJob = await createJob("f");
+    await repository.claimScheduleJob(firstJob.job.id, { deliveryAttempt: 1 });
+    const secondJob = await createJob("s");
+
+    const history = await repository.listScheduleJobEvents(firstJob.job.id);
+    assert.deepEqual(history.map((event) => event.type), [
+      "schedule_job.queued",
+      "schedule_job.attempt_started",
+      "schedule_job.running",
+    ]);
+    assert.ok(history.every((event, index) => (
+      index === 0 || event.sequence > history[index - 1].sequence
+    )));
+    assert.deepEqual(
+      await repository.resolveScheduleJobEventCursor(firstJob.job.id, history[0].eventId),
+      { resolution: "valid", sequence: history[0].sequence },
+    );
+    assert.deepEqual(
+      await repository.listScheduleJobEvents(firstJob.job.id, {
+        afterSequence: history[0].sequence,
+      }),
+      history.slice(1),
+    );
+    const [secondJobEvent] = await repository.listScheduleJobEvents(secondJob.job.id);
+    assert.deepEqual(
+      await repository.resolveScheduleJobEventCursor(firstJob.job.id, secondJobEvent.eventId),
+      { resolution: "wrong_job", sequence: null },
+    );
+    assert.deepEqual(
+      await repository.resolveScheduleJobEventCursor(firstJob.job.id, "event-missing"),
+      { resolution: "unknown", sequence: null },
+    );
 
     await repository.close();
     client = null;
@@ -755,6 +1508,10 @@ describe("PostgreSQL platform integration", () => {
       batchId: referenceData.batch.id,
       idempotencyKey: "postgres-terminal-race",
       requestDigest: "b".repeat(64),
+      requestSnapshot: {
+        version: 1,
+        input: referenceData.scheduleInput,
+      },
       traceId: "trace-postgres-terminal-race",
     });
     await repository.transitionScheduleJob(created.job.id, { to: "running", progress: 35 });
@@ -909,6 +1666,11 @@ function buildIncompleteScheduleResult(input: ScheduleInput): ScheduleResult {
       total_score: 0,
       hard_violation_count: 1,
       soft_penalty_items: [],
+      scoring_contract_version: 1,
+      normalized_score: 0,
+      total_raw_penalty: 0,
+      total_weighted_penalty: 0,
+      normalized_penalty_items: [],
     },
     statistics: {
       status: "infeasible",
@@ -918,6 +1680,7 @@ function buildIncompleteScheduleResult(input: ScheduleInput): ScheduleResult {
       slot_count: input.time_slots.length,
       attempted_assignments: 0,
     },
+    diagnostics: [],
     report: {
       summary: {
         status: "infeasible",

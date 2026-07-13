@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Any
 
 from .conflicts import detect_assignment_conflicts
+from .diagnostics import build_diagnostics
 from .models import (
     ConstraintProfile,
     Course,
@@ -174,8 +175,14 @@ def solve_with_report(schedule_input: ScheduleInput) -> dict[str, Any]:
             total_score=0 if all_conflicts else result.score.total_score,
             hard_violation_count=len(all_conflicts),
             soft_penalty_items=result.score.soft_penalty_items,
+            scoring_contract_version=result.score.scoring_contract_version,
+            normalized_score=0.0 if all_conflicts else result.score.normalized_score,
+            total_raw_penalty=result.score.total_raw_penalty,
+            total_weighted_penalty=result.score.total_weighted_penalty,
+            normalized_penalty_items=result.score.normalized_penalty_items,
         ),
         statistics=result.statistics,
+        diagnostics=build_diagnostics(schedule_input, all_conflicts),
     )
     report = build_schedule_report(schedule_input, result_with_score)
     return {
@@ -183,6 +190,7 @@ def solve_with_report(schedule_input: ScheduleInput) -> dict[str, Any]:
         "conflicts": result_with_score.conflicts,
         "score": result_with_score.score,
         "statistics": result_with_score.statistics,
+        "diagnostics": result_with_score.diagnostics,
         "report": report,
     }
 

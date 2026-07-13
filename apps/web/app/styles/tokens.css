@@ -1,0 +1,22 @@
+:root {
+  --paper: #f3f5f4;
+  --panel: #ffffff;
+  --surface: #ffffff;
+  --surface-subtle: #edf1ef;
+  --surface-selected: #e5f1ef;
+  --ink: #1d2522;
+  --muted: #626d68;
+  --line: #d4dbd7;
+  --line-strong: #aab5b0;
+  --rail: #202825;
+  --rail-text: #f5f7f6;
+  --teal: #0f766e;
+  --copper: #a34b08;
+  --rose: #be123c;
+  --green: #15803d;
+  --focus: #087ca7;
+  --accent: var(--teal);
+  --accent-soft: var(--surface-selected);
+  --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  --shadow-soft: 0 3px 10px rgba(15, 23, 42, 0.06);
+}

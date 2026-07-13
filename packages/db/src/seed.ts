@@ -1,5 +1,6 @@
 import { demoBatch, demoScheduleInput } from "@examforge/shared";
 import { pathToFileURL } from "node:url";
+import { eq } from "drizzle-orm";
 import { createDbClient, type ExamForgeDbClient } from "./client.js";
 import {
   courses,
@@ -12,6 +13,9 @@ import {
   teacherUnavailableSlots,
   teachers,
   timeSlots,
+  users,
+  userStudentGroupScopes,
+  userTeacherScopes,
 } from "./schema.js";
 
 const departmentNames: Record<string, string> = {
@@ -148,6 +152,28 @@ export async function seedDemoData(client: ExamForgeDbClient): Promise<void> {
         .insert(teacherUnavailableSlots)
         .values(teacherUnavailableSlotRows)
         .onConflictDoNothing();
+    }
+
+    const teacherUsers = await tx.select({ id: users.id })
+      .from(users)
+      .where(eq(users.username, "teacher"))
+      .limit(1);
+    if (teacherUsers[0]) {
+      await tx.insert(userTeacherScopes).values({
+        userId: teacherUsers[0].id,
+        teacherId: "t-zhang",
+      }).onConflictDoNothing();
+    }
+
+    const studentUsers = await tx.select({ id: users.id })
+      .from(users)
+      .where(eq(users.username, "student"))
+      .limit(1);
+    if (studentUsers[0]) {
+      await tx.insert(userStudentGroupScopes).values({
+        userId: studentUsers[0].id,
+        studentGroupId: "g-cs-2301",
+      }).onConflictDoNothing();
     }
   });
 }

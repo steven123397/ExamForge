@@ -1,5 +1,7 @@
 import {
   ClipboardList,
+  LayoutGrid,
+  List,
   Lock,
   RefreshCw,
   RotateCcw,
@@ -58,6 +60,10 @@ export function DraftWorkspace({
   onRescheduleDraft,
   onPublishDraft,
   onDiscardDraft,
+  view = "matrix",
+  conflict = "all",
+  onViewChange = () => undefined,
+  onConflictChange = () => undefined,
 }: {
   drafts: ScheduleDraftSummary[];
   runs: ScheduleRunSummary[];
@@ -87,6 +93,10 @@ export function DraftWorkspace({
   onRescheduleDraft(): Promise<void>;
   onPublishDraft(): Promise<void>;
   onDiscardDraft(): Promise<void>;
+  view?: "matrix" | "list";
+  conflict?: "all" | "conflicted";
+  onViewChange?(view: "matrix" | "list"): void;
+  onConflictChange?(conflict: "all" | "conflicted"): void;
 }) {
   const [sourceRunId, setSourceRunId] = useState("");
   const [confirmation, setConfirmation] = useState<"publish" | "discard" | null>(null);
@@ -260,12 +270,47 @@ export function DraftWorkspace({
           </div>
         </div>
 
+        <div className="draft-view-controls">
+          <div className="segmented-control" aria-label="草稿视图">
+            <button
+              type="button"
+              className={view === "matrix" ? "active" : ""}
+              title="矩阵视图"
+              aria-label="矩阵视图"
+              aria-pressed={view === "matrix"}
+              onClick={() => onViewChange("matrix")}
+            >
+              <LayoutGrid size={16} />
+            </button>
+            <button
+              type="button"
+              className={view === "list" ? "active" : ""}
+              title="列表视图"
+              aria-label="列表视图"
+              aria-pressed={view === "list"}
+              onClick={() => onViewChange("list")}
+            >
+              <List size={16} />
+            </button>
+          </div>
+          <label className="checkbox-control">
+            <input
+              type="checkbox"
+              checked={conflict === "conflicted"}
+              onChange={(event) => onConflictChange(event.target.checked ? "conflicted" : "all")}
+            />
+            <span>仅看冲突</span>
+          </label>
+        </div>
+
         <DraftMatrix
           scheduleInput={scheduleInput}
           draft={draft}
           selectedAssignmentId={selectedAssignmentId}
           draftLocked={draftLocked}
           lookups={lookups}
+          view={view}
+          conflict={conflict}
           onSelectAssignment={onSelectAssignment}
           onMoveAssignment={onMoveAssignment}
         />

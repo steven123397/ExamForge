@@ -71,6 +71,42 @@ export const constraintProfileSchema = z.object({
   time_limit_seconds: z.number().int().positive(),
 });
 
+const sha256DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+
+export const constraintProfileVersionSchema = z.object({
+  id: z.string().min(1),
+  profileId: z.string().min(1),
+  versionNumber: z.number().int().positive(),
+  schemaVersion: z.literal(1),
+  digest: sha256DigestSchema,
+  config: constraintProfileSchema,
+  createdByUserId: z.string().min(1).nullable(),
+  createdAt: z.string().datetime(),
+}).strict();
+
+export const constraintProfileStatusSchema = z.enum(["active", "disabled"]);
+
+export const constraintProfileRecordSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  status: constraintProfileStatusSchema,
+  ownerUserId: z.string().min(1).nullable(),
+  currentVersionId: z.string().min(1),
+  isDefault: z.boolean(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  versions: z.array(constraintProfileVersionSchema).min(1),
+}).strict();
+
+export const constraintProfileSnapshotSchema = z.object({
+  schemaVersion: z.literal(1),
+  profileId: z.string().min(1),
+  profileVersionId: z.string().min(1),
+  versionNumber: z.number().int().positive(),
+  digest: sha256DigestSchema,
+  config: constraintProfileSchema,
+}).strict();
+
 export const fixedAssignmentSchema = z.object({
   exam_task_id: z.string(),
   room_id: z.string(),
@@ -150,11 +186,57 @@ export const softPenaltyItemSchema = z.object({
   message: z.string(),
 });
 
+export const normalizedPenaltyItemSchema = z.object({
+  rule: z.string().min(1),
+  violation_count: z.number().int().nonnegative(),
+  weight: z.number().int().positive(),
+  raw_penalty: z.number().int().nonnegative(),
+  weighted_penalty: z.number().int().nonnegative(),
+  opportunity_count: z.number().int().nonnegative(),
+  normalized_penalty: z.number().min(0).max(1),
+}).strict();
+
 export const scoreBreakdownSchema = z.object({
   total_score: z.number().int().nonnegative(),
   hard_violation_count: z.number().int().nonnegative(),
   soft_penalty_items: z.array(softPenaltyItemSchema),
+  scoring_contract_version: z.literal(1).default(1),
+  normalized_score: z.number().min(0).max(100).default(100),
+  total_raw_penalty: z.number().int().nonnegative().default(0),
+  total_weighted_penalty: z.number().int().nonnegative().default(0),
+  normalized_penalty_items: z.array(normalizedPenaltyItemSchema).default([]),
 });
+
+export const scheduleDiagnosticCodeSchema = z.enum([
+  "room_capacity_shortage",
+  "time_slot_shortage",
+  "teacher_shortage",
+  "fixed_assignment_conflict",
+  "student_group_slot_conflict",
+  "invalid_reference",
+  "solver_infeasible",
+  "unclassified_conflict",
+]);
+
+export const scheduleDiagnosticResourceSchema = z.enum([
+  "room",
+  "time_slot",
+  "teacher",
+  "fixed_assignment",
+  "student_group",
+  "input",
+  "solver",
+]);
+
+export const scheduleDiagnosticSchema = z.object({
+  code: scheduleDiagnosticCodeSchema,
+  severity: conflictSeveritySchema,
+  resource_dimension: scheduleDiagnosticResourceSchema,
+  affected_ids: z.array(z.string()),
+  shortfall: z.number().int().nonnegative(),
+  message: z.string(),
+  suggestion: z.string(),
+}).strict();
 
 export const solverStatisticsSchema = z.object({
   status: solveStatusSchema,
@@ -179,6 +261,7 @@ export const scheduleResultSchema = z.object({
   conflicts: z.array(conflictRecordSchema),
   score: scoreBreakdownSchema,
   statistics: solverStatisticsSchema,
+  diagnostics: z.array(scheduleDiagnosticSchema).default([]),
   report: scheduleReportSchema.optional(),
 });
 
@@ -216,13 +299,19 @@ export type Room = z.infer<typeof roomSchema>;
 export type TimeSlot = z.infer<typeof timeSlotSchema>;
 export type ExamTask = z.infer<typeof examTaskSchema>;
 export type ConstraintProfile = z.infer<typeof constraintProfileSchema>;
+export type ConstraintProfileVersion = z.infer<typeof constraintProfileVersionSchema>;
+export type ConstraintProfileSnapshot = z.infer<typeof constraintProfileSnapshotSchema>;
+export type ConstraintProfileStatus = z.infer<typeof constraintProfileStatusSchema>;
+export type ConstraintProfileRecord = z.infer<typeof constraintProfileRecordSchema>;
 export type FixedAssignment = z.infer<typeof fixedAssignmentSchema>;
 export type RescheduleContext = z.infer<typeof rescheduleContextSchema>;
 export type ScheduleInput = z.infer<typeof scheduleInputSchema>;
 export type ScheduledExam = z.infer<typeof scheduledExamSchema>;
 export type ConflictRecord = z.infer<typeof conflictRecordSchema>;
 export type SoftPenaltyItem = z.infer<typeof softPenaltyItemSchema>;
+export type NormalizedPenaltyItem = z.infer<typeof normalizedPenaltyItemSchema>;
 export type ScoreBreakdown = z.infer<typeof scoreBreakdownSchema>;
+export type ScheduleDiagnostic = z.infer<typeof scheduleDiagnosticSchema>;
 export type SolverStatistics = z.infer<typeof solverStatisticsSchema>;
 export type ScheduleResult = z.infer<typeof scheduleResultSchema>;
 export type RescheduleReport = z.infer<typeof rescheduleReportSchema>;
@@ -235,13 +324,15 @@ export type ReferenceRecord =
   | TimeSlot
   | ExamTask;
 
-export interface ExamBatchSummary {
-  id: string;
-  name: string;
-  status: "draft" | "ready" | "scheduled" | "published";
-  startDate: string;
-  endDate: string;
-}
+export const examBatchSummarySchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  status: z.enum(["draft", "ready", "scheduled", "published"]),
+  startDate: z.string().min(1),
+  endDate: z.string().min(1),
+}).strict();
+
+export type ExamBatchSummary = z.infer<typeof examBatchSummarySchema>;
 
 export interface DashboardResponse {
   batch: ExamBatchSummary;
@@ -256,15 +347,22 @@ export interface DashboardResponse {
   latestRun: ScheduleRunSummary | null;
 }
 
-export interface ScheduleRunSummary {
-  id: string;
-  status: SolveStatus;
-  createdAt: string;
-  elapsedMs: number;
-  score: number;
-  conflictCount: number;
-  assignmentCount: number;
-}
+export const scheduleRunSummarySchema = z.object({
+  id: z.string().min(1),
+  status: solveStatusSchema,
+  createdAt: z.string().datetime(),
+  elapsedMs: z.number().int().nonnegative(),
+  score: z.number(),
+  normalizedScore: z.number().min(0).max(100).nullable().optional(),
+  conflictCount: z.number().int().nonnegative(),
+  assignmentCount: z.number().int().nonnegative(),
+  constraintProfileVersionId: z.string().min(1).nullable().optional(),
+  constraintProfileSnapshot: constraintProfileSnapshotSchema.nullable().optional(),
+  schedulerVersion: z.string().min(1).optional(),
+  scoringContractVersion: z.number().int().nonnegative().optional(),
+}).strict();
+
+export type ScheduleRunSummary = z.infer<typeof scheduleRunSummarySchema>;
 
 export interface ReferenceDataResponse {
   batch: ExamBatchSummary;
@@ -291,8 +389,20 @@ export interface ScheduleDraftRescheduleResponse extends ScheduleRunResponse {
   reschedule: RescheduleReport;
 }
 
+export const scheduleRunListQuerySchema = z.object({
+  status: solveStatusSchema.optional(),
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+}).strict();
+
+export type ScheduleRunListQuery = z.infer<typeof scheduleRunListQuerySchema>;
+
 export interface ScheduleRunListResponse {
   runs: ScheduleRunSummary[];
+  page: number;
+  pageSize: number;
+  total: number;
+  pageCount: number;
 }
 
 export interface AuditEventSummary {
@@ -309,12 +419,43 @@ export interface AuditEventSummary {
 
 export interface AuditEventListResponse {
   events: AuditEventSummary[];
+  page: number;
+  pageSize: number;
+  total: number;
+  pageCount: number;
 }
 
-export interface AuditEventFilter {
+export const auditEventListQuerySchema = z.object({
+  actor: z.string().trim().min(1).max(100).optional(),
+  action: z.string().trim().min(1).max(200).optional(),
+  entityType: z.string().trim().min(1).max(100).optional(),
+  entityId: z.string().trim().min(1).max(200).optional(),
+  traceId: z.string().trim().min(1).max(200).optional(),
+  from: z.string().datetime({ offset: true }).optional(),
+  to: z.string().datetime({ offset: true }).optional(),
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+}).strict().superRefine((query, context) => {
+  if (query.from && query.to && Date.parse(query.from) > Date.parse(query.to)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["to"],
+      message: "to must be greater than or equal to from",
+    });
+  }
+});
+
+export type AuditEventListQuery = z.infer<typeof auditEventListQuerySchema>;
+
+export interface AuditEventFilter extends Partial<AuditEventListQuery> {
   entityType?: string;
   entityId?: string;
   actor?: string;
+  action?: string;
+  traceId?: string;
+  from?: string;
+  to?: string;
+  // Compatibility aliases for internal callers while public routes use from/to pagination.
   since?: string;
   until?: string;
   limit?: number;
@@ -448,11 +589,31 @@ export const scheduleJobStatuses = [
 
 export const scheduleJobStatusSchema = z.enum(scheduleJobStatuses);
 export type ScheduleJobStatus = z.infer<typeof scheduleJobStatusSchema>;
+
+export const scheduleJobListQuerySchema = z.object({
+  status: scheduleJobStatusSchema.optional(),
+  submittedBy: z.string().trim().min(1).max(100).optional(),
+  constraintProfileVersionId: z.string().trim().min(1).max(200).optional(),
+  from: z.string().datetime({ offset: true }).optional(),
+  to: z.string().datetime({ offset: true }).optional(),
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+}).strict().superRefine((query, context) => {
+  if (query.from && query.to && Date.parse(query.from) > Date.parse(query.to)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["to"],
+      message: "to must be greater than or equal to from",
+    });
+  }
+});
+
+export type ScheduleJobListQuery = z.infer<typeof scheduleJobListQuerySchema>;
 export type ScheduleJobTransitionResolution = "apply" | "idempotent" | "reject";
 
 const scheduleJobTransitions: Readonly<Record<ScheduleJobStatus, readonly ScheduleJobStatus[]>> = {
   queued: ["running", "failed", "cancelled", "timed_out"],
-  running: ["succeeded", "failed", "cancelled", "timed_out"],
+  running: ["queued", "succeeded", "failed", "cancelled", "timed_out"],
   succeeded: [],
   failed: [],
   cancelled: [],
@@ -492,6 +653,54 @@ export const scheduleJobErrorSchema = z.object({
   retryable: z.boolean(),
 }).strict();
 
+export const legacyScheduleJobRequestSnapshotSchema = z.object({
+  version: z.literal(1),
+  input: scheduleInputSchema,
+}).strict();
+
+export const scheduleJobRequestSnapshotSchema = z.discriminatedUnion("version", [
+  legacyScheduleJobRequestSnapshotSchema,
+  z.object({
+    version: z.literal(2),
+    input: scheduleInputSchema,
+    constraintProfile: constraintProfileSnapshotSchema,
+  }).strict(),
+]);
+
+export const scheduleJobAttemptStatusSchema = z.enum([
+  "started",
+  "succeeded",
+  "failed",
+  "timed_out",
+  "cancelled",
+]);
+
+export const scheduleJobAttemptSchema = z.object({
+  id: z.string().min(1),
+  jobId: z.string().min(1),
+  attemptNumber: z.number().int().positive(),
+  status: scheduleJobAttemptStatusSchema,
+  schedulerRequestId: z.string().min(1),
+  startedAt: z.string().datetime(),
+  finishedAt: z.string().datetime().nullable(),
+  durationMs: z.number().int().nonnegative().nullable(),
+  error: scheduleJobErrorSchema.nullable(),
+}).strict().superRefine((attempt, context) => {
+  const terminal = attempt.status !== "started";
+  if (terminal && (attempt.finishedAt === null || attempt.durationMs === null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "terminal attempts require finishedAt and durationMs",
+    });
+  }
+  if (!terminal && (attempt.finishedAt !== null || attempt.durationMs !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "started attempts cannot have terminal timing",
+    });
+  }
+});
+
 export const scheduleJobRequestIdentitySchema = z.object({
   idempotencyKey: z.string().min(1).max(200),
   requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -505,7 +714,12 @@ export const scheduleJobTimestampsSchema = z.object({
 
 export const scheduleJobEventTypeSchema = z.enum([
   "schedule_job.queued",
+  "schedule_job.attempt_started",
   "schedule_job.running",
+  "schedule_job.stage_changed",
+  "schedule_job.retry_scheduled",
+  "schedule_job.cancellation_requested",
+  "schedule_job.run_created",
   "schedule_job.succeeded",
   "schedule_job.failed",
   "schedule_job.cancelled",
@@ -514,6 +728,7 @@ export const scheduleJobEventTypeSchema = z.enum([
 
 export const scheduleJobEventEnvelopeSchema = z.object({
   eventId: z.string().min(1),
+  sequence: z.number().int().positive(),
   jobId: z.string().min(1),
   type: scheduleJobEventTypeSchema,
   version: z.literal(1),
@@ -523,9 +738,16 @@ export const scheduleJobEventEnvelopeSchema = z.object({
 }).strict();
 
 export type ScheduleJobError = z.infer<typeof scheduleJobErrorSchema>;
+export type ScheduleJobRequestSnapshot = z.infer<typeof scheduleJobRequestSnapshotSchema>;
+export type ScheduleJobAttemptStatus = z.infer<typeof scheduleJobAttemptStatusSchema>;
+export type ScheduleJobAttempt = z.infer<typeof scheduleJobAttemptSchema>;
 export type ScheduleJobRequestIdentity = z.infer<typeof scheduleJobRequestIdentitySchema>;
 export type ScheduleJobTimestamps = z.infer<typeof scheduleJobTimestampsSchema>;
 export type ScheduleJobEventEnvelope = z.infer<typeof scheduleJobEventEnvelopeSchema>;
+
+export function scheduleJobSseEventName(event: ScheduleJobEventEnvelope) {
+  return `${event.type}.v${event.version}` as const;
+}
 
 export interface ScheduleJobSummary {
   id: string;
@@ -534,9 +756,14 @@ export interface ScheduleJobSummary {
   progress: number;
   idempotencyKey: string;
   requestDigest: string;
+  constraintProfileVersionId?: string | null;
+  constraintProfileSnapshot?: ConstraintProfileSnapshot | null;
+  submittedBy?: string;
+  submittedByUserId?: string | null;
   traceId: string;
   runId: string | null;
   error: ScheduleJobError | null;
+  attemptCount?: number;
   cancellationRequestedAt: string | null;
   queuedAt: string;
   startedAt: string | null;
@@ -549,8 +776,17 @@ export interface ScheduleJobResponse {
   job: ScheduleJobSummary;
 }
 
+export interface ScheduleJobDetailResponse extends ScheduleJobResponse {
+  attempts: ScheduleJobAttempt[];
+  events: ScheduleJobEventEnvelope[];
+}
+
 export interface ScheduleJobListResponse {
   jobs: ScheduleJobSummary[];
+  page: number;
+  pageSize: number;
+  total: number;
+  pageCount: number;
 }
 
 export const userRoleSchema = z.enum(["admin", "operator", "teacher", "student"]);
@@ -586,6 +822,56 @@ export type SessionSummary = z.infer<typeof sessionSummarySchema>;
 export type AuthContext = z.infer<typeof authContextSchema>;
 export type LoginRequest = z.infer<typeof loginRequestSchema>;
 
+export const teacherAudienceScopeSchema = z.object({
+  kind: z.literal("teacher"),
+  teacher: teacherSchema,
+}).strict();
+
+const studentAudienceScopeObjectSchema = z.object({
+  kind: z.literal("student"),
+  studentGroups: z.array(studentGroupSchema).min(1),
+}).strict();
+
+function rejectDuplicateStudentGroups(
+  scope: { studentGroups: Array<{ id: string }> },
+  context: z.RefinementCtx,
+) {
+  const ids = new Set<string>();
+  for (const [index, group] of scope.studentGroups.entries()) {
+    if (ids.has(group.id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["studentGroups", index, "id"],
+        message: `duplicate student group ${group.id}`,
+      });
+    }
+    ids.add(group.id);
+  }
+}
+
+export const studentAudienceScopeSchema = studentAudienceScopeObjectSchema.superRefine(
+  rejectDuplicateStudentGroups,
+);
+
+export const audienceScopeSchema = z.discriminatedUnion("kind", [
+  teacherAudienceScopeSchema,
+  studentAudienceScopeObjectSchema,
+]).superRefine((scope, context) => {
+  if (scope.kind === "student") {
+    rejectDuplicateStudentGroups(scope, context);
+  }
+});
+
+export const audienceScopeErrorCodeSchema = z.enum([
+  "audience_scope_missing",
+  "audience_scope_invalid",
+]);
+
+export type TeacherAudienceScope = z.infer<typeof teacherAudienceScopeSchema>;
+export type StudentAudienceScope = z.infer<typeof studentAudienceScopeSchema>;
+export type AudienceScope = z.infer<typeof audienceScopeSchema>;
+export type AudienceScopeErrorCode = z.infer<typeof audienceScopeErrorCodeSchema>;
+
 export interface PublishedScheduleNotification {
   id: string;
   studentGroupId: string;
@@ -604,6 +890,11 @@ export interface TeacherUnavailableSlotsResponse {
   teacher: Teacher;
 }
 
+export interface CurrentTeacherAvailabilityResponse {
+  teacher: Teacher;
+  timeSlots: TimeSlot[];
+}
+
 export interface PublishedScheduleAssignmentView {
   assignment: ScheduledExam;
   examTask: ExamTask | null;
@@ -613,6 +904,39 @@ export interface PublishedScheduleAssignmentView {
   timeSlot: TimeSlot | null;
   teachers: Teacher[];
 }
+
+export const publishedScheduleAssignmentViewSchema = z.object({
+  assignment: scheduledExamSchema,
+  examTask: examTaskSchema.nullable(),
+  course: courseSchema.nullable(),
+  studentGroups: z.array(studentGroupSchema),
+  room: roomSchema.nullable(),
+  timeSlot: timeSlotSchema.nullable(),
+  teachers: z.array(teacherSchema),
+}).strict();
+
+const currentTeacherPublishedScheduleSchema = z.object({
+  kind: z.literal("teacher"),
+  audience: teacherAudienceScopeSchema,
+  batch: examBatchSummarySchema,
+  run: scheduleRunSummarySchema,
+  assignments: z.array(publishedScheduleAssignmentViewSchema),
+}).strict();
+
+const currentStudentPublishedScheduleSchema = z.object({
+  kind: z.literal("student"),
+  audience: studentAudienceScopeSchema,
+  batch: examBatchSummarySchema,
+  run: scheduleRunSummarySchema,
+  assignments: z.array(publishedScheduleAssignmentViewSchema),
+}).strict();
+
+export const currentPublishedScheduleSchema = z.discriminatedUnion("kind", [
+  currentTeacherPublishedScheduleSchema,
+  currentStudentPublishedScheduleSchema,
+]);
+
+export type CurrentPublishedScheduleResponse = z.infer<typeof currentPublishedScheduleSchema>;
 
 export interface PublishedScheduleAudienceResponse {
   batch: ExamBatchSummary;

@@ -128,10 +128,37 @@ class SoftPenaltyItem:
 
 
 @dataclass(frozen=True)
+class NormalizedPenaltyItem:
+    rule: str
+    violation_count: int
+    weight: int
+    raw_penalty: int
+    weighted_penalty: int
+    opportunity_count: int
+    normalized_penalty: float
+
+
+@dataclass(frozen=True)
 class ScoreBreakdown:
     total_score: int
     hard_violation_count: int
     soft_penalty_items: tuple[SoftPenaltyItem, ...] = ()
+    scoring_contract_version: int = 1
+    normalized_score: float = 100.0
+    total_raw_penalty: int = 0
+    total_weighted_penalty: int = 0
+    normalized_penalty_items: tuple[NormalizedPenaltyItem, ...] = ()
+
+
+@dataclass(frozen=True)
+class ScheduleDiagnostic:
+    code: str
+    severity: ConflictSeverity
+    resource_dimension: str
+    affected_ids: tuple[str, ...]
+    shortfall: int
+    message: str
+    suggestion: str
 
 
 @dataclass(frozen=True)
@@ -163,6 +190,7 @@ class ScheduleResult:
     conflicts: tuple[ConflictRecord, ...]
     score: ScoreBreakdown
     statistics: SolverStatistics
+    diagnostics: tuple[ScheduleDiagnostic, ...] = ()
 
 
 def validate_schedule_input(schedule_input: ScheduleInput) -> tuple[str, ...]:

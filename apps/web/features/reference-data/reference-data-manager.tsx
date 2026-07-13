@@ -17,43 +17,55 @@ import {
 
 export function ReferenceDataManager({
   referenceData,
+  resource,
+  selectedId,
+  onResourceChange,
+  onSelectedIdChange,
+  canDelete,
   onRefresh,
   onError,
 }: {
   referenceData: ReferenceDataResponse | null;
+  resource: EditableResource;
+  selectedId: string | null;
+  onResourceChange(resource: EditableResource): void;
+  onSelectedIdChange(id: string | null): void;
+  canDelete: boolean;
   onRefresh(): Promise<void>;
   onError(message: string | null): void;
 }) {
-  const [resource, setResource] = useState<EditableResource>("courses");
-  const [mode, setMode] = useState<"create" | "edit">("edit");
+  const [mode, setMode] = useState<"create" | "edit">(selectedId ? "edit" : "create");
   const [form, setForm] = useState<FormState>(referenceForms.courses.defaults);
   const [importText, setImportText] = useState(() => sampleImportText("courses"));
   const [saving, setSaving] = useState(false);
   const [deleteConfirmationOpen, setDeleteConfirmationOpen] = useState(false);
   const config = referenceForms[resource];
   const records = getEditableRecords(referenceData, resource);
-  const selectedId = form.id;
 
   useEffect(() => {
     const nextRecords = getEditableRecords(referenceData, resource);
-    const first = nextRecords[0];
-    setMode(first ? "edit" : "create");
-    setForm(first ? recordToForm(resource, first) : referenceForms[resource].defaults);
+    const selected = selectedId
+      ? nextRecords.find((record) => record.id === selectedId)
+      : null;
+    setMode(selected ? "edit" : "create");
+    setForm(selected ? recordToForm(resource, selected) : referenceForms[resource].defaults);
     setImportText(sampleImportText(resource));
-  }, [referenceData, resource]);
+  }, [referenceData, resource, selectedId]);
 
   function selectResource(nextResource: EditableResource) {
-    setResource(nextResource);
+    onResourceChange(nextResource);
   }
 
   function selectRecord(record: ReferenceRecord) {
     setMode("edit");
     setForm(recordToForm(resource, record));
+    onSelectedIdChange(record.id);
   }
 
   function createDraft() {
     setMode("create");
     setForm(referenceForms[resource].defaults);
+    onSelectedIdChange(null);
   }
 
   async function saveRecord() {
@@ -66,6 +78,7 @@ export function ReferenceDataManager({
         : await apiClient.updateReferenceRecord(resource, form.id, omitId(payload));
       setMode("edit");
       setForm(recordToForm(resource, result.record));
+      onSelectedIdChange(result.record.id);
       await onRefresh();
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : "基础数据保存失败");
@@ -82,6 +95,7 @@ export function ReferenceDataManager({
     onError(null);
     try {
       await apiClient.deleteReferenceRecord(resource, form.id);
+      onSelectedIdChange(null);
       await onRefresh();
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : "基础数据删除失败");
@@ -151,14 +165,16 @@ export function ReferenceDataManager({
               {saving ? <Check size={16} /> : <Save size={16} />}
               {saving ? "保存中" : "保存"}
             </button>
-            <button
-              type="button"
-              className="danger-button"
-              onClick={() => setDeleteConfirmationOpen(true)}
-              disabled={saving || mode !== "edit"}
-            >
-              删除
-            </button>
+            {canDelete ? (
+              <button
+                type="button"
+                className="danger-button"
+                onClick={() => setDeleteConfirmationOpen(true)}
+                disabled={saving || mode !== "edit"}
+              >
+                删除
+              </button>
+            ) : null}
           </div>
 
           <div className="form-grid">
@@ -195,7 +211,7 @@ export function ReferenceDataManager({
           spellCheck={false}
         />
       </div>
-      {deleteConfirmationOpen && mode === "edit" && form.id ? (
+      {canDelete && deleteConfirmationOpen && mode === "edit" && form.id ? (
         <ConfirmationDialog
           title="确认删除基础数据"
           target={form.id}

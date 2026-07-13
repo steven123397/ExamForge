@@ -11,31 +11,38 @@ describe("audit service", () => {
       entityType: "schedule_run",
       entityId: "run-1",
       actor: "system",
-      since: "2026-07-07T00:00:00.000Z",
-      until: "2026-07-08T00:00:00.000Z",
+      action: "schedule_run.created",
+      traceId: "trace-1",
+      from: "2026-07-07T00:00:00.000Z",
+      to: "2026-07-08T00:00:00.000Z",
+      page: "2",
+      pageSize: "10",
     });
 
     assert.deepEqual(filter, {
       entityType: "schedule_run",
       entityId: "run-1",
       actor: "system",
-      since: "2026-07-07T00:00:00.000Z",
-      until: "2026-07-08T00:00:00.000Z",
-      limit: 50,
+      action: "schedule_run.created",
+      traceId: "trace-1",
+      from: "2026-07-07T00:00:00.000Z",
+      to: "2026-07-08T00:00:00.000Z",
+      page: 2,
+      pageSize: 10,
     });
   });
 
   it("rejects invalid audit filter dates", () => {
     assert.throws(
-      () => parseAuditEventFilter({ since: "not-a-date" }),
+      () => parseAuditEventFilter({ from: "not-a-date" }),
       AuditFilterValidationError,
     );
     assert.throws(
       () => parseAuditEventFilter({
-        since: "2026-07-08T00:00:00.000Z",
-        until: "2026-07-07T00:00:00.000Z",
+        from: "2026-07-08T00:00:00.000Z",
+        to: "2026-07-07T00:00:00.000Z",
       }),
-      /since must be earlier than until/,
+      /greater than or equal to from/,
     );
   });
 });

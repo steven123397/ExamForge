@@ -42,5 +42,29 @@ export default defineConfig({
         viewport: { width: 1600, height: 1000 },
       },
     },
+    {
+      name: "chromium-compact",
+      testMatch: /visual-accessibility\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1280, height: 800 },
+      },
+    },
+    {
+      name: "chromium-tablet",
+      testMatch: /visual-accessibility\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 768, height: 1024 },
+      },
+    },
+    {
+      name: "chromium-mobile",
+      testMatch: /visual-accessibility\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 375, height: 812 },
+      },
+    },
   ],
 });

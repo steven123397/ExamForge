@@ -226,3 +226,43 @@
 - 审查处置：CR-008 已移入已解决索引并记录服务化、合同、镜像和进程间证据；CR-007 仍保持暂缓，不能用同步 HTTP 服务替代可靠队列或实时事件结论。
 - 范围边界：未引入 Redis/BullMQ、Outbox Publisher、独立 Worker、可靠重试、SSE/WebSocket、完整任务中心或前端页面级重构；作业仍由 API 进程内执行器领取，Web 仍轮询。HTTP 取消只中止调用方等待，不宣称可强制终止已进入 OR-Tools 的线程。
 - 后续影响：下一阶段按 `docs/plan/第五版第三阶段计划.md` 实施可靠任务与实时事件；腾讯云私有试部署必须在用户单独授权后进行，不自动开始第三阶段。
+
+## 2026-07-13 第五版第三阶段：可靠任务与实时事件
+
+- 原计划：`docs/plan/第五版第三阶段计划.md`。
+- 完成提交：未提交；按仓库规则保留当前工作树，不自动提交或推送。
+- 完成内容：新增可靠作业迁移、严格事件序列、请求快照、attempt 和 outbox 投递元数据；抽取 `packages/scheduling-application` 统一幂等提交与执行状态机；API 改为事务提交，独立 Publisher 通过 `FOR UPDATE SKIP LOCKED` 投递 BullMQ，独立 Worker 调用 FastAPI scheduler，并以数据库 CAS、稳定 job ID 和唯一约束治理重复投递、重试、取消、超时、stalled 回收与迟到结果。
+- 实时事件：SSE 以 PostgreSQL 历史为准，支持初始补发、`Last-Event-ID`、订阅窗口二次回读、Redis 唤醒、心跳和终态关闭；Web 已移除 1200 ms 主轮询，以 SSE 更新 TanStack Query cache，仅在断线期间执行不低于 5 秒的兜底查询。
+- 部署与故障证据：Compose 新增 AOF、`noeviction` Redis，以及独立非 root Publisher/Worker、健康检查和资源限制。隔离 Compose 从空卷完成 API 重启、SSE 重连、Redis 停止恢复、Publisher 重启、Worker 崩溃回收、scheduler 不可用重试和重复 outbox；各场景最终只生成 1 个运行，Worker 崩溃由第 2 个 attempt 回收，scheduler 不可用前 2 个 attempt 失败后第 3 个成功，重复 outbox 未增加作业 attempt 或运行。
+- 全量验证：`npm run test:ci` 为 `7 passed`；仓库检查、类型检查、OpenAPI 漂移检查和生产构建通过；shared `12 passed`、scheduling application `8 passed`、API `83 passed`、Web `3 passed`、真实 PostgreSQL/Redis Worker `14 passed`、scheduler `93 passed`。13 个迁移从空库首次全部应用且二次应用 0，迁移检查无缺失或不一致，正式迁移无待应用，PostgreSQL 集成测试 `16 passed`；隔离 Compose smoke 全部故障场景通过，Chromium E2E `21 passed`。
+- 审查处置：CR-007 已移入已解决索引；可靠队列、持久化事件、可补发 SSE 和浏览器断线证据齐全。CR-002、CR-003 状态不变。
+- 范围边界：运行中取消仍为协作式尽力语义；未实现完整任务中心、约束策略版本、归一化评分、方案实验室或页面级前端重构。腾讯云私有试部署因未取得目标主机、凭据和维护窗口的单独授权而未执行，本地 Compose 结果不冒充远程结论。
+- 后续影响：下一阶段按 `docs/plan/第五版第四阶段计划.md` 实施任务治理页面、约束策略版本与运行快照、归一化评分和确定性诊断；不自动开始第四阶段。
+
+## 2026-07-13 第五版第四阶段：任务中心与约束策略基础
+
+- 原计划：`docs/plan/第五版第四阶段计划.md`。
+- 完成提交：未提交；按仓库规则保留当前工作树，不自动提交或推送。
+- 完成内容：新增策略身份和不可变版本、启停、CAS 新版本、唯一默认版本、稳定摘要和真实 actor 审计；API 在作业创建事务内解析策略，作业 v2 请求与运行结果冻结同一版本、完整配置和摘要，Worker 不读取可变策略；同步排考和草稿重排也把实际调用策略与 scheduler 元数据传入运行持久化。迁移为旧数据生成显式 legacy 快照，幂等摘要覆盖策略语义。
+- 评分与诊断：shared、Python 和 OpenAPI 固定评分合同 v1，同时保留违反次数、原始/加权惩罚、适用机会数、归一化分项和归一化总分；零机会、舍入和等比例规模样例由跨语言测试锁定。结构化诊断覆盖容量、时段、教师、固定安排、学生群体、引用错误和求解不可行，可行性与发布资格不被数值分数覆盖。
+- 运营体验：现有根路由新增任务中心与策略治理区。任务中心支持状态、提交人、策略、日期筛选、8 条分页，并通过仅管理员/排考员可读的详情接口展示 PostgreSQL 持久化的 attempt 和完整有序事件，不从摘要时间戳伪造重试轨迹；同时保留 SSE 状态、错误解释、取消和运行跳转。策略区支持创建、不可变新版本、启停、默认切换、权重、硬规则与求解时限，禁用和默认切换均要求确认。任务中心按容器宽度切换单/双栏；桌面 1440 x 960 和移动 390 x 844 的页面宽度均为 0 溢出，新增检查器边界断言并经截图复核确认无裁切或重叠。
+- 真实追溯证据：当前预览策略版本 `constraint-profile-ec00ca07-ff86-4885-86a1-9588da90724b-v1` 的摘要为 `3e45d0c6aa33...`；作业 `job-b72d45c2-a9f6-4c3e-8950-a39b13dab167` 与运行 `run-9dffc018-33d0-4f6d-b2d7-aabb28dbd84e` 使用同一版本和摘要，1 个 attempt、5 个事件、1 个运行，scheduler 版本 `0.1.0`。默认策略 v1 摘要为 `39a0920fd0df...`。
+- 故障证据：独立 Compose 从空卷完成 API/SSE 重连、Redis 停止恢复、Publisher 重启、Worker stalled、scheduler 暂停恢复和重复 outbox。当前预览 scheduler 故障作业第 1 个 attempt 为 `unavailable/scheduler_unavailable`，第 2 个成功，共 8 个事件、1 个运行；Worker stalled 由第 2 个 attempt 回收，共 8 个事件、1 个运行；重复 outbox 未增加 attempt 或运行。
+- 全量验证：`npm run test:ci` 为 `7 passed`；仓库检查、类型检查、OpenAPI 漂移检查、生产构建、Compose 配置和 `git diff --check` 通过；shared `15 passed`、scheduling application `11 passed`、API `85 passed`、Web `7 passed`、真实 PostgreSQL/Redis Worker `14 passed`、scheduler `97 passed`。14 个迁移首次全部应用且二次应用 0，迁移测试 `8 passed`、迁移检查无缺失或快照不一致、正式迁移无待应用、PostgreSQL 集成测试 `18 passed`；6 组 Compose 故障演练和 Chromium E2E `22 passed`。
+- 审查处置：本阶段未发现新代码审查问题，也未解决 CR-002、CR-003；问题明细保持 2 项暂缓，无待解决 P0/P1。
+- 范围边界：未实现真实页面路由、教师/学生服务端作用域、多策略批量实验、Pareto 比较、自动策略推荐或第六阶段部署。腾讯云与其他远程服务器未操作，本地证据不替代远程结论。
+- 后续影响：下一阶段按 `docs/plan/第五版第五阶段计划.md` 先补本人作用域，再拆分真实路由、角色工作区、草稿拖拽和视觉/可访问性门禁；不自动开始第五阶段。
+
+## 2026-07-14 第五版第五阶段：前端路由重构与多角色体验
+
+- 原计划：`docs/plan/第五版第五阶段计划.md`。
+- 完成提交：未提交；按仓库规则保留当前工作树，不自动提交或推送。
+- 本人作用域：新增 `0014_user_audience_scopes.sql`、教师单作用域和学生多群体作用域，演示账户通过 seed 建立正式关联。`/api/me/audience`、本人已发布日程和教师本人不可用时段 API 只根据服务端会话解析对象；旧按教师/学生群体 ID 的发布查询不再匿名，管理员/排考员预览与教师/学生本人入口明确分离。
+- 路由与权限：建立全局 AuthProvider、角色路由守卫、运营侧栏和受众顶栏；登录、管理员概览、基础数据、作业、运行、草稿、策略、审计、教师和学生十个路由均可深链刷新。筛选、分页、对比和选中对象进入 URL，匿名深链安全回跳，错误角色为 403，不存在页面或实体为 404，会话失效清理私有 Query cache。
+- 运营工作流：第四阶段任务中心、SSE、持久化 attempt/事件和策略治理合同直接迁入 `/scheduling/jobs`、`/scheduling/policies`，没有复制任务状态机；运行、对比、发布/回滚和审计迁入独立页面。草稿唯一编辑入口使用 dnd-kit pointer/keyboard sensor，同时保留检查器表单等价路径，锁定、终态和建议响应代次继续阻断无效 mutation。
+- 受众工作区：教师本人页展示下一场监考、按日期日程和不可用时段维护；学生本人页只展示所属群体考试，不泄露教师负载、内部冲突或策略事实。scope 缺失、未发布、空日程、会话失效和 API 失败均有稳定状态，375 x 812 视口无页面级横向溢出。
+- 视觉与可访问性：全局样式拆分为 token、布局和表单层，受众页面使用 feature CSS module；补齐跳到主内容、可见焦点、语义列表、图标标签、对比度和 reduced motion。Playwright 固定四种视口并保存 6 张 Linux Chromium 基线；Axe 扫描覆盖登录和关键角色页面，另有 200% 文本、长内容、403、404、依赖失败、键盘拖拽和溢出专项断言。人工复核桌面/移动截图未发现裁切、重叠或不可达操作。
+- 真实故障证据：独立 Compose 从空卷完成四角色登录、本人 scope、作业、SSE、策略、运行、草稿和发布查询。API 重启、Redis 停止恢复和 Publisher 重启均保持 1 个 attempt、5 个事件、1 个运行；Worker 崩溃与 scheduler 暂停均由第 2 个 attempt 恢复，保持 8 个有序事件和 1 个运行；重复 outbox 未增加 attempt、业务事件或运行。
+- 全量验证：`npm run test:ci` 为 `7 passed`；仓库检查、类型检查、OpenAPI 漂移检查、生产构建、Compose 配置和 `git diff --check` 通过；shared `21 passed`、scheduling application `11 passed`、API `91 passed`、Web `21 passed`、真实 PostgreSQL/Redis Worker `14 passed`、scheduler `97 passed`。15 个迁移首次全部应用且二次应用 0，迁移测试 `9 passed`、迁移检查无缺失或不一致、正式迁移无待应用、PostgreSQL 集成测试 `21 passed`；最终 Playwright 共 35 项，为 `32 passed, 3 skipped`。
+- 清理与边界：本轮隔离 Compose 的容器、网络和卷均已删除，用户已有演示栈未修改。`npm audit` 仍有 2 个 PostCSS moderate 公告并继续归入 CR-002；CR-003 状态不变。未操作腾讯云或其他远程服务器，未实现镜像发布、生产 Compose、HTTPS、异机备份、线上监控或回滚。
+- 后续影响：下一阶段按 `docs/plan/第五版第六阶段计划.md` 先处置生产依赖安全，再建立发布物和本地生产门禁；取得目标主机、域名、镜像仓库、凭据和维护窗口授权后，才执行腾讯云正式部署与交付收尾。

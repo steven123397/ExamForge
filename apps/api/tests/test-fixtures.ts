@@ -47,6 +47,8 @@ export async function seedTestAuth(repository: PlatformRepository) {
       ipAddress: "127.0.0.1",
     });
   }
+  await repository.setTeacherAudienceScope("user-teacher", "t-zhang");
+  await repository.addStudentGroupAudienceScope("user-student", "g-cs-2301");
 }
 
 function sessionHeaders(token: string) {
@@ -129,6 +131,11 @@ export function buildCompleteScheduleResult(input: ScheduleInput): ScheduleResul
       total_score: 94,
       hard_violation_count: 0,
       soft_penalty_items: [],
+      scoring_contract_version: 1,
+      normalized_score: 94,
+      total_raw_penalty: 0,
+      total_weighted_penalty: 0,
+      normalized_penalty_items: [],
     },
     statistics: {
       status: "feasible",
@@ -138,6 +145,7 @@ export function buildCompleteScheduleResult(input: ScheduleInput): ScheduleResul
       slot_count: input.time_slots.length,
       attempted_assignments: assignments.length,
     },
+    diagnostics: [],
     report: {
       summary: {
         status: "feasible",

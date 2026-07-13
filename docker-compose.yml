@@ -16,6 +16,23 @@ services:
       timeout: 3s
       retries: 20
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    cpus: ${REDIS_CPUS:-0.5}
+    mem_limit: ${REDIS_MEMORY_LIMIT:-256m}
+    pids_limit: ${REDIS_PIDS_LIMIT:-128}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - examforge-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   migrate:
     image: ${COMPOSE_PROJECT_NAME:-examforge}-api:demo
     pull_policy: never
@@ -59,6 +76,76 @@ services:
       retries: 20
       start_period: 10s
 
+  publisher:
+    image: ${COMPOSE_PROJECT_NAME:-examforge}-worker:demo
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 15s
+    cpus: ${PUBLISHER_CPUS:-0.5}
+    mem_limit: ${PUBLISHER_MEMORY_LIMIT:-384m}
+    pids_limit: ${PUBLISHER_PIDS_LIMIT:-128}
+    environment:
+      WORKER_ROLE: publisher
+      WORKER_CONCURRENCY: 1
+      WORKER_HEALTH_HOST: 0.0.0.0
+      WORKER_HEALTH_PORT: 4010
+      DATABASE_URL: postgres://${POSTGRES_USER:-examforge}:${POSTGRES_PASSWORD:-examforge}@postgres:5432/${POSTGRES_DB:-examforge}
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_BASE_URL: http://scheduler:8000
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-25}
+      OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-500}
+    ports:
+      - "${PUBLISHER_HEALTH_PORT:-4010}:4010"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4010/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  worker:
+    image: ${COMPOSE_PROJECT_NAME:-examforge}-worker:demo
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 15s
+    cpus: ${WORKER_CPUS:-1.0}
+    mem_limit: ${WORKER_MEMORY_LIMIT:-1g}
+    pids_limit: ${WORKER_PIDS_LIMIT:-192}
+    environment:
+      WORKER_ROLE: worker
+      WORKER_CONCURRENCY: 1
+      WORKER_HEALTH_HOST: 0.0.0.0
+      WORKER_HEALTH_PORT: 4010
+      WORKER_CANCELLATION_POLL_INTERVAL_MS: ${WORKER_CANCELLATION_POLL_INTERVAL_MS:-250}
+      WORKER_LOCK_DURATION_MS: ${WORKER_LOCK_DURATION_MS:-30000}
+      WORKER_STALLED_INTERVAL_MS: ${WORKER_STALLED_INTERVAL_MS:-30000}
+      DATABASE_URL: postgres://${POSTGRES_USER:-examforge}:${POSTGRES_PASSWORD:-examforge}@postgres:5432/${POSTGRES_DB:-examforge}
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_BASE_URL: http://scheduler:8000
+      SCHEDULER_HTTP_TIMEOUT_MS: ${SCHEDULER_HTTP_TIMEOUT_MS:-35000}
+    ports:
+      - "${WORKER_HEALTH_PORT:-4011}:4010"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      scheduler:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4010/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
   api:
     image: ${COMPOSE_PROJECT_NAME:-examforge}-api:demo
     build:
@@ -69,6 +156,7 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: 4000
       DATABASE_URL: postgres://${POSTGRES_USER:-examforge}:${POSTGRES_PASSWORD:-examforge}@postgres:5432/${POSTGRES_DB:-examforge}
+      REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SCHEDULER_TRANSPORT: http
       SCHEDULER_BASE_URL: http://scheduler:8000
@@ -85,6 +173,12 @@ services:
       seed:
         condition: service_completed_successfully
       scheduler:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      publisher:
+        condition: service_healthy
+      worker:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
@@ -119,3 +213,5 @@ services:
 volumes:
   examforge-postgres-data:
     name: ${COMPOSE_PROJECT_NAME:-examforge}-demo-postgres-data
+  examforge-redis-data:
+    name: ${COMPOSE_PROJECT_NAME:-examforge}-demo-redis-data

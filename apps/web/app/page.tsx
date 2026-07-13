@@ -1,10 +1,5 @@
-import { ExamForgeQueryClientProvider } from "../lib/query-client-provider";
-import { SessionGate } from "../features/auth/session-gate";
+import { RoleRedirect } from "../features/auth/role-redirect";
 
 export default function Page() {
-  return (
-    <ExamForgeQueryClientProvider>
-      <SessionGate />
-    </ExamForgeQueryClientProvider>
-  );
+  return <RoleRedirect />;
 }

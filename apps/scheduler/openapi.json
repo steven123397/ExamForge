@@ -279,6 +279,58 @@
         "title": "ExamTaskModel",
         "type": "object"
       },
+      "NormalizedPenaltyItemModel": {
+        "additionalProperties": false,
+        "properties": {
+          "normalized_penalty": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Normalized Penalty",
+            "type": "number"
+          },
+          "opportunity_count": {
+            "minimum": 0.0,
+            "title": "Opportunity Count",
+            "type": "integer"
+          },
+          "raw_penalty": {
+            "minimum": 0.0,
+            "title": "Raw Penalty",
+            "type": "integer"
+          },
+          "rule": {
+            "minLength": 1,
+            "title": "Rule",
+            "type": "string"
+          },
+          "violation_count": {
+            "minimum": 0.0,
+            "title": "Violation Count",
+            "type": "integer"
+          },
+          "weight": {
+            "exclusiveMinimum": 0.0,
+            "title": "Weight",
+            "type": "integer"
+          },
+          "weighted_penalty": {
+            "minimum": 0.0,
+            "title": "Weighted Penalty",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rule",
+          "violation_count",
+          "weight",
+          "raw_penalty",
+          "weighted_penalty",
+          "opportunity_count",
+          "normalized_penalty"
+        ],
+        "title": "NormalizedPenaltyItemModel",
+        "type": "object"
+      },
       "RescheduleContextModel": {
         "additionalProperties": false,
         "properties": {
@@ -352,6 +404,77 @@
           "room_type"
         ],
         "title": "RoomModel",
+        "type": "object"
+      },
+      "ScheduleDiagnosticModel": {
+        "additionalProperties": false,
+        "properties": {
+          "affected_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Affected Ids",
+            "type": "array"
+          },
+          "code": {
+            "enum": [
+              "room_capacity_shortage",
+              "time_slot_shortage",
+              "teacher_shortage",
+              "fixed_assignment_conflict",
+              "student_group_slot_conflict",
+              "invalid_reference",
+              "solver_infeasible",
+              "unclassified_conflict"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "resource_dimension": {
+            "enum": [
+              "room",
+              "time_slot",
+              "teacher",
+              "fixed_assignment",
+              "student_group",
+              "input",
+              "solver"
+            ],
+            "title": "Resource Dimension",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "shortfall": {
+            "minimum": 0.0,
+            "title": "Shortfall",
+            "type": "integer"
+          },
+          "suggestion": {
+            "title": "Suggestion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "severity",
+          "resource_dimension",
+          "affected_ids",
+          "shortfall",
+          "message",
+          "suggestion"
+        ],
+        "title": "ScheduleDiagnosticModel",
         "type": "object"
       },
       "ScheduleInputModel": {
@@ -449,6 +572,13 @@
             "title": "Conflicts",
             "type": "array"
           },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduleDiagnosticModel"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
           "report": {
             "anyOf": [
               {
@@ -485,6 +615,26 @@
             "title": "Hard Violation Count",
             "type": "integer"
           },
+          "normalized_penalty_items": {
+            "items": {
+              "$ref": "#/components/schemas/NormalizedPenaltyItemModel"
+            },
+            "title": "Normalized Penalty Items",
+            "type": "array"
+          },
+          "normalized_score": {
+            "default": 100.0,
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Normalized Score",
+            "type": "number"
+          },
+          "scoring_contract_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Scoring Contract Version",
+            "type": "integer"
+          },
           "soft_penalty_items": {
             "items": {
               "$ref": "#/components/schemas/SoftPenaltyItemModel"
@@ -492,9 +642,21 @@
             "title": "Soft Penalty Items",
             "type": "array"
           },
+          "total_raw_penalty": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Total Raw Penalty",
+            "type": "integer"
+          },
           "total_score": {
             "minimum": 0.0,
             "title": "Total Score",
+            "type": "integer"
+          },
+          "total_weighted_penalty": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Total Weighted Penalty",
             "type": "integer"
           }
         },

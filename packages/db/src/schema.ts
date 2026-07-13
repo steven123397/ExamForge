@@ -1,8 +1,10 @@
 import {
+  bigserial,
   boolean,
   index,
   integer,
   jsonb,
+  numeric,
   pgEnum,
   primaryKey,
   pgTable,
@@ -10,7 +12,20 @@ import {
   timestamp,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
-import type { ScoreBreakdown } from "@examforge/shared";
+import { sql } from "drizzle-orm";
+import type {
+  ConstraintProfile,
+  ConstraintProfileSnapshot,
+  ScheduleJobRequestSnapshot,
+  ScoreBreakdown,
+} from "@examforge/shared";
+
+export interface LegacyConstraintProfileSnapshot {
+  schemaVersion: 0;
+  legacy: true;
+  provenance: "migrated_from_batch_constraint_profile";
+  config: ConstraintProfile;
+}
 
 export const batchStatus = pgEnum("batch_status", [
   "draft",
@@ -83,6 +98,41 @@ export const sessions = pgTable("sessions", {
   tokenDigestUnique: uniqueIndex("sessions_token_digest_unique").on(table.tokenDigest),
   userExpiresAtIndex: index("sessions_user_expires_at_idx").on(table.userId, table.expiresAt),
 }));
+
+export const constraintProfiles = pgTable("constraint_profiles", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  status: text("status").$type<"active" | "disabled">().notNull().default("active"),
+  ownerUserId: text("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+  currentVersionId: text("current_version_id").notNull(),
+  isDefault: boolean("is_default").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  oneDefault: uniqueIndex("constraint_profiles_one_default_idx")
+    .on(table.isDefault)
+    .where(sql`${table.isDefault}`),
+}));
+
+export const constraintProfileVersions = pgTable("constraint_profile_versions", {
+  id: text("id").primaryKey(),
+  profileId: text("profile_id").notNull().references(() => constraintProfiles.id, {
+    onDelete: "restrict",
+  }),
+  versionNumber: integer("version_number").notNull(),
+  schemaVersion: integer("schema_version").$type<1>().notNull(),
+  digest: text("digest").notNull(),
+  config: jsonb("config").$type<ConstraintProfile>().notNull(),
+  createdByUserId: text("created_by_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  profileVersionUnique: uniqueIndex("constraint_profile_versions_profile_version_unique").on(
+    table.profileId,
+    table.versionNumber,
+  ),
+}));
 export const scheduleJobStatus = pgEnum("schedule_job_status", [
   "queued",
   "running",
@@ -120,6 +170,23 @@ export const teachers = pgTable("teachers", {
   name: text("name").notNull(),
   departmentId: text("department_id").notNull().references(() => departments.id),
 });
+
+export const userTeacherScopes = pgTable("user_teacher_scopes", {
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  teacherId: text("teacher_id").notNull().references(() => teachers.id, { onDelete: "restrict" }),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.userId] }),
+  teacherUnique: uniqueIndex("user_teacher_scopes_teacher_id_unique").on(table.teacherId),
+}));
+
+export const userStudentGroupScopes = pgTable("user_student_group_scopes", {
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  studentGroupId: text("student_group_id").notNull().references(() => studentGroups.id, {
+    onDelete: "restrict",
+  }),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.userId, table.studentGroupId] }),
+}));
 
 export const courses = pgTable("courses", {
   id: text("id").primaryKey(),
@@ -178,6 +245,20 @@ export const scheduleRuns = pgTable("schedule_runs", {
   elapsedMs: integer("elapsed_ms").notNull(),
   statistics: jsonb("statistics").notNull(),
   report: jsonb("report").notNull(),
+  constraintProfileVersionId: text("constraint_profile_version_id").references(
+    () => constraintProfileVersions.id,
+    { onDelete: "restrict" },
+  ),
+  constraintProfileSnapshot: jsonb("constraint_profile_snapshot")
+    .$type<ConstraintProfileSnapshot | LegacyConstraintProfileSnapshot>()
+    .notNull(),
+  schedulerVersion: text("scheduler_version").notNull(),
+  scoringContractVersion: integer("scoring_contract_version").notNull(),
+  normalizedScore: numeric("normalized_score", {
+    precision: 5,
+    scale: 2,
+    mode: "number",
+  }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -283,6 +364,21 @@ export const scheduleJobs = pgTable("schedule_jobs", {
   progress: integer("progress").notNull(),
   idempotencyKey: text("idempotency_key").notNull(),
   requestDigest: text("request_digest").notNull(),
+  requestVersion: integer("request_version").notNull(),
+  requestPayload: jsonb("request_payload")
+    .$type<ScheduleJobRequestSnapshot | { legacy: true }>()
+    .notNull(),
+  constraintProfileVersionId: text("constraint_profile_version_id").references(
+    () => constraintProfileVersions.id,
+    { onDelete: "restrict" },
+  ),
+  constraintProfileSnapshot: jsonb("constraint_profile_snapshot")
+    .$type<ConstraintProfileSnapshot | LegacyConstraintProfileSnapshot>()
+    .notNull(),
+  submittedBy: text("submitted_by").notNull().default("system"),
+  submittedByUserId: text("submitted_by_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
   traceId: text("trace_id").notNull(),
   runId: text("run_id").references(() => scheduleRuns.id, { onDelete: "set null" }),
   error: text("error"),
@@ -306,8 +402,10 @@ export const scheduleJobAttempts = pgTable("schedule_job_attempts", {
   jobId: text("job_id").notNull().references(() => scheduleJobs.id, { onDelete: "cascade" }),
   attemptNumber: integer("attempt_number").notNull(),
   status: text("status").notNull(),
+  schedulerRequestId: text("scheduler_request_id").notNull(),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
+  durationMs: integer("duration_ms"),
   error: jsonb("error").$type<Record<string, unknown> | null>(),
 }, (table) => ({
   jobAttemptUnique: uniqueIndex("schedule_job_attempts_job_attempt_unique").on(
@@ -318,6 +416,7 @@ export const scheduleJobAttempts = pgTable("schedule_job_attempts", {
 
 export const scheduleJobEvents = pgTable("schedule_job_events", {
   id: text("id").primaryKey(),
+  sequence: bigserial("sequence", { mode: "number" }),
   jobId: text("job_id").notNull().references(() => scheduleJobs.id, { onDelete: "cascade" }),
   eventType: text("event_type").notNull(),
   eventVersion: integer("event_version").notNull().default(1),
@@ -329,6 +428,11 @@ export const scheduleJobEvents = pgTable("schedule_job_events", {
     table.jobId,
     table.occurredAt,
   ),
+  jobSequenceIndex: index("schedule_job_events_job_sequence_idx").on(
+    table.jobId,
+    table.sequence,
+  ),
+  sequenceUnique: uniqueIndex("schedule_job_events_sequence_unique").on(table.sequence),
 }));
 
 export const outboxEvents = pgTable("outbox_events", {

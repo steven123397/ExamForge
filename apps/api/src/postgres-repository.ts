@@ -1,6 +1,8 @@
 import {
   auditEvents,
   conflictRecords,
+  constraintProfiles,
+  constraintProfileVersions,
   createDbSession,
   courses,
   draftChangeEvents,
@@ -10,12 +12,11 @@ import {
   examBatches,
   examTaskStudentGroups,
   examTasks,
-  outboxEvents,
   rooms,
+  resolveDefaultConstraintProfile,
+  resolveConstraintProfile as resolveDbConstraintProfile,
   scheduleDrafts,
-  scheduleJobAttempts,
-  scheduleJobEvents,
-  scheduleJobs,
+  ScheduleJobStore,
   scheduledExamInvigilators,
   scheduledExams,
   scheduleRuns,
@@ -24,16 +25,36 @@ import {
   teacherUnavailableSlots,
   teachers,
   timeSlots,
+  userStudentGroupScopes,
+  userTeacherScopes,
   userRoles,
   users,
   type ExamForgeDbClient,
   type ExamForgeDatabase,
 } from "@examforge/db";
+import type {
+  ClaimScheduleJobCommand,
+  CompleteScheduleJobCommand,
+  FailScheduleJobAttemptCommand,
+  ScheduleJobClaimResult,
+  ScheduleJobExecutionTransitionResult,
+  ScheduleJobCancellationResult,
+  ListScheduleJobEventsOptions,
+  ScheduleJobEventCursorResult,
+  ConstraintProfileMutationContext,
+  CreateConstraintProfilePersistenceCommand,
+  CreateConstraintProfileVersionPersistenceCommand,
+  SetConstraintProfileDefaultPersistenceCommand,
+  SetConstraintProfileStatusPersistenceCommand,
+  ResolvedConstraintProfile,
+} from "@examforge/scheduling-application";
 import {
   type ConstraintProfile,
+  type ConstraintProfileRecord,
   type AuditEventFilter,
   type AuditEventListResponse,
   type AuditEventSummary,
+  type AudienceScope,
   type DashboardResponse,
   type PublishedScheduleResponse,
   type ReferenceDeleteResponse,
@@ -50,8 +71,12 @@ import {
   type ScheduleDraftPublishResponse,
   type ScheduleDraftSummary,
   type ScheduleJobSummary,
-  type ScheduleJobStatus,
+  type ScheduleJobListQuery,
+  type ScheduleJobListResponse,
+  type ScheduleJobDetailResponse,
+  type ScheduleJobEventEnvelope,
   type ScheduleRunComparisonResponse,
+  type ScheduleRunListQuery,
   type ScheduleRunListResponse,
   type ScheduleRollbackResponse,
   type ScheduleResult,
@@ -59,10 +84,8 @@ import {
   type ScheduleRunSummary,
   type ScheduledExam,
   type UserRole,
-  resolveScheduleJobTransition,
-  scheduleJobStatusForSolveResult,
 } from "@examforge/shared";
-import { and, desc, eq, gte, inArray, isNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { getCurrentAuthContext } from "./auth/request-context.js";
 import {
@@ -74,7 +97,6 @@ import {
   validateDraftAssignments,
   validateReferenceDelete,
   validateReferenceRecord,
-  ScheduleJobIdempotencyConflictError,
   type CreateScheduleJobCommand,
   type CreateScheduleJobResult,
   type AuthSessionRecord,
@@ -84,6 +106,7 @@ import {
   type CreateAuthUserCommand,
   type PlatformRepository,
   type PublishScheduleRunResult,
+  type ScheduleRunPersistenceContext,
   type ScheduleJobTransitionResult,
   type TransitionScheduleJobCommand,
 } from "./repository.js";
@@ -101,13 +124,17 @@ type TimeSlotRow = typeof timeSlots.$inferSelect;
 type ExamTaskRow = typeof examTasks.$inferSelect;
 type DraftRow = typeof scheduleDrafts.$inferSelect;
 type DraftChangeEventRow = typeof draftChangeEvents.$inferSelect;
-type ScheduleJobRow = typeof scheduleJobs.$inferSelect;
 type UserRow = typeof users.$inferSelect;
+type ConstraintProfileRow = typeof constraintProfiles.$inferSelect;
+type ConstraintProfileVersionRow = typeof constraintProfileVersions.$inferSelect;
 
 export class PostgresPlatformRepository implements PlatformRepository {
   readonly storageMode = "postgres" as const;
+  private readonly scheduleJobStore: ScheduleJobStore;
 
-  constructor(private readonly client: ExamForgeDbClient) {}
+  constructor(private readonly client: ExamForgeDbClient) {
+    this.scheduleJobStore = new ScheduleJobStore(client);
+  }
 
   async getDashboard(): Promise<DashboardResponse> {
     const referenceData = await this.getReferenceData();
@@ -213,6 +240,229 @@ export class PostgresPlatformRepository implements PlatformRepository {
         reschedule_context: null,
       },
     };
+  }
+
+  async listConstraintProfiles(includeDisabled: boolean): Promise<ConstraintProfileRecord[]> {
+    const profileRows = includeDisabled
+      ? await this.client.db.select().from(constraintProfiles).orderBy(
+        desc(constraintProfiles.isDefault),
+        asc(constraintProfiles.name),
+        asc(constraintProfiles.id),
+      )
+      : await this.client.db.select().from(constraintProfiles)
+        .where(eq(constraintProfiles.status, "active"))
+        .orderBy(
+          desc(constraintProfiles.isDefault),
+          asc(constraintProfiles.name),
+          asc(constraintProfiles.id),
+        );
+    if (profileRows.length === 0) {
+      return [];
+    }
+    const versionRows = await this.client.db.select()
+      .from(constraintProfileVersions)
+      .where(inArray(
+        constraintProfileVersions.profileId,
+        profileRows.map((profile) => profile.id),
+      ))
+      .orderBy(
+        asc(constraintProfileVersions.profileId),
+        asc(constraintProfileVersions.versionNumber),
+      );
+    return profileRows.map((profile) => this.toConstraintProfileRecord(
+      profile,
+      versionRows.filter((version) => version.profileId === profile.id),
+    ));
+  }
+
+  async getConstraintProfile(id: string): Promise<ConstraintProfileRecord | null> {
+    return this.loadConstraintProfile(this.client.db, id);
+  }
+
+  resolveConstraintProfile(versionId?: string): Promise<ResolvedConstraintProfile> {
+    return resolveDbConstraintProfile(this.client.db, versionId);
+  }
+
+  async createConstraintProfile(
+    command: CreateConstraintProfilePersistenceCommand,
+  ): Promise<ConstraintProfileRecord> {
+    return this.client.db.transaction(async (tx) => {
+      const profileId = `constraint-profile-${randomUUID()}`;
+      const versionId = `${profileId}-v1`;
+      const now = new Date();
+      await tx.insert(constraintProfiles).values({
+        id: profileId,
+        name: command.name,
+        status: "active",
+        ownerUserId: command.context.actor.userId,
+        currentVersionId: versionId,
+        isDefault: false,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await tx.insert(constraintProfileVersions).values({
+        id: versionId,
+        profileId,
+        versionNumber: 1,
+        schemaVersion: 1,
+        digest: command.digest,
+        config: command.config,
+        createdByUserId: command.context.actor.userId,
+        createdAt: now,
+      });
+      await this.insertConstraintProfileAudit(tx, command.context, {
+        action: "constraint_profile.created",
+        profileId,
+        payload: {
+          currentVersionId: versionId,
+          digest: command.digest,
+          result: "created",
+        },
+      });
+      const profile = await this.loadConstraintProfile(tx, profileId);
+      if (!profile) {
+        throw new Error("Created constraint profile could not be reloaded.");
+      }
+      return profile;
+    });
+  }
+
+  async createConstraintProfileVersion(
+    command: CreateConstraintProfileVersionPersistenceCommand,
+  ) {
+    return this.client.db.transaction(async (tx) => {
+      const [profile] = await tx.select().from(constraintProfiles)
+        .where(eq(constraintProfiles.id, command.profileId))
+        .limit(1)
+        .for("update");
+      if (!profile) {
+        return { resolution: "not_found" as const };
+      }
+      if (profile.currentVersionId !== command.expectedCurrentVersionId) {
+        return { resolution: "version_conflict" as const };
+      }
+      const [currentVersion] = await tx.select().from(constraintProfileVersions)
+        .where(eq(constraintProfileVersions.id, profile.currentVersionId))
+        .limit(1);
+      if (!currentVersion) {
+        throw new Error(`Constraint profile ${profile.id} has no current version.`);
+      }
+      const versionNumber = currentVersion.versionNumber + 1;
+      const versionId = `${profile.id}-v${versionNumber}-${randomUUID()}`;
+      const now = new Date();
+      await tx.insert(constraintProfileVersions).values({
+        id: versionId,
+        profileId: profile.id,
+        versionNumber,
+        schemaVersion: 1,
+        digest: command.digest,
+        config: command.config,
+        createdByUserId: command.context.actor.userId,
+        createdAt: now,
+      });
+      const [updated] = await tx.update(constraintProfiles).set({
+        currentVersionId: versionId,
+        updatedAt: now,
+      }).where(and(
+        eq(constraintProfiles.id, profile.id),
+        eq(constraintProfiles.currentVersionId, command.expectedCurrentVersionId),
+      )).returning();
+      if (!updated) {
+        return { resolution: "version_conflict" as const };
+      }
+      await this.insertConstraintProfileAudit(tx, command.context, {
+        action: "constraint_profile.version_created",
+        profileId: profile.id,
+        payload: {
+          previousVersionId: profile.currentVersionId,
+          currentVersionId: versionId,
+          versionNumber,
+          digest: command.digest,
+          result: "created",
+        },
+      });
+      const result = await this.loadConstraintProfile(tx, profile.id);
+      if (!result) {
+        throw new Error("Versioned constraint profile could not be reloaded.");
+      }
+      return { resolution: "created" as const, profile: result };
+    });
+  }
+
+  async setConstraintProfileStatus(command: SetConstraintProfileStatusPersistenceCommand) {
+    return this.client.db.transaction(async (tx) => {
+      const [profile] = await tx.select().from(constraintProfiles)
+        .where(eq(constraintProfiles.id, command.profileId))
+        .limit(1)
+        .for("update");
+      if (!profile) {
+        return { resolution: "not_found" as const };
+      }
+      if (profile.isDefault && command.status === "disabled") {
+        return { resolution: "default_cannot_be_disabled" as const };
+      }
+      await tx.update(constraintProfiles).set({
+        status: command.status,
+        updatedAt: new Date(),
+      }).where(eq(constraintProfiles.id, profile.id));
+      await this.insertConstraintProfileAudit(tx, command.context, {
+        action: "constraint_profile.status_changed",
+        profileId: profile.id,
+        payload: {
+          previousStatus: profile.status,
+          status: command.status,
+          result: "updated",
+        },
+      });
+      const result = await this.loadConstraintProfile(tx, profile.id);
+      if (!result) {
+        throw new Error("Updated constraint profile could not be reloaded.");
+      }
+      return { resolution: "updated" as const, profile: result };
+    });
+  }
+
+  async setDefaultConstraintProfile(command: SetConstraintProfileDefaultPersistenceCommand) {
+    return this.client.db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(2026071304)`);
+      const [profile] = await tx.select().from(constraintProfiles)
+        .where(eq(constraintProfiles.id, command.profileId))
+        .limit(1)
+        .for("update");
+      if (!profile) {
+        return { resolution: "not_found" as const };
+      }
+      if (profile.status !== "active") {
+        return { resolution: "inactive" as const };
+      }
+      const [previousDefault] = await tx.select({ id: constraintProfiles.id })
+        .from(constraintProfiles)
+        .where(eq(constraintProfiles.isDefault, true))
+        .limit(1);
+      const now = new Date();
+      await tx.update(constraintProfiles).set({
+        isDefault: false,
+        updatedAt: now,
+      }).where(eq(constraintProfiles.isDefault, true));
+      await tx.update(constraintProfiles).set({
+        isDefault: true,
+        updatedAt: now,
+      }).where(eq(constraintProfiles.id, profile.id));
+      await this.insertConstraintProfileAudit(tx, command.context, {
+        action: "constraint_profile.default_changed",
+        profileId: profile.id,
+        payload: {
+          previousDefaultProfileId: previousDefault?.id ?? null,
+          defaultProfileId: profile.id,
+          result: "updated",
+        },
+      });
+      const result = await this.loadConstraintProfile(tx, profile.id);
+      if (!result) {
+        throw new Error("Default constraint profile could not be reloaded.");
+      }
+      return { resolution: "updated" as const, profile: result };
+    });
   }
 
   async createReferenceRecord(
@@ -348,10 +598,13 @@ export class PostgresPlatformRepository implements PlatformRepository {
       }
       case "teachers": {
         const [row] = await this.client.db.transaction(async (tx) => {
-          const [teacher] = await tx.update(teachers).set(stripUndefined({
+          const scalarPatch = stripUndefined({
             name: data.name as string | undefined,
             departmentId: data.department_id as string | undefined,
-          })).where(eq(teachers.id, id)).returning();
+          });
+          const [teacher] = Object.keys(scalarPatch).length > 0
+            ? await tx.update(teachers).set(scalarPatch).where(eq(teachers.id, id)).returning()
+            : await tx.select().from(teachers).where(eq(teachers.id, id)).limit(1);
           if (teacher && data.unavailable_slot_ids) {
             await tx.delete(teacherUnavailableSlots).where(eq(teacherUnavailableSlots.teacherId, id));
             const unavailableSlotIds = data.unavailable_slot_ids as string[];
@@ -487,9 +740,15 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
-  async createScheduleRun(result: ScheduleResult): Promise<ScheduleRunResponse> {
+  async createScheduleRun(
+    result: ScheduleResult,
+    context?: ScheduleRunPersistenceContext,
+  ): Promise<ScheduleRunResponse> {
     const batch = await this.getActiveBatch();
-    return this.withDatabaseTransaction((db) => this.insertScheduleRun(db, result, batch.id));
+    return this.withDatabaseTransaction(async (db) => {
+      const strategy = context ?? await this.defaultScheduleRunPersistenceContext(db);
+      return this.insertScheduleRun(db, result, batch.id, strategy);
+    });
   }
 
   async getScheduleRun(id: string): Promise<ScheduleRunResponse | null> {
@@ -532,6 +791,10 @@ export class PostgresPlatformRepository implements PlatformRepository {
       "teacherId",
       false,
     );
+    const report = run.report as Record<string, unknown>;
+    const diagnostics = Array.isArray(report.diagnostics)
+      ? report.diagnostics as ScheduleResult["diagnostics"]
+      : [];
 
     return {
       run: this.toRunSummary(run),
@@ -551,20 +814,38 @@ export class PostgresPlatformRepository implements PlatformRepository {
         })),
         score: run.scoreBreakdown,
         statistics: run.statistics as ScheduleResult["statistics"],
-        report: run.report as ScheduleResult["report"],
+        diagnostics,
+        report,
       },
     };
   }
 
-  async listScheduleRuns(): Promise<ScheduleRunListResponse> {
-    const rows = await this.client.db
-      .select()
-      .from(scheduleRuns)
-      .orderBy(desc(scheduleRuns.createdAt))
-      .limit(30);
+  async listScheduleRuns(query: ScheduleRunListQuery = {
+    page: 1,
+    pageSize: 20,
+  }): Promise<ScheduleRunListResponse> {
+    const where = query.status ? eq(scheduleRuns.status, query.status) : undefined;
+    const [rows, totalRows] = await Promise.all([
+      this.client.db
+        .select()
+        .from(scheduleRuns)
+        .where(where)
+        .orderBy(desc(scheduleRuns.createdAt), desc(scheduleRuns.id))
+        .limit(query.pageSize)
+        .offset((query.page - 1) * query.pageSize),
+      this.client.db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(scheduleRuns)
+        .where(where),
+    ]);
+    const total = totalRows[0]?.count ?? 0;
 
     return {
       runs: rows.map((run) => this.toRunSummary(run)),
+      page: query.page,
+      pageSize: query.pageSize,
+      total,
+      pageCount: Math.ceil(total / query.pageSize),
     };
   }
 
@@ -1105,6 +1386,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
 
     const publishedDraft = await this.client.db.transaction(async (tx) => {
+      const strategy = await resolveDefaultConstraintProfile(tx);
       const [claimedDraft] = await tx.update(scheduleDrafts)
         .set({
           status: "published",
@@ -1129,6 +1411,11 @@ export class PostgresPlatformRepository implements PlatformRepository {
         elapsedMs: run.elapsedMs,
         statistics: result.statistics,
         report: result.report ?? {},
+        constraintProfileVersionId: strategy.versionId,
+        constraintProfileSnapshot: strategy.snapshot,
+        schedulerVersion: "0.1.0",
+        scoringContractVersion: result.score.scoring_contract_version,
+        normalizedScore: result.score.normalized_score,
         createdAt,
       });
       if (current.assignments.length > 0) {
@@ -1239,23 +1526,44 @@ export class PostgresPlatformRepository implements PlatformRepository {
   }
 
   async listAuditEvents(filter: AuditEventFilter = {}): Promise<AuditEventListResponse> {
+    const from = filter.from ?? filter.since;
+    const to = filter.to ?? filter.until;
+    const page = filter.page ?? 1;
+    const pageSize = filter.pageSize ?? filter.limit ?? 20;
     const conditions = [
       filter.entityType ? eq(auditEvents.entityType, filter.entityType) : undefined,
       filter.entityId ? eq(auditEvents.entityId, filter.entityId) : undefined,
       filter.actor ? eq(auditEvents.actor, filter.actor) : undefined,
-      filter.since ? gte(auditEvents.createdAt, new Date(filter.since)) : undefined,
-      filter.until ? lte(auditEvents.createdAt, new Date(filter.until)) : undefined,
+      filter.action ? eq(auditEvents.action, filter.action) : undefined,
+      filter.traceId
+        ? sql`${auditEvents.payload} ->> 'traceId' = ${filter.traceId}`
+        : undefined,
+      from ? gte(auditEvents.createdAt, new Date(from)) : undefined,
+      to ? lte(auditEvents.createdAt, new Date(to)) : undefined,
     ].filter((condition) => condition !== undefined);
+    const where = conditions.length > 0 ? and(...conditions) : undefined;
 
-    const rows = await this.client.db
-      .select()
-      .from(auditEvents)
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(auditEvents.createdAt))
-      .limit(filter.limit ?? 50);
+    const [rows, totalRows] = await Promise.all([
+      this.client.db
+        .select()
+        .from(auditEvents)
+        .where(where)
+        .orderBy(desc(auditEvents.createdAt), desc(auditEvents.id))
+        .limit(pageSize)
+        .offset((page - 1) * pageSize),
+      this.client.db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(auditEvents)
+        .where(where),
+    ]);
+    const total = totalRows[0]?.count ?? 0;
 
     return {
       events: rows.map((event) => this.toAuditEvent(event)),
+      page,
+      pageSize,
+      total,
+      pageCount: Math.ceil(total / pageSize),
     };
   }
 
@@ -1331,202 +1639,69 @@ export class PostgresPlatformRepository implements PlatformRepository {
   }
 
   async createScheduleJob(command: CreateScheduleJobCommand): Promise<CreateScheduleJobResult> {
-    const now = new Date();
-    return this.withDatabaseTransaction(async (db) => {
-      const [row] = await db.insert(scheduleJobs).values({
-        id: `job-${randomUUID()}`,
-        batchId: command.batchId,
-        status: "queued",
-        progress: 0,
-        idempotencyKey: command.idempotencyKey,
-        requestDigest: command.requestDigest,
-        traceId: command.traceId,
-        runId: null,
-        error: null,
-        queuedAt: now,
-        createdAt: now,
-        updatedAt: now,
-      }).onConflictDoNothing({ target: scheduleJobs.idempotencyKey }).returning();
-      if (!row) {
-        const [existing] = await db
-          .select()
-          .from(scheduleJobs)
-          .where(eq(scheduleJobs.idempotencyKey, command.idempotencyKey))
-          .limit(1);
-        if (!existing) {
-          throw new Error("Schedule job idempotency conflict did not return an existing job.");
-        }
-        if (existing.requestDigest !== command.requestDigest) {
-          throw new ScheduleJobIdempotencyConflictError(command.idempotencyKey);
-        }
-        return { job: this.toScheduleJob(existing), created: false };
-      }
-      await this.insertScheduleJobEvent(db, row, "schedule_job.queued", {
-        status: row.status,
-      }, now);
-      return { job: this.toScheduleJob(row), created: true };
-    });
+    return this.scheduleJobStore.createScheduleJob(command);
   }
 
-  async listScheduleJobs(): Promise<{ jobs: ScheduleJobSummary[] }> {
-    const rows = await this.client.db
-      .select()
-      .from(scheduleJobs)
-      .orderBy(desc(scheduleJobs.createdAt));
-    return { jobs: rows.map((row) => this.toScheduleJob(row)) };
+  async listScheduleJobs(query?: ScheduleJobListQuery): Promise<ScheduleJobListResponse> {
+    return this.scheduleJobStore.listScheduleJobs(query);
   }
 
   async getScheduleJob(id: string): Promise<ScheduleJobSummary | null> {
-    const [row] = await this.client.db
-      .select()
-      .from(scheduleJobs)
-      .where(eq(scheduleJobs.id, id))
-      .limit(1);
-    return row ? this.toScheduleJob(row) : null;
+    return this.scheduleJobStore.getScheduleJob(id);
+  }
+
+  async getScheduleJobDetail(id: string): Promise<ScheduleJobDetailResponse | null> {
+    return this.scheduleJobStore.getScheduleJobDetail(id);
+  }
+
+  async requestScheduleJobCancellation(id: string): Promise<ScheduleJobCancellationResult> {
+    return this.scheduleJobStore.requestScheduleJobCancellation(id);
+  }
+
+  async isScheduleJobCancellationRequested(id: string): Promise<boolean> {
+    return this.scheduleJobStore.isScheduleJobCancellationRequested(id);
+  }
+
+  async listScheduleJobEvents(
+    jobId: string,
+    options: ListScheduleJobEventsOptions = {},
+  ): Promise<ScheduleJobEventEnvelope[]> {
+    return this.scheduleJobStore.listScheduleJobEvents(jobId, options);
+  }
+
+  async resolveScheduleJobEventCursor(
+    jobId: string,
+    eventId: string,
+  ): Promise<ScheduleJobEventCursorResult> {
+    return this.scheduleJobStore.resolveScheduleJobEventCursor(jobId, eventId);
+  }
+
+  async claimScheduleJob(
+    id: string,
+    command: ClaimScheduleJobCommand = {},
+  ): Promise<ScheduleJobClaimResult> {
+    return this.scheduleJobStore.claimScheduleJob(id, command);
+  }
+
+  async failScheduleJobAttempt(
+    id: string,
+    command: FailScheduleJobAttemptCommand,
+  ): Promise<ScheduleJobExecutionTransitionResult> {
+    return this.scheduleJobStore.failScheduleJobAttempt(id, command);
   }
 
   async transitionScheduleJob(
     id: string,
     command: TransitionScheduleJobCommand,
   ): Promise<ScheduleJobTransitionResult> {
-    return this.withLockedScheduleJob(id, async (db, current) => {
-      const resolution = resolveScheduleJobTransition(current.status, command.to);
-      if (resolution !== "apply") {
-        return { job: this.toScheduleJob(current), resolution };
-      }
-      const now = new Date();
-      const terminal = isTerminalScheduleJobStatus(command.to);
-      const [row] = await db
-        .update(scheduleJobs)
-        .set({
-          status: command.to,
-          progress: command.progress,
-          error: command.error?.message ?? null,
-          errorCategory: command.error?.category ?? null,
-          errorCode: command.error?.code ?? null,
-          errorRetryable: command.error?.retryable ?? null,
-          cancellationRequestedAt: command.to === "cancelled"
-            ? now
-            : current.cancellationRequestedAt,
-          startedAt: command.to === "running" ? now : current.startedAt,
-          finishedAt: terminal ? now : current.finishedAt,
-          updatedAt: now,
-        })
-        .where(eq(scheduleJobs.id, id))
-        .returning();
-      if (command.to === "running") {
-        const attemptResult = await db
-          .select({ attemptNumber: scheduleJobAttempts.attemptNumber })
-          .from(scheduleJobAttempts)
-          .where(eq(scheduleJobAttempts.jobId, id))
-          .orderBy(desc(scheduleJobAttempts.attemptNumber))
-          .limit(1);
-        await db.insert(scheduleJobAttempts).values({
-          id: `attempt-${randomUUID()}`,
-          jobId: id,
-          attemptNumber: (attemptResult[0]?.attemptNumber ?? 0) + 1,
-          status: "running",
-          startedAt: now,
-        });
-      } else if (terminal) {
-        const [attempt] = await db
-          .select()
-          .from(scheduleJobAttempts)
-          .where(eq(scheduleJobAttempts.jobId, id))
-          .orderBy(desc(scheduleJobAttempts.attemptNumber))
-          .limit(1);
-        if (attempt && attempt.finishedAt === null) {
-          await db.update(scheduleJobAttempts).set({
-            status: command.to,
-            finishedAt: now,
-            error: command.error ?? null,
-          }).where(eq(scheduleJobAttempts.id, attempt.id));
-        }
-      }
-      await this.insertScheduleJobEvent(db, row, `schedule_job.${command.to}`, {
-        status: command.to,
-        progress: command.progress,
-        error: command.error ?? null,
-      }, now);
-      return { job: this.toScheduleJob(row), resolution };
-    });
+    return this.scheduleJobStore.transitionScheduleJob(id, command);
   }
 
   async completeScheduleJob(
     id: string,
-    result: ScheduleResult,
-  ): Promise<ScheduleJobTransitionResult> {
-    return this.withLockedScheduleJob(id, async (db, current) => {
-      const status = scheduleJobStatusForSolveResult(result.statistics.status);
-      const resolution = resolveScheduleJobTransition(current.status, status);
-      if (resolution !== "apply") {
-        return { job: this.toScheduleJob(current), resolution };
-      }
-      const response = await this.insertScheduleRun(db, result, current.batchId);
-      const now = new Date();
-      const error = status === "failed" ? {
-        category: "scheduler" as const,
-        code: "scheduler_result_error",
-        message: "Scheduler returned an error result.",
-        retryable: true,
-      } : null;
-      const [row] = await db.update(scheduleJobs).set({
-        status,
-        progress: 100,
-        runId: response.run.id,
-        error: error?.message ?? null,
-        errorCategory: error?.category ?? null,
-        errorCode: error?.code ?? null,
-        errorRetryable: error?.retryable ?? null,
-        finishedAt: now,
-        updatedAt: now,
-      }).where(eq(scheduleJobs.id, id)).returning();
-      const [attempt] = await db
-        .select()
-        .from(scheduleJobAttempts)
-        .where(eq(scheduleJobAttempts.jobId, id))
-        .orderBy(desc(scheduleJobAttempts.attemptNumber))
-        .limit(1);
-      if (attempt && attempt.finishedAt === null) {
-        await db.update(scheduleJobAttempts).set({
-          status,
-          finishedAt: now,
-          error,
-        }).where(eq(scheduleJobAttempts.id, attempt.id));
-      }
-      await this.insertScheduleJobEvent(db, row, `schedule_job.${status}`, {
-        status,
-        runId: response.run.id,
-      }, now);
-      return { job: this.toScheduleJob(row), resolution };
-    });
-  }
-
-  async recoverInterruptedScheduleJobs(): Promise<ScheduleJobSummary[]> {
-    const { jobs } = await this.listScheduleJobs();
-    const recovered: ScheduleJobSummary[] = [];
-    for (const job of jobs) {
-      if (job.status !== "queued" && job.status !== "running") {
-        continue;
-      }
-      const failed = await this.transitionScheduleJob(job.id, {
-        to: "failed",
-        progress: 100,
-        error: {
-          category: "infrastructure",
-          code: "schedule_job_interrupted",
-          message: "Schedule job was interrupted before completion.",
-          retryable: true,
-        },
-      });
-      if (failed.job && failed.resolution === "apply") {
-        recovered.push(failed.job);
-        await this.recordAuditEvent("schedule_job.interrupted", "schedule_job", failed.job.id, {
-          previousStatus: job.status,
-        });
-      }
-    }
-    return recovered;
+    command: CompleteScheduleJobCommand,
+  ): Promise<ScheduleJobExecutionTransitionResult> {
+    return this.scheduleJobStore.completeScheduleJob(id, command);
   }
 
   async createAuthUser(command: CreateAuthUserCommand): Promise<AuthUserRecord> {
@@ -1608,6 +1783,53 @@ export class PostgresPlatformRepository implements PlatformRepository {
       isNull(sessions.revokedAt),
     )).returning({ id: sessions.id });
     return rows.length > 0;
+  }
+
+  async getAudienceScope(userId: string): Promise<AudienceScope | "invalid" | null> {
+    const [teacherScopeRows, studentScopeRows, referenceData] = await Promise.all([
+      this.client.db.select({ teacherId: userTeacherScopes.teacherId })
+        .from(userTeacherScopes)
+        .where(eq(userTeacherScopes.userId, userId)),
+      this.client.db.select({ studentGroupId: userStudentGroupScopes.studentGroupId })
+        .from(userStudentGroupScopes)
+        .where(eq(userStudentGroupScopes.userId, userId))
+        .orderBy(asc(userStudentGroupScopes.studentGroupId)),
+      this.getReferenceData(),
+    ]);
+    if (teacherScopeRows.length > 0 && studentScopeRows.length > 0) {
+      return "invalid";
+    }
+    const teacherId = teacherScopeRows[0]?.teacherId;
+    if (teacherId) {
+      const teacher = referenceData.scheduleInput.teachers.find((item) => item.id === teacherId);
+      return teacher ? { kind: "teacher", teacher } : "invalid";
+    }
+    if (studentScopeRows.length > 0) {
+      const groups = studentScopeRows.map(({ studentGroupId }) => (
+        referenceData.scheduleInput.student_groups.find((item) => item.id === studentGroupId)
+      )).filter((group) => group !== undefined);
+      return groups.length === studentScopeRows.length
+        ? { kind: "student", studentGroups: groups }
+        : "invalid";
+    }
+    return null;
+  }
+
+  async setTeacherAudienceScope(userId: string, teacherId: string): Promise<void> {
+    await this.client.db.transaction(async (tx) => {
+      await tx.delete(userStudentGroupScopes).where(eq(userStudentGroupScopes.userId, userId));
+      await tx.insert(userTeacherScopes).values({ userId, teacherId }).onConflictDoUpdate({
+        target: userTeacherScopes.userId,
+        set: { teacherId },
+      });
+    });
+  }
+
+  async addStudentGroupAudienceScope(userId: string, studentGroupId: string): Promise<void> {
+    await this.client.db.transaction(async (tx) => {
+      await tx.delete(userTeacherScopes).where(eq(userTeacherScopes.userId, userId));
+      await tx.insert(userStudentGroupScopes).values({ userId, studentGroupId }).onConflictDoNothing();
+    });
   }
 
   async close(): Promise<void> {
@@ -1755,8 +1977,15 @@ export class PostgresPlatformRepository implements PlatformRepository {
       createdAt: run.createdAt.toISOString(),
       elapsedMs: run.elapsedMs,
       score: run.score,
+      normalizedScore: run.normalizedScore,
       conflictCount: run.conflictCount,
       assignmentCount: run.assignmentCount,
+      constraintProfileVersionId: run.constraintProfileVersionId,
+      constraintProfileSnapshot: run.constraintProfileSnapshot.schemaVersion === 1
+        ? run.constraintProfileSnapshot
+        : null,
+      schedulerVersion: run.schedulerVersion,
+      scoringContractVersion: run.scoringContractVersion,
     };
   }
 
@@ -1772,6 +2001,76 @@ export class PostgresPlatformRepository implements PlatformRepository {
       payload: event.payload as Record<string, unknown>,
       createdAt: event.createdAt.toISOString(),
     };
+  }
+
+  private async loadConstraintProfile(
+    db: ExamForgeDatabase,
+    id: string,
+  ): Promise<ConstraintProfileRecord | null> {
+    const [profile] = await db.select().from(constraintProfiles)
+      .where(eq(constraintProfiles.id, id))
+      .limit(1);
+    if (!profile) {
+      return null;
+    }
+    const versions = await db.select().from(constraintProfileVersions)
+      .where(eq(constraintProfileVersions.profileId, id))
+      .orderBy(asc(constraintProfileVersions.versionNumber));
+    return this.toConstraintProfileRecord(profile, versions);
+  }
+
+  private toConstraintProfileRecord(
+    profile: ConstraintProfileRow,
+    versions: ConstraintProfileVersionRow[],
+  ): ConstraintProfileRecord {
+    if (versions.length === 0) {
+      throw new Error(`Constraint profile ${profile.id} has no versions.`);
+    }
+    return {
+      id: profile.id,
+      name: profile.name,
+      status: profile.status,
+      ownerUserId: profile.ownerUserId,
+      currentVersionId: profile.currentVersionId,
+      isDefault: profile.isDefault,
+      createdAt: profile.createdAt.toISOString(),
+      updatedAt: profile.updatedAt.toISOString(),
+      versions: versions.map((version) => ({
+        id: version.id,
+        profileId: version.profileId,
+        versionNumber: version.versionNumber,
+        schemaVersion: version.schemaVersion,
+        digest: version.digest,
+        config: version.config,
+        createdByUserId: version.createdByUserId,
+        createdAt: version.createdAt.toISOString(),
+      })),
+    };
+  }
+
+  private async insertConstraintProfileAudit(
+    db: ExamForgeDatabase,
+    context: ConstraintProfileMutationContext,
+    event: {
+      action: string;
+      profileId: string;
+      payload: Record<string, unknown>;
+    },
+  ) {
+    await db.insert(auditEvents).values({
+      id: `audit-${randomUUID()}`,
+      actor: context.actor.username,
+      actorUserId: context.actor.userId,
+      actorRoles: context.actor.roles,
+      action: event.action,
+      entityType: "constraint_profile",
+      entityId: event.profileId,
+      payload: {
+        ...event.payload,
+        traceId: context.traceId,
+        actorUserId: context.actor.userId,
+      },
+    });
   }
 
   private toDraftSummary(draft: DraftRow): ScheduleDraftSummary {
@@ -1822,47 +2121,11 @@ export class PostgresPlatformRepository implements PlatformRepository {
     }
   }
 
-  private async withLockedScheduleJob(
-    id: string,
-    operation: (
-      db: ExamForgeDatabase,
-      current: ScheduleJobRow,
-    ) => Promise<ScheduleJobTransitionResult>,
-  ): Promise<ScheduleJobTransitionResult> {
-    const connection = await this.client.pool.connect();
-    const session = createDbSession(connection);
-    try {
-      await connection.query("BEGIN");
-      const lockResult = await connection.query<{ id: string }>(
-        "SELECT id FROM schedule_jobs WHERE id = $1 FOR UPDATE",
-        [id],
-      );
-      if (lockResult.rowCount === 0) {
-        await connection.query("COMMIT");
-        return { job: null, resolution: "not_found" };
-      }
-      const [current] = await session.db
-        .select()
-        .from(scheduleJobs)
-        .where(eq(scheduleJobs.id, id))
-        .limit(1);
-      const result = await operation(session.db, current);
-      await session.drain();
-      await connection.query("COMMIT");
-      return result;
-    } catch (error) {
-      await session.drain();
-      await connection.query("ROLLBACK");
-      throw error;
-    } finally {
-      connection.release();
-    }
-  }
-
   private async insertScheduleRun(
     db: ExamForgeDatabase,
     result: ScheduleResult,
     batchId: string,
+    context: ScheduleRunPersistenceContext,
   ): Promise<ScheduleRunResponse> {
     const id = `run-${randomUUID()}`;
     const createdAt = new Date();
@@ -1872,8 +2135,13 @@ export class PostgresPlatformRepository implements PlatformRepository {
       createdAt: createdAt.toISOString(),
       elapsedMs: result.statistics.elapsed_ms,
       score: result.score.total_score,
+      normalizedScore: result.score.normalized_score,
       conflictCount: result.conflicts.length,
       assignmentCount: result.assignments.length,
+      constraintProfileVersionId: context.constraintProfileVersionId,
+      constraintProfileSnapshot: context.constraintProfileSnapshot,
+      schedulerVersion: context.schedulerVersion,
+      scoringContractVersion: result.score.scoring_contract_version,
     };
     await db.insert(scheduleRuns).values({
       id,
@@ -1886,6 +2154,11 @@ export class PostgresPlatformRepository implements PlatformRepository {
       elapsedMs: result.statistics.elapsed_ms,
       statistics: result.statistics,
       report: result.report ?? {},
+      constraintProfileVersionId: context.constraintProfileVersionId,
+      constraintProfileSnapshot: context.constraintProfileSnapshot,
+      schedulerVersion: context.schedulerVersion,
+      scoringContractVersion: result.score.scoring_contract_version,
+      normalizedScore: result.score.normalized_score,
       createdAt,
     });
     if (result.assignments.length > 0) {
@@ -1938,43 +2211,15 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return { run, result };
   }
 
-  private async insertScheduleJobEvent(
+  private async defaultScheduleRunPersistenceContext(
     db: ExamForgeDatabase,
-    job: ScheduleJobRow,
-    eventType: string,
-    payload: Record<string, unknown>,
-    occurredAt: Date,
-  ) {
-    const eventId = `event-${randomUUID()}`;
-    const eventVersion = 1;
-    await db.insert(scheduleJobEvents).values({
-      id: eventId,
-      jobId: job.id,
-      eventType,
-      eventVersion,
-      occurredAt,
-      payload,
-      traceId: job.traceId,
-    });
-    await db.insert(outboxEvents).values({
-      id: `outbox-${randomUUID()}`,
-      eventId,
-      aggregateType: "schedule_job",
-      aggregateId: job.id,
-      eventType,
-      eventVersion,
-      payload: {
-        eventId,
-        jobId: job.id,
-        type: eventType,
-        version: eventVersion,
-        occurredAt: occurredAt.toISOString(),
-        payload,
-        traceId: job.traceId,
-      },
-      occurredAt,
-      availableAt: occurredAt,
-    });
+  ): Promise<ScheduleRunPersistenceContext> {
+    const strategy = await resolveDefaultConstraintProfile(db);
+    return {
+      constraintProfileVersionId: strategy.versionId,
+      constraintProfileSnapshot: strategy.snapshot,
+      schedulerVersion: "unknown",
+    };
   }
 
   private async loadAuthUser(user: UserRow): Promise<AuthUserRecord> {
@@ -2010,33 +2255,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
       revokedAt: session.revokedAt?.toISOString() ?? null,
       userAgent: session.userAgent,
       ipAddress: session.ipAddress,
-    };
-  }
-
-  private toScheduleJob(job: ScheduleJobRow): ScheduleJobSummary {
-    return {
-      id: job.id,
-      batchId: job.batchId,
-      status: job.status,
-      progress: job.progress,
-      idempotencyKey: job.idempotencyKey,
-      requestDigest: job.requestDigest,
-      traceId: job.traceId,
-      runId: job.runId,
-      error: job.error && job.errorCategory && job.errorCode && job.errorRetryable !== null
-        ? {
-            category: job.errorCategory as NonNullable<ScheduleJobSummary["error"]>["category"],
-            code: job.errorCode,
-            message: job.error,
-            retryable: job.errorRetryable,
-          }
-        : null,
-      cancellationRequestedAt: job.cancellationRequestedAt?.toISOString() ?? null,
-      queuedAt: job.queuedAt.toISOString(),
-      startedAt: job.startedAt?.toISOString() ?? null,
-      finishedAt: job.finishedAt?.toISOString() ?? null,
-      createdAt: job.createdAt.toISOString(),
-      updatedAt: job.updatedAt.toISOString(),
     };
   }
 
@@ -2082,13 +2300,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
     };
   }
 
-}
-
-function isTerminalScheduleJobStatus(status: ScheduleJobStatus) {
-  return status === "succeeded"
-    || status === "failed"
-    || status === "cancelled"
-    || status === "timed_out";
 }
 
 function groupRelationRows<T, K extends keyof T, V extends keyof T>(

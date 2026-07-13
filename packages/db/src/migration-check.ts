@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createDbClient, type ExamForgeDbClient } from "./client.js";
 import { loadMigrationFiles, migrationStateTableName, runMigrations } from "./migrations.js";
@@ -16,11 +17,15 @@ export const criticalMigrationTables = [
   "schedule_job_attempts",
   "schedule_job_events",
   "outbox_events",
+  "constraint_profiles",
+  "constraint_profile_versions",
   "audit_events",
   "users",
   "roles",
   "user_roles",
   "sessions",
+  "user_teacher_scopes",
+  "user_student_group_scopes",
 ];
 
 const criticalMigrationConstraints = [
@@ -40,9 +45,49 @@ const criticalMigrationConstraints = [
     definition: "UNIQUE (token_digest)",
   },
   {
+    id: "user_teacher_scopes.user_primary_key",
+    tableName: "user_teacher_scopes",
+    constraintName: "user_teacher_scopes_pk",
+  },
+  {
+    id: "user_teacher_scopes.teacher_unique",
+    tableName: "user_teacher_scopes",
+    constraintName: "user_teacher_scopes_teacher_id_unique",
+  },
+  {
+    id: "user_teacher_scopes.user_foreign_key",
+    tableName: "user_teacher_scopes",
+    constraintName: "user_teacher_scopes_user_id_fk",
+  },
+  {
+    id: "user_teacher_scopes.teacher_foreign_key",
+    tableName: "user_teacher_scopes",
+    constraintName: "user_teacher_scopes_teacher_id_fk",
+  },
+  {
+    id: "user_student_group_scopes.primary_key",
+    tableName: "user_student_group_scopes",
+    constraintName: "user_student_group_scopes_pk",
+  },
+  {
+    id: "user_student_group_scopes.user_foreign_key",
+    tableName: "user_student_group_scopes",
+    constraintName: "user_student_group_scopes_user_id_fk",
+  },
+  {
+    id: "user_student_group_scopes.student_group_foreign_key",
+    tableName: "user_student_group_scopes",
+    constraintName: "user_student_group_scopes_student_group_id_fk",
+  },
+  {
     id: "schedule_jobs.idempotency_key_unique",
     tableName: "schedule_jobs",
     definition: "UNIQUE (idempotency_key)",
+  },
+  {
+    id: "schedule_jobs.request_snapshot_check",
+    tableName: "schedule_jobs",
+    constraintName: "schedule_jobs_request_snapshot_check",
   },
   {
     id: "schedule_job_attempts.job_foreign_key",
@@ -50,14 +95,54 @@ const criticalMigrationConstraints = [
     definition: "FOREIGN KEY (job_id) REFERENCES schedule_jobs(id) ON DELETE CASCADE",
   },
   {
+    id: "schedule_job_attempts.status_check",
+    tableName: "schedule_job_attempts",
+    constraintName: "schedule_job_attempts_status_check",
+  },
+  {
     id: "schedule_job_events.job_foreign_key",
     tableName: "schedule_job_events",
     definition: "FOREIGN KEY (job_id) REFERENCES schedule_jobs(id) ON DELETE CASCADE",
   },
   {
+    id: "schedule_job_events.sequence_unique",
+    tableName: "schedule_job_events",
+    constraintName: "schedule_job_events_sequence_unique",
+  },
+  {
     id: "outbox_events.event_foreign_key",
     tableName: "outbox_events",
     definition: "FOREIGN KEY (event_id) REFERENCES schedule_job_events(id) ON DELETE CASCADE",
+  },
+  {
+    id: "constraint_profiles.current_version_foreign_key",
+    tableName: "constraint_profiles",
+    constraintName: "constraint_profiles_current_version_fk",
+  },
+  {
+    id: "constraint_profile_versions.profile_version_unique",
+    tableName: "constraint_profile_versions",
+    constraintName: "constraint_profile_versions_profile_version_unique",
+  },
+  {
+    id: "schedule_jobs.constraint_profile_version_foreign_key",
+    tableName: "schedule_jobs",
+    constraintName: "schedule_jobs_constraint_profile_version_id_fk",
+  },
+  {
+    id: "schedule_jobs.constraint_profile_snapshot_check",
+    tableName: "schedule_jobs",
+    constraintName: "schedule_jobs_constraint_profile_snapshot_check",
+  },
+  {
+    id: "schedule_runs.constraint_profile_version_foreign_key",
+    tableName: "schedule_runs",
+    constraintName: "schedule_runs_constraint_profile_version_id_fk",
+  },
+  {
+    id: "schedule_runs.constraint_profile_snapshot_check",
+    tableName: "schedule_runs",
+    constraintName: "schedule_runs_constraint_profile_snapshot_check",
   },
   {
     id: "exam_task_student_groups.primary_key",
@@ -139,6 +224,8 @@ export interface MigrationCheckResult {
   backfillMismatches: string[];
   legacyRelationColumns: string[];
   scheduleJobStatuses: string[];
+  defaultConstraintProfileCount: number;
+  constraintProfileMismatches: string[];
 }
 
 export async function checkMigrations(
@@ -151,6 +238,7 @@ export async function checkMigrations(
   const missingConstraints: string[] = [];
   const backfillMismatches: string[] = [];
   const remainingLegacyRelationColumns: string[] = [];
+  const constraintProfileMismatches: string[] = [];
 
   for (const tableName of criticalMigrationTables) {
     const result = await client.pool.query<{ exists: string | null }>(
@@ -164,10 +252,12 @@ export async function checkMigrations(
 
   const constraintResult = await client.pool.query<{
     tableName: string;
+    constraintName: string;
     definition: string;
   }>(`
     SELECT
       constraint_row.conrelid::regclass::text AS "tableName",
+      constraint_row.conname AS "constraintName",
       pg_get_constraintdef(constraint_row.oid) AS definition
     FROM pg_constraint AS constraint_row
     WHERE constraint_row.connamespace = 'public'::regnamespace
@@ -175,8 +265,14 @@ export async function checkMigrations(
   const availableConstraints = new Set(
     constraintResult.rows.map((row) => `${row.tableName}:${row.definition}`),
   );
+  const availableConstraintNames = new Set(
+    constraintResult.rows.map((row) => `${row.tableName}:${row.constraintName}`),
+  );
   for (const constraint of criticalMigrationConstraints) {
-    if (!availableConstraints.has(`${constraint.tableName}:${constraint.definition}`)) {
+    const available = "constraintName" in constraint
+      ? availableConstraintNames.has(`${constraint.tableName}:${constraint.constraintName}`)
+      : availableConstraints.has(`${constraint.tableName}:${constraint.definition}`);
+    if (!available) {
       missingConstraints.push(constraint.id);
     }
   }
@@ -203,6 +299,72 @@ export async function checkMigrations(
     ORDER BY enumsortorder
   `);
 
+  const defaultProfileResult = await client.pool.query<{ count: string }>(`
+    SELECT count(*)::text AS count
+    FROM constraint_profiles
+    WHERE is_default
+  `);
+  const defaultConstraintProfileCount = Number(defaultProfileResult.rows[0]?.count ?? 0);
+  if (defaultConstraintProfileCount !== 1) {
+    constraintProfileMismatches.push(
+      `constraint_profiles.default_count:${defaultConstraintProfileCount}`,
+    );
+  }
+
+  const invalidCurrentProfiles = await client.pool.query<{ id: string }>(`
+    SELECT profile.id
+    FROM constraint_profiles AS profile
+    LEFT JOIN constraint_profile_versions AS version
+      ON version.id = profile.current_version_id
+      AND version.profile_id = profile.id
+    WHERE version.id IS NULL
+    ORDER BY profile.id
+  `);
+  for (const row of invalidCurrentProfiles.rows) {
+    constraintProfileMismatches.push(`constraint_profiles.current_version:${row.id}`);
+  }
+
+  const versionRows = await client.pool.query<{
+    id: string;
+    digest: string;
+    config: unknown;
+  }>(`
+    SELECT id, digest, config
+    FROM constraint_profile_versions
+    ORDER BY id
+  `);
+  for (const row of versionRows.rows) {
+    const actualDigest = createHash("sha256")
+      .update(canonicalJson(row.config))
+      .digest("hex");
+    if (actualDigest !== row.digest) {
+      constraintProfileMismatches.push(`constraint_profile_versions.digest:${row.id}`);
+    }
+  }
+
+  for (const tableName of ["schedule_jobs", "schedule_runs"] as const) {
+    const mismatchedSnapshots = await client.pool.query<{ id: string }>(`
+      SELECT record.id
+      FROM ${tableName} AS record
+      LEFT JOIN constraint_profile_versions AS version
+        ON version.id = record.constraint_profile_version_id
+      WHERE record.constraint_profile_version_id IS NOT NULL
+        AND (
+          version.id IS NULL
+          OR record.constraint_profile_snapshot ->> 'profileId' <> version.profile_id
+          OR record.constraint_profile_snapshot ->> 'profileVersionId' <> version.id
+          OR (record.constraint_profile_snapshot ->> 'versionNumber')::integer
+            <> version.version_number
+          OR record.constraint_profile_snapshot ->> 'digest' <> version.digest
+          OR record.constraint_profile_snapshot -> 'config' <> version.config
+        )
+      ORDER BY record.id
+    `);
+    for (const row of mismatchedSnapshots.rows) {
+      constraintProfileMismatches.push(`${tableName}.snapshot:${row.id}`);
+    }
+  }
+
   return {
     migrationCount: migrationFiles.length,
     firstRunAppliedCount: firstRunApplied.length,
@@ -214,7 +376,23 @@ export async function checkMigrations(
     backfillMismatches,
     legacyRelationColumns: remainingLegacyRelationColumns,
     scheduleJobStatuses: scheduleJobStatusResult.rows.map((row) => row.value),
+    defaultConstraintProfileCount,
+    constraintProfileMismatches,
   };
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
