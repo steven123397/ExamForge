@@ -7,7 +7,7 @@
 - 教师与学生作用域由 PostgreSQL 关联和服务端会话决定。本人页面只调用 `/api/me/*`，不能通过路径、查询参数或请求体切换到其他教师或学生群体。
 - 作业、SSE、策略快照、发布资格和审计继续复用第三、第四阶段的服务端合同；页面拆分没有复制任务状态机或把 PostgreSQL 事实迁入浏览器。
 - CR-002 已在第六阶段任务 1 关闭；代码审查当前只保留 P3 的 CR-003，无待解决 P0/P1。详细问题只维护在 `docs/status/code_review_status.md`。
-- 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送，TCR 冷上传超时调整为 `6c94599`。正式镜像发布尚未成功，用户已选择本地 WSL self-hosted Runner 的 B 方案继续收口。服务器存储已迁到多项目共享挂载点，但尚未部署 ExamForge 应用、修改 nginx 或切换域名流量。
+- 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送，TCR 冷上传超时调整为 `6c94599`，本地 WSL self-hosted Runner 的 B 方案实现为 `5f8eee8`。首次 B 方案正式运行已完成质量 job 并交接到本地 Runner，但在构建阶段因 BuildKit 未继承 WSL 代理而失败，正式镜像发布仍未成功。服务器存储已迁到多项目共享挂载点，但尚未部署 ExamForge 应用、修改 nginx 或切换域名流量。
 
 ## 2. 已实现内容
 
@@ -55,12 +55,13 @@
 
 ### 2.7 不可变镜像发布与供应链清单
 
-- 第六阶段任务 3 已新增手动 `release-images.yml`。当前本地修改将其拆为 GitHub 托管 `quality` 与 `[self-hosted, linux, x64, examforge-release]` 的 `release`：前者只运行质量门禁并上传生产依赖审计，后者才构建、探测、生成 SBOM、扫描和推送四个 linux/amd64 镜像。两者均检出精确发布 SHA，质量 job 不接触 TCR 变量或凭据。
+- 第六阶段任务 3 已新增手动 `release-images.yml`，并由 `5f8eee8` 拆分为 GitHub 托管 `quality` 与 `[self-hosted, linux, x64, examforge-release]` 的 `release`：前者只运行质量门禁并上传生产依赖审计，后者才构建、探测、生成 SBOM、扫描和推送四个 linux/amd64 镜像。两者均检出精确发布 SHA，质量 job 不接触 TCR 变量或凭据。
 - 四个运行时镜像均带有 OCI source、revision 和 created 标签，并保持非 root 与职责隔离。Web 显式固化正式 API origin；API 探针拒绝 Python/uv，Web 探针拒绝服务器 secret。Node 运行时镜像移除了不参与启动的全局 npm/npx，并与 scheduler 一并完成 Debian 安全更新。
 - 发布清单固定提交、创建时间、构建平台、四个 TCR tag/digest、OCI 来源、生产 npm 审计、SPDX SBOM、Trivy 报告及附件 SHA-256。验证器拒绝 `latest`、本地 image ID、提交或 tag 不一致、附件缺失或篡改、HIGH/CRITICAL 非零、越界附件路径和疑似 secret 字段。
 - 工作流 artifact 保存发布清单及全部审计、SBOM、扫描附件 90 天。正式 GitHub 托管 Runner 发布已执行两次：`29330180914` 达到原 60 分钟 job 上限后取消；`29334386863` 在推送步骤超过 60 分钟仍无可下载的实时日志或可证明进度，用户要求人工取消。两次运行的质量门禁、四镜像构建/探针、SBOM 和 HIGH/CRITICAL 扫描均成功，但均未生成完整 release manifest 或四个可部署 TCR digest。
 - 优化前本地镜像证据为 API 约 982 MB、Worker 约 980 MB，两者各复制约 499 MB 的完整根 `node_modules` 层，容器内目录约 477 MB。当前本地重建改为目标 workspace 最小生产依赖，API 为 417 MB、Worker 为 414 MB，依赖目录分别为 42 MB 和 40 MB；运行镜像探针按同一 `docker image ls` 口径强制 700 MB 上限。
 - self-hosted 发布 job 使用本次 job 专用 Buildx builder；每个镜像最长推送 30 分钟、最多重试 1 次，并独立记录状态和远程 registry digest。失败会停止后续镜像且不生成正式 manifest。workflow 不执行 SSH、SCP、nginx、Certbot 或远程 Compose；北京服务器继续只按 digest 部署，Runner 不持有生产 SSH 私钥或环境 secrets。
+- 首次 self-hosted 工作流 `29354931745` 的 GitHub 托管质量 job 成功，本地 Runner 接收发布 job；首个 API 构建因 `docker-container` BuildKit 未继承 WSL HTTP(S) 代理而无法解析 Docker Hub 基础镜像，运行在 SBOM、Trivy、TCR 登录和推送之前失败。当前修复只把 Runner 进程代理注入本次专用 builder 并使用宿主网络，不修改 Docker 全局配置；本地空缓存 builder 已完成真实拉取、构建和职责探针。
 
 ### 2.8 备份恢复与运维巡检
 
@@ -95,11 +96,11 @@
 - 广州 TCR 继续作为正式制品单一来源，保存提交 SHA tag 与 registry digest；北京服务器只使用 release manifest 中的 digest 拉取和回滚。
 - 本地 Runner 仅在人工发布时启动。Runner 离线时 job 保持排队，不回退到 GitHub 托管 Runner；发布 job 不执行 SSH、SCP、nginx、Certbot 或远程 Compose。
 - API/Worker 镜像瘦身和 workflow 拆分已经完成本地实现与验证；正式 Runner 固定使用 `/home/liangjiaqi/actions-runner`、`_work`、名称 `examforge-release-wsl-x64` 和自定义标签 `examforge-release`。
-- 用户已于 2026-07-15 确认安装和注册 Runner。Linux x64 Runner `2.335.1` 已按官方 SHA-256 校验后安装到独立目录，仓库级注册成功；名称、`_work` 和自定义标签符合设计。Runner 当前离线且未安装系统服务。拆分后的 workflow 尚未在 GitHub 运行，TCR 仍无完整正式 manifest；重新执行正式 TCR 发布前必须再次取得用户确认。
+- 用户已于 2026-07-15 确认安装和注册 Runner。Linux x64 Runner `2.335.1` 已按官方 SHA-256 校验后安装到独立目录，仓库级注册成功；名称、`_work` 和自定义标签符合设计，未安装系统服务。工作流 `29354931745` 已证明四标签调度和独立 `_work` 检出有效，但在首镜像构建网络阶段失败；未登录或推送 TCR，也未生成完整正式 manifest。代理修复提交后需要重新触发正式工作流验证。
 
 ## 3. 最新验证事实
 
-- 快速与静态门禁：`npm run test:ci` 为 `9 passed`，部署类 Node.js 合同总计 `33 passed`，其中生产配置 `5`、发布 `14`、运维与故障 `8`、部署/回滚 `6`；`npm run check:ci`、`npm run typecheck`、`npm run check:scheduler-openapi`、`npm run build`、`docker compose config --quiet`、Actionlint、ShellCheck 和 `git diff --check` 通过。
+- 快速与静态门禁：`npm run test:ci` 为 `9 passed`；发布合同当前为 `15 passed`，新增专用 Buildx 代理隔离测试，部署类 Node.js 合同总计 `34 passed`；`npm run check:ci`、`npm run typecheck`、`npm run check:scheduler-openapi`、`npm run build`、`docker compose config --quiet` 的既有基线通过，本轮 Actionlint、ShellCheck、Bash 语法和 `git diff --check` 通过。
 - 应用测试：shared `21 passed`，scheduling application `11 passed`，API `97 passed`，Web `24 passed`；隔离 PostgreSQL/Redis Worker `14 passed`；scheduler `97 passed`，保留 1 条 Starlette/httpx 2 上游弃用警告。
 - 数据库门禁：15 个迁移从空库首次全部应用，第二次应用数为 0；迁移测试 `9 passed`，迁移检查无缺失表、约束、回填或策略不一致，正式迁移入口返回 `applied: []`；PostgreSQL 集成测试 `21 passed`。
 - 浏览器门禁：任务 2 独立 Compose 从空卷重新运行六类故障 smoke 和完整 Playwright，结果为 `32 passed, 3 skipped`，共 35 项；3 项只在主 Chromium 运行的状态专项在其他视觉视口按配置跳过。四角色路由、本人作用域、草稿 pointer/keyboard 操作、运营页面、Axe 扫描、截图和溢出检查均通过。
@@ -107,10 +108,11 @@
 - 备份恢复门禁：可丢弃 PostgreSQL 完成 15 个迁移、演示 seed、custom archive、SHA/摘要、保留期、模拟异机复制失败、未标记目标拒绝、标记目标恢复、迁移检查和 scope 读取；测试结束后已删除独立容器、网络、卷与临时备份。过期备份、磁盘阈值、证书窗口和 API readiness 四类故障注入均返回非 0 且未输出测试 secret。
 - 本地生产门禁：临时 registry 生成两组应用 digest 和 PostgreSQL/Redis digest；第一组从空目录部署并完成全业务/故障 smoke、在线备份恢复，第二组部署后再按 `previous` 回滚第一组，两次切换后均重跑 smoke。最终清理前后的既有容器 ID 集合一致；该证据不包含 TCR、正式 HTTPS、腾讯云资源峰值或公网网络质量。
 - 正式发布尝试：提交 `f741fc0` 和 `6c94599` 已推送到 `origin/main`。工作流 `29330180914` 与 `29334386863` 均通过推送前全部门禁；前者因 60 分钟上限取消，后者在超过 60 分钟且无法取得实时进度证据后由用户人工取消。服务器未参与构建或推送，未发生远程写入。
+- B 方案首次运行：提交 `5f8eee8` 已推送到 `origin/main`，工作流 `29354931745` 的质量 job 成功并调度到本地 Runner；发布在首个 API 构建拉取基础镜像时因 BuildKit 代理缺失失败，未进入 SBOM、Trivy、TCR 登录、推送或 manifest。代理隔离修复已在本地专用 `docker-container` builder 上完成真实冷拉取、API 构建和职责探针；该本地镜像不是正式制品。
 
 ## 4. 当前边界
 
-- 不可变镜像发布工作流已经建立；此前两次 GitHub 托管发布到广州 TCR 的跨境推送未完成。当前本地修改已完成 API/Worker 瘦身、GitHub 质量 job 与 self-hosted 发布 job 拆分及单镜像有限重试合同，但 Runner 尚未注册，拆分后的 workflow 未运行，TCR 中仍无本轮完整正式 manifest/digest 集合。真实生产 secrets、nginx/HTTPS、正式异机备份、已安装的外部健康巡检和腾讯云回滚演练也尚未建立。
+- 不可变镜像发布工作流已经建立；此前两次 GitHub 托管发布到广州 TCR 的跨境推送未完成，首次 self-hosted 运行又在首镜像构建网络阶段失败。Runner 已注册且调度边界得到验证，当前本地修改为专用 Buildx 注入 Runner HTTP(S) 代理并增加合同测试；修复尚未通过新的完整正式工作流，TCR 中仍无本轮完整正式 manifest/digest 集合。真实生产 secrets、nginx/HTTPS、正式异机备份、已安装的外部健康巡检和腾讯云回滚演练也尚未建立。
 - 腾讯云主机级只读预检、TCR 登录准备和条件式维护窗口已完成，但正式发布清单、digest 拉取验证、ExamForge 目录和正式证书尚未具备，任务 6 仍处于 `no-go`，不得进入任务 7 写入或切流。
 - 腾讯云 4 核 4 GB 服务器上的 150 场基准、完整业务闭环、资源峰值和真实网络 E2E 尚未执行；本地 Compose 结果不能冒充远程验证。
 - PostCSS override 是上游稳定 Next 仍精确依赖旧版本期间的临时处置；Next 依赖声明变化时必须重新审计并优先移除覆盖。CR-003 在本地 Docker 代理变化时重新评估，远程发布使用 TCR，不把本地代理带到服务器。
@@ -119,6 +121,6 @@
 
 ## 5. 下一步
 
-1. 经用户另行确认提交/推送与正式发布后，前台手动启动 Runner，发布四个镜像到广州 TCR，取得 registry digest、SBOM、扫描报告和完整 release manifest；随后使用北京服务器现有只读登录验证 digest 可访问。
+1. 完成 Buildx 代理修复的本地全量门禁后提交并推送，保持 Runner 前台监听，由用户重新触发 `main` 的正式工作流；只有四个镜像取得远程 registry digest、SBOM、扫描报告和完整 release manifest 后，才进入北京服务器只读 digest 可访问性验证。
 2. 等待备案通过；进入已约定的首个可用 22:00–00:30 窗口前，由用户最终确认开始，再创建 ExamForge 专属目录与 600 权限生产环境文件并运行完整远程 `preflight.sh --read-only`。通过前不部署、不签发证书、不修改 nginx。
 3. 任务 7 之后再执行正式部署、HTTPS、首份异机备份恢复、150 场基准、线上 smoke 和镜像回滚；未取得远程证据前不得宣称第五版整体完成。

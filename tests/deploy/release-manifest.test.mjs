@@ -20,6 +20,7 @@ const creatorPath = join(repositoryRoot, "scripts/release/create-release-manifes
 const workflowPath = join(repositoryRoot, ".github/workflows/release-images.yml");
 const probeImagePath = join(repositoryRoot, "scripts/release/probe-image.sh");
 const pushImagePath = join(repositoryRoot, "scripts/release/push-image.sh");
+const configureBuildxPath = join(repositoryRoot, "scripts/release/configure-buildx.sh");
 const commitSha = "1".repeat(40);
 const imageDigest = `sha256:${"2".repeat(64)}`;
 const sourceUrl = "https://github.com/steven123397/ExamForge";
@@ -193,6 +194,32 @@ describe("release workflow boundary", () => {
 
     assert.doesNotMatch(workflow, /(?:^|\s)(?:ssh|scp|rsync)(?:\s|$)/m);
     assert.doesNotMatch(workflow, /nginx|certbot|remote compose/i);
+  });
+
+  it("binds the runner proxy only to the dedicated Buildx container", () => {
+    assert.ok(existsSync(configureBuildxPath), "configure-buildx.sh must isolate the runner proxy");
+    const workflow = readFileSync(workflowPath, "utf8");
+    const releaseJob = extractWorkflowJob(workflow, "release");
+    const configureScript = readFileSync(configureBuildxPath, "utf8");
+    const fixture = createBuildxFixture();
+    const result = runBuildxFixture(fixture);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.match(releaseJob, /id:\s*buildx/);
+    assert.match(releaseJob, /scripts\/release\/configure-buildx\.sh/);
+    assert.match(releaseJob, /steps\.buildx\.outputs\.name/);
+    assert.doesNotMatch(configureScript, /\.docker\/config\.json|daemon\.json/);
+
+    const calls = readFileSync(fixture.callsPath, "utf8");
+    assert.match(calls, /buildx rm examforge-release-1-1/);
+    assert.match(calls, /buildx create --name examforge-release-1-1 --driver docker-container --use/);
+    assert.match(calls, /--driver-opt network=host/);
+    assert.match(calls, /--driver-opt env\.HTTP_PROXY=http:\/\/127\.0\.0\.1:7890/);
+    assert.match(calls, /--driver-opt env\.https_proxy=http:\/\/127\.0\.0\.1:7891/);
+    assert.doesNotMatch(calls, /ALL_PROXY|NO_PROXY|all_proxy|no_proxy/);
+    assert.match(calls, /buildx inspect examforge-release-1-1 --bootstrap/);
+    assert.match(configureScript, /buildx inspect "\$builder_name" --bootstrap >\/dev\/null/);
   });
 });
 
@@ -409,6 +436,40 @@ function runPushFixture(fixture) {
       EXAMFORGE_PUSH_LOG_DIR: join(fixture.directory, "logs"),
       FAKE_DOCKER_ATTEMPT_PATH: fixture.attemptPath,
       FAKE_DOCKER_SUCCEED_ON_ATTEMPT: String(fixture.succeedOnAttempt),
+    },
+  });
+}
+
+function createBuildxFixture() {
+  const directory = mkdtempSync(join(tmpdir(), "examforge-buildx-"));
+  const binDirectory = join(directory, "bin");
+  const dockerPath = join(binDirectory, "docker");
+  const callsPath = join(directory, "docker-calls.log");
+  mkdirSync(binDirectory, { recursive: true });
+  writeFileSync(dockerPath, `#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\n' "$*" >> "$FAKE_DOCKER_CALLS_PATH"
+`);
+  chmodSync(dockerPath, 0o755);
+  return { binDirectory, callsPath };
+}
+
+function runBuildxFixture(fixture) {
+  return spawnSync("bash", [configureBuildxPath, "examforge-release-1-1"], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${fixture.binDirectory}:${process.env.PATH}`,
+      FAKE_DOCKER_CALLS_PATH: fixture.callsPath,
+      HTTP_PROXY: "http://127.0.0.1:7890",
+      HTTPS_PROXY: "http://127.0.0.1:7891",
+      ALL_PROXY: "socks5://127.0.0.1:7892",
+      NO_PROXY: "localhost,127.0.0.1",
+      http_proxy: "http://127.0.0.1:7890",
+      https_proxy: "http://127.0.0.1:7891",
+      all_proxy: "socks5://127.0.0.1:7892",
+      no_proxy: "localhost,127.0.0.1",
     },
   });
 }

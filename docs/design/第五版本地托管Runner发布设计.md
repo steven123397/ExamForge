@@ -61,7 +61,7 @@ Runner 仅在正式发布时手动启动。未启动时，带 `examforge-release
 
 - workflow 必须从 GitHub 检出目标完整 SHA，并在构建前验证 `HEAD == GITHUB_SHA`。
 - `actions/checkout` 不复用开发仓库，不读取开发目录中的 `.env`、未提交文件或本地补丁。
-- 使用专用 Buildx builder 和独立 cache scope；可以复用内容寻址的基础层，但不得依赖本地已有业务镜像作为发布输入。
+- 使用专用 Buildx builder 和独立 cache scope；可以复用内容寻址的基础层，但不得依赖本地已有业务镜像作为发布输入。若 Runner 通过宿主机 HTTP(S) 代理访问外网，只把当前进程继承的 `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy` 作为 builder driver option 注入本次 `docker-container` BuildKit，并使用宿主网络；不得写入全局 Docker CLI 或 daemon 配置。
 - Runner 工作目录只保存本次检出和临时发布 bundle。成功上传 artifact 后删除临时 bundle；Docker 层缓存按受控策略保留。
 - Runner 使用 Docker 权限，等同于对本机 Docker daemon 的高权限访问。因此只允许受信任的 `main` 提交和手动发布 workflow 使用该标签。
 
@@ -91,7 +91,7 @@ Runner 仅在正式发布时手动启动。未启动时，带 `examforge-release
   --unattended
 ```
 
-workflow 使用固定的 `docker/setup-buildx-action` 创建并清理本次 job 专用的 `docker-container` builder；Runner 宿主机只需已有 Docker CLI/daemon，不要求在注册前另行安装全局 Buildx 插件。
+workflow 使用固定的 `docker/setup-buildx-action` 创建本次 job 专用的 `docker-container` builder，再由 `scripts/release/configure-buildx.sh` 以同名 builder 绑定 Runner 当前 HTTP(S) 代理和宿主网络；Action 仍负责 job 结束清理。Runner 宿主机只需已有 Docker CLI/daemon，不要求在注册前另行安装全局 Buildx 插件，脚本也不修改 `~/.docker/config.json` 或 Docker daemon 配置。
 
 ## 5. GitHub 工作流拆分
 
@@ -156,7 +156,7 @@ runs-on: [self-hosted, linux, x64, examforge-release]
 
 API 与 Worker 现在分别执行 `npm ci --omit=dev --workspace <目标> --include-workspace-root=false`，运行镜像从独立 `production-dependencies` 阶段复制依赖，不再复制构建阶段的完整 monorepo 根依赖树。镜像探针按 `docker image ls` 的十进制 MB 口径强制 700 MB 上限，并拒绝 Next、Playwright、TypeScript、tsx 及越界服务依赖。
 
-两个镜像均完成运行时内部包导入、非 root、linux/amd64、OCI source/revision、职责隔离和体积探针；固定 Syft 生成 SPDX 2.3 SBOM，固定 Trivy 0.72.0 扫描 HIGH/CRITICAL 为 0。本机 Docker CLI 尚无全局 Buildx 插件，本地 Dockerfile 重建使用可用的 legacy builder；这不替代后续 self-hosted Runner 上由固定 Action 创建专用 Buildx builder 的真实 workflow 证据。
+两个镜像均完成运行时内部包导入、非 root、linux/amd64、OCI source/revision、职责隔离和体积探针；固定 Syft 生成 SPDX 2.3 SBOM，固定 Trivy 0.72.0 扫描 HIGH/CRITICAL 为 0。首次 self-hosted 运行暴露 `docker-container` BuildKit 未继承 WSL 代理的问题后，本地使用与 workflow 相同的专用 builder、宿主网络和显式 HTTP(S) 代理重新执行 API 冷拉取与构建，成功解析 Docker Hub 元数据、加载 linux/amd64 镜像并通过职责探针；该证据证明构建网络修复，但仍不替代四镜像正式 TCR 推送和完整 manifest。
 
 ## 7. 推送可观察性与失败语义
 
@@ -222,4 +222,4 @@ ccr.ccs.tencentyun.com/examforge/worker@sha256:...
 
 ## 12. 当前状态
 
-截至 2026-07-15，用户已确认采用本地托管 Runner 的 B 方案，并保留广州 TCR。API/Worker 最小生产依赖树和 700 MB 门禁已在本地验证，工作流已拆分为 GitHub 托管质量 job 与四标签 self-hosted 发布 job，单镜像推送已具备 30 分钟上限、最多 1 次重试、状态日志和远程 digest 校验合同。Runner `2.335.1` 已安装到独立目录并完成仓库级注册，当前保持离线，不安装系统服务；拆分后的 workflow 尚未在 GitHub 执行，TCR 尚无可部署的四镜像正式 manifest，因此第六阶段任务 6 仍为 `no-go`。
+截至 2026-07-15，用户已确认采用本地托管 Runner 的 B 方案，并保留广州 TCR。API/Worker 最小生产依赖树和 700 MB 门禁已在本地验证，工作流已拆分为 GitHub 托管质量 job 与四标签 self-hosted 发布 job，单镜像推送已具备 30 分钟上限、最多 1 次重试、状态日志和远程 digest 校验合同。Runner `2.335.1` 已安装到独立目录并完成仓库级注册，不安装系统服务；提交 `5f8eee8` 的工作流 `29354931745` 已证明 GitHub 托管质量 job 成功交接到本地 Runner，但发布 job 在首个 API 构建拉取基础镜像时因 BuildKit 未继承 WSL 代理而失败，未进入 SBOM、Trivy、TCR 登录、推送或 manifest 步骤。代理隔离修复已通过本地专用 `docker-container` builder 的真实冷拉取、构建和职责探针，待提交后重跑正式工作流；TCR 尚无可部署的四镜像正式 manifest，因此第六阶段任务 6 仍为 `no-go`。
