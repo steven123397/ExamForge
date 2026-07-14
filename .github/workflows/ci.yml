@@ -13,7 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: "22"
+  NODE_VERSION: "22.22.2"
+  NPM_VERSION: "12.0.1"
   UV_VERSION: "0.11.2"
 
 jobs:
@@ -40,8 +41,19 @@ jobs:
           enable-cache: true
           cache-dependency-glob: apps/scheduler/uv.lock
 
+      - name: 固定 npm 版本
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/npm12" --ignore-scripts --no-fund --no-audit "npm@${NPM_VERSION}"
+          echo "$RUNNER_TEMP/npm12/bin" >> "$GITHUB_PATH"
+
       - name: 安装 Node.js 依赖
         run: npm ci
+
+      - name: 检查依赖安装脚本批准
+        run: npm run check:install-scripts
+
+      - name: 审计生产依赖
+        run: npm audit --audit-level=moderate
 
       - name: 检查仓库治理规则
         env:
@@ -59,6 +71,9 @@ jobs:
 
       - name: 测试 CI 治理脚本
         run: npm run test:ci
+
+      - name: 检查生产配置边界
+        run: npm run test:deploy
 
       - name: 类型检查
         run: npm run typecheck
@@ -82,7 +97,7 @@ jobs:
     needs: quick
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine
@@ -120,6 +135,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
+      - name: 固定 npm 版本
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/npm12" --ignore-scripts --no-fund --no-audit "npm@${NPM_VERSION}"
+          echo "$RUNNER_TEMP/npm12/bin" >> "$GITHUB_PATH"
+
       - name: 安装依赖
         run: npm ci
 
@@ -138,12 +158,15 @@ jobs:
       - name: Publisher 与 Worker 真实依赖测试
         run: npm run test --workspace @examforge/worker
 
+      - name: PostgreSQL 备份恢复演练
+        run: bash tests/deploy/backup-restore.test.sh
+
   e2e:
     name: Compose 与 Playwright 门禁
     needs: quick
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       COMPOSE_PROJECT_NAME: examforge-ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -156,6 +179,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
+      - name: 固定 npm 版本
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/npm12" --ignore-scripts --no-fund --no-audit "npm@${NPM_VERSION}"
+          echo "$RUNNER_TEMP/npm12/bin" >> "$GITHUB_PATH"
+
       - name: 安装依赖
         run: npm ci
 
@@ -166,6 +194,9 @@ jobs:
         run: npm run test:e2e:demo
         env:
           KEEP_DEMO_STACK: "1"
+
+      - name: 运行本地生产部署与回滚验收
+        run: npm run test:production-local
 
       - name: 收集失败诊断
         if: failure()

@@ -1,0 +1,286 @@
+name: examforge
+
+x-runtime-defaults: &runtime-defaults
+  init: true
+  read_only: true
+  pull_policy: always
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  postgres:
+    <<: *runtime-defaults
+    image: ${EXAMFORGE_POSTGRES_IMAGE:?EXAMFORGE_POSTGRES_IMAGE must contain an immutable digest}
+    user: "70:70"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: 0.75
+    mem_limit: 512m
+    pids_limit: 128
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - type: bind
+        source: ${EXAMFORGE_DATA_DIR:?EXAMFORGE_DATA_DIR is required}/postgres
+        target: /var/lib/postgresql/data
+    tmpfs:
+      - /tmp:mode=1777
+      - /var/run/postgresql:uid=70,gid=70,mode=0700
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    <<: *runtime-defaults
+    image: ${EXAMFORGE_REDIS_IMAGE:?EXAMFORGE_REDIS_IMAGE must contain an immutable digest}
+    user: "999:1000"
+    restart: unless-stopped
+    stop_grace_period: 20s
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - type: bind
+        source: ${EXAMFORGE_DATA_DIR:?EXAMFORGE_DATA_DIR is required}/redis
+        target: /data
+    tmpfs:
+      - /tmp:mode=1777
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  migrate:
+    <<: *runtime-defaults
+    image: ${EXAMFORGE_API_IMAGE:?EXAMFORGE_API_IMAGE must contain an immutable digest}
+    user: "10001:10001"
+    restart: "no"
+    stop_grace_period: 30s
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 64
+    working_dir: /app
+    command: ["node", "packages/db/dist/migrations.js"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+    tmpfs:
+      - /tmp:mode=1777
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  scheduler:
+    <<: *runtime-defaults
+    image: ${EXAMFORGE_SCHEDULER_IMAGE:?EXAMFORGE_SCHEDULER_IMAGE must contain an immutable digest}
+    user: "10002:10002"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: 1.5
+    mem_limit: 1g
+    pids_limit: 192
+    tmpfs:
+      - /tmp:mode=1777
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  publisher:
+    <<: *runtime-defaults
+    image: ${EXAMFORGE_WORKER_IMAGE:?EXAMFORGE_WORKER_IMAGE must contain an immutable digest}
+    user: "10003:10003"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: 0.25
+    mem_limit: 192m
+    pids_limit: 96
+    environment:
+      WORKER_ROLE: publisher
+      WORKER_CONCURRENCY: "1"
+      WORKER_HEALTH_HOST: 0.0.0.0
+      WORKER_HEALTH_PORT: "4010"
+      DATABASE_URL: postgres://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_BASE_URL: http://scheduler:8000
+      OUTBOX_BATCH_SIZE: "25"
+      OUTBOX_POLL_INTERVAL_MS: "500"
+    tmpfs:
+      - /tmp:mode=1777
+    networks:
+      - backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4010/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  worker:
+    <<: *runtime-defaults
+    image: ${EXAMFORGE_WORKER_IMAGE:?EXAMFORGE_WORKER_IMAGE must contain an immutable digest}
+    user: "10003:10003"
+    restart: unless-stopped
+    stop_grace_period: 45s
+    cpus: 1.0
+    mem_limit: 384m
+    pids_limit: 128
+    environment:
+      WORKER_ROLE: worker
+      WORKER_CONCURRENCY: "1"
+      WORKER_HEALTH_HOST: 0.0.0.0
+      WORKER_HEALTH_PORT: "4010"
+      DATABASE_URL: postgres://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_BASE_URL: http://scheduler:8000
+      SCHEDULER_HTTP_TIMEOUT_MS: "35000"
+      WORKER_CANCELLATION_POLL_INTERVAL_MS: "250"
+      WORKER_LOCK_DURATION_MS: "30000"
+      WORKER_STALLED_INTERVAL_MS: "30000"
+    tmpfs:
+      - /tmp:mode=1777
+    networks:
+      - backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      scheduler:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4010/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  api:
+    <<: *runtime-defaults
+    image: ${EXAMFORGE_API_IMAGE:?EXAMFORGE_API_IMAGE must contain an immutable digest}
+    user: "10001:10001"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 128
+    environment:
+      NODE_ENV: production
+      EXAMFORGE_DEPLOYMENT_MODE: production
+      API_HOST: 0.0.0.0
+      API_PORT: "4000"
+      DATABASE_URL: postgres://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SCHEDULER_TRANSPORT: http
+      SCHEDULER_BASE_URL: http://scheduler:8000
+      SCHEDULER_HTTP_TIMEOUT_MS: "35000"
+      EXAMFORGE_ADMIN_PASSWORD: ${EXAMFORGE_ADMIN_PASSWORD:?EXAMFORGE_ADMIN_PASSWORD is required}
+      EXAMFORGE_OPERATOR_PASSWORD: ${EXAMFORGE_OPERATOR_PASSWORD:?EXAMFORGE_OPERATOR_PASSWORD is required}
+      EXAMFORGE_TEACHER_PASSWORD: ${EXAMFORGE_TEACHER_PASSWORD:?EXAMFORGE_TEACHER_PASSWORD is required}
+      EXAMFORGE_STUDENT_PASSWORD: ${EXAMFORGE_STUDENT_PASSWORD:?EXAMFORGE_STUDENT_PASSWORD is required}
+      EXAMFORGE_TRUSTED_ORIGINS: ${EXAMFORGE_TRUSTED_ORIGINS:?EXAMFORGE_TRUSTED_ORIGINS is required}
+      EXAMFORGE_SESSION_COOKIE_NAME: ${EXAMFORGE_SESSION_COOKIE_NAME:-examforge_session}
+      EXAMFORGE_SESSION_COOKIE_SECURE: "true"
+      EXAMFORGE_SESSION_TTL_SECONDS: ${EXAMFORGE_SESSION_TTL_SECONDS:-43200}
+    tmpfs:
+      - /tmp:mode=1777
+    ports:
+      - name: api
+        target: 4000
+        host_ip: 127.0.0.1
+        published: ${EXAMFORGE_API_PORT:-4000}
+        protocol: tcp
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      scheduler:
+        condition: service_healthy
+      publisher:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    labels:
+      org.examforge.public-origin: ${EXAMFORGE_PUBLIC_ORIGIN:?EXAMFORGE_PUBLIC_ORIGIN is required}
+
+  web:
+    <<: *runtime-defaults
+    image: ${EXAMFORGE_WEB_IMAGE:?EXAMFORGE_WEB_IMAGE must contain an immutable digest}
+    user: "1000:1000"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 128
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    tmpfs:
+      - /tmp:mode=1777
+      - /app/apps/web/.next/cache:uid=1000,gid=1000,mode=0700
+    ports:
+      - name: web
+        target: 3000
+        host_ip: 127.0.0.1
+        published: ${EXAMFORGE_WEB_PORT:-3000}
+        protocol: tcp
+    networks:
+      - frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    labels:
+      org.examforge.public-origin: ${EXAMFORGE_PUBLIC_ORIGIN:?EXAMFORGE_PUBLIC_ORIGIN is required}
+
+networks:
+  frontend:
+  backend:
+    internal: true

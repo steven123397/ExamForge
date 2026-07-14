@@ -1,0 +1,25 @@
+[Unit]
+Description=ExamForge production health check
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=examforge
+Group=examforge
+SupplementaryGroups=docker
+WorkingDirectory=/srv/apps/examforge/current
+ExecStart=/srv/apps/examforge/current/scripts/deploy/health-check.sh --env-file /srv/apps/examforge/.env.production --compose-file /srv/apps/examforge/current/compose.production.yml
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

@@ -18,20 +18,6 @@
 
 ## 3. 问题明细
 
-### CR-002：Next 依赖链存在 npm audit moderate 公告
-
-- 状态：暂缓
-- 严重级别：P2 中优先级
-- 所属模块：`apps/web` / 依赖治理
-- 发现来源：`docs/status/project_status.md`
-- 位置：`apps/web/package.json`、`package-lock.json`
-- 问题描述：`npm audit` 曾报告 Next 15.5.20 依赖链中的 2 个 moderate 级 PostCSS 相关公告，npm 给出的自动修复方案会降级到不适合本项目的旧 Next 版本。
-- 影响：当前不阻塞本地演示，但后续生产化前需要跟踪 Next 官方依赖修复。
-- 建议处理：保留审计记录；后续升级 Next 或等待其依赖 PostCSS 修复版本，避免盲目执行降级式自动修复。
-- 验证方式：运行 `npm audit`，确认公告状态；升级后运行 `npm test`、`npm run typecheck`、`npm run build`、`npm run test:e2e`。
-- 解决记录：未解决。
-- 本轮处置：暂缓。2026-07-14 运行 `npm audit --audit-level=moderate`，当前 `next@15.5.20 -> postcss@8.4.31` 仍命中 `postcss <8.5.10` 的 2 个 moderate 公告。隔离探针覆盖到 `postcss@8.5.19` 后虽然 audit 为 0，但 `npm ls` 以 `ELSPROBLEMS` 判定该版本不满足 Next 的精确声明；`npm audit fix --force` 又会错误降级到 `next@9.3.3`，故两类试验均未保留。重新评估条件为升级到经过完整回归且不再携带该精确依赖的 Next 版本，或形成明确的生产风险接受决定；第六阶段正式发布前必须处置。
-
 ### CR-003：Docker daemon 拉取镜像依赖当前 WSL 到 Windows 代理
 
 - 状态：暂缓
@@ -49,6 +35,7 @@
 ## 4. 已解决问题索引
 
 - CR-001：本机默认 Python 环境不满足调度器要求
+- CR-002：Next 依赖链存在 npm audit moderate 公告
 - CR-004：SQL 迁移文件缺少正式迁移执行器和迁移状态表
 - CR-005：权限体系仍是请求头轻量护栏，不是真实认证授权
 - CR-006：异步排考作业为 API 进程内状态，不具备持久化和多实例能力
@@ -75,6 +62,8 @@
 - CR-007：排考进度仍使用轮询，没有 WebSocket 或 SSE 实时推送
 
 ## 5. 审查记录
+
+- 2026-07-14：第五版第六阶段任务 1 解决 CR-002。npm 元数据确认当日稳定 Next 仍精确依赖 PostCSS 8.4.31，用户书面批准受约束的临时覆盖；仓库固定 Node.js 22.22.2 与 npm 12.0.1，以有效根级 override 将唯一的 Next 依赖链解析到 PostCSS 8.5.19，并新增依赖父链测试、三项精确安装脚本 allowlist、待审批脚本 CI 门禁和 moderate 审计。干净 `npm ci` 成功，`npm ls next postcss` 有效，`npm audit --audit-level=moderate` 为 0；治理测试 `9 passed`、Web `24 passed`，Web 类型检查和生产构建通过，API/Worker/Web 三个镜像构建通过。独立 Compose 项目从空卷完成六类故障 smoke，Playwright 为 `32 passed, 3 skipped`，验证资源随后清理，用户已有栈未修改。CR-002 移入已解决索引；当前问题明细只保留 P3 的 CR-003，无待解决 P0/P1。
 
 - 2026-07-14：第五版第五阶段完成后复核存留问题。真实 PostgreSQL/Redis、15 个迁移、Worker 故障恢复、完整构建和 35 项 Playwright 场景均通过既定门禁，未发现新的 P0/P1 或需要单独编号的实现缺陷。`npm audit --audit-level=moderate` 仍返回 2 个 PostCSS moderate 公告，强制 override 会造成依赖树无效，自动修复会错误降级，因此 CR-002 保持暂缓但提升为第六阶段正式发布前置门禁；CR-003 未发生机器级变更，仍在本地代理变化或远程部署时重评。问题明细保持 2 项，无待解决 P0/P1。
 

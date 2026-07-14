@@ -1,0 +1,26 @@
+[Unit]
+Description=ExamForge PostgreSQL backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=examforge
+Group=examforge
+SupplementaryGroups=docker
+WorkingDirectory=/srv/apps/examforge/current
+ExecStart=/srv/apps/examforge/current/scripts/deploy/backup-postgres.sh --env-file /srv/apps/examforge/.env.production --compose-file /srv/apps/examforge/current/compose.production.yml
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/data/hot/examforge/backups/postgres /srv/data/cos/examforge/postgres
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

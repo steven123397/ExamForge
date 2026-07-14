@@ -119,6 +119,9 @@ test("200% 文本、403、404 和依赖失败状态不遮挡", async ({ page }, 
 async function inspectRoute(page: Page, path: string, heading: string) {
   await page.goto(path);
   await expect(page.getByRole("heading", { name: heading })).toBeVisible();
+  if (path.startsWith("/scheduling/drafts/")) {
+    await expect(page).toHaveURL(/[?&]examTaskId=[^&]+/);
+  }
   await expect.poll(() => page.title()).not.toBe("");
   await assertPageQuality(page);
 }

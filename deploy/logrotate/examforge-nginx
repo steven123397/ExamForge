@@ -1,0 +1,14 @@
+/var/log/nginx/examforge.access.log /var/log/nginx/examforge.error.log {
+    daily
+    rotate 14
+    size 25M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    create 0640 www-data adm
+    postrotate
+        systemctl reload nginx >/dev/null 2>&1 || true
+    endscript
+}

@@ -153,6 +153,7 @@ services:
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
     environment:
+      EXAMFORGE_DEPLOYMENT_MODE: demo
       API_HOST: 0.0.0.0
       API_PORT: 4000
       DATABASE_URL: postgres://${POSTGRES_USER:-examforge}:${POSTGRES_PASSWORD:-examforge}@postgres:5432/${POSTGRES_DB:-examforge}

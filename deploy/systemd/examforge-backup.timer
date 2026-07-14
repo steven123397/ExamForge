@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the ExamForge PostgreSQL backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=15min
+Persistent=true
+Unit=examforge-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -7,6 +7,7 @@ import {
   verifyPassword,
 } from "../src/auth/security.js";
 import { getSessionCookieConfig } from "../src/auth/session-cookie.js";
+import { getTrustedOrigins } from "../src/auth/trusted-origins.js";
 
 describe("authentication security", () => {
   it("hashes passwords with random salts and verifies them", async () => {
@@ -29,24 +30,66 @@ describe("authentication security", () => {
     assert.equal(hashSessionToken(first), hashSessionToken(first));
   });
 
-  it("allows local HTTP deployments to explicitly disable secure cookies", () => {
-    const previousNodeEnv = process.env.NODE_ENV;
-    const previousSecure = process.env.EXAMFORGE_SESSION_COOKIE_SECURE;
-    try {
-      process.env.NODE_ENV = "production";
-      delete process.env.EXAMFORGE_SESSION_COOKIE_SECURE;
-      assert.equal(getSessionCookieConfig().secure, true);
+  it("allows local HTTP cookies but refuses an insecure production override", () => {
+    assert.equal(getSessionCookieConfig({
+      NODE_ENV: "development",
+      EXAMFORGE_SESSION_COOKIE_SECURE: "false",
+    }).secure, false);
+    assert.equal(getSessionCookieConfig({ NODE_ENV: "production" }).secure, true);
+    assert.equal(getSessionCookieConfig({
+      NODE_ENV: "production",
+      EXAMFORGE_DEPLOYMENT_MODE: "demo",
+      EXAMFORGE_SESSION_COOKIE_SECURE: "false",
+    }).secure, false);
+    assert.throws(() => getSessionCookieConfig({
+      NODE_ENV: "production",
+      EXAMFORGE_SESSION_COOKIE_SECURE: "false",
+    }), /Secure cookies cannot be disabled in production/);
+  });
 
-      process.env.EXAMFORGE_SESSION_COOKIE_SECURE = "false";
-      assert.equal(getSessionCookieConfig().secure, false);
+  it("rejects malformed cookie flags, names and TTL values", () => {
+    assert.throws(() => getSessionCookieConfig({
+      EXAMFORGE_SESSION_COOKIE_SECURE: "yes",
+    }), /must be true or false/);
+    assert.throws(() => getSessionCookieConfig({
+      EXAMFORGE_SESSION_COOKIE_NAME: "invalid cookie name",
+    }), /cookie name/);
+    assert.throws(() => getSessionCookieConfig({
+      EXAMFORGE_SESSION_TTL_SECONDS: "0",
+    }), /TTL/);
+    assert.throws(() => getSessionCookieConfig({
+      EXAMFORGE_SESSION_TTL_SECONDS: "not-a-number",
+    }), /TTL/);
+  });
 
-      process.env.EXAMFORGE_SESSION_COOKIE_SECURE = "true";
-      assert.equal(getSessionCookieConfig().secure, true);
-    } finally {
-      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = previousNodeEnv;
-      if (previousSecure === undefined) delete process.env.EXAMFORGE_SESSION_COOKIE_SECURE;
-      else process.env.EXAMFORGE_SESSION_COOKIE_SECURE = previousSecure;
-    }
+  it("requires exact HTTPS origins in production", () => {
+    assert.deepEqual(
+      [...getTrustedOrigins({
+        NODE_ENV: "production",
+        EXAMFORGE_TRUSTED_ORIGINS: "https://examforge.site,https://www.examforge.site",
+      })],
+      ["https://examforge.site", "https://www.examforge.site"],
+    );
+    assert.throws(
+      () => getTrustedOrigins({ NODE_ENV: "production" }),
+      /required in production/,
+    );
+    assert.throws(() => getTrustedOrigins({
+      NODE_ENV: "production",
+      EXAMFORGE_TRUSTED_ORIGINS: "*",
+    }), /valid origin/);
+    assert.throws(() => getTrustedOrigins({
+      NODE_ENV: "production",
+      EXAMFORGE_TRUSTED_ORIGINS: "http://examforge.site",
+    }), /HTTPS/);
+    assert.throws(() => getTrustedOrigins({
+      NODE_ENV: "production",
+      EXAMFORGE_TRUSTED_ORIGINS: "https://examforge.site/path",
+    }), /exact origin/);
+    assert.deepEqual([...getTrustedOrigins({
+      NODE_ENV: "production",
+      EXAMFORGE_DEPLOYMENT_MODE: "demo",
+      EXAMFORGE_TRUSTED_ORIGINS: "http://localhost:3000",
+    })], ["http://localhost:3000"]);
   });
 });

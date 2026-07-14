@@ -62,6 +62,7 @@ import {
   serializeExpiredSessionCookie,
   serializeSessionCookie,
 } from "./auth/session-cookie.js";
+import { getTrustedOrigins } from "./auth/trusted-origins.js";
 
 export interface AppOptions {
   repository?: PlatformRepository;
@@ -1278,12 +1279,6 @@ function requireRole(
       : "A valid server session is required to perform this operation.",
   });
   return false;
-}
-
-function getTrustedOrigins() {
-  const configured = process.env.EXAMFORGE_TRUSTED_ORIGINS
-    ?? "http://localhost:3000,http://127.0.0.1:3000";
-  return new Set(configured.split(",").map((origin) => origin.trim()).filter(Boolean));
 }
 
 function isMutation(method: string) {

@@ -1,5 +1,9 @@
 # 腾讯云服务器部署环境勘察报告
 
+> **2026-07-14 现状更新：** 经用户授权，数据盘和 COS 已迁到多项目共享挂载点 `/srv/data/hot`、`/srv/data/cos`，旧 `/srv/data/devbrain-lab` 层级已移除；OpenViking 与 COS 挂载服务已恢复健康。本文后续推荐路径按新挂载点更新，`## 11. 执行过的命令` 仍保留勘察当日的历史路径与证据。
+
+> **2026-07-14 任务 6 复核：** 再次执行脱敏只读检查。Ubuntu、4 核 3.6 GiB、Docker、Compose、nginx、共享挂载和候选端口均满足进入正式预检的主机前提；根域名与 `www` 已解析。`ubuntu` 用户的 TCR 登录准备已经完成，维护窗口定为备案通过后的第一个可用晚上 22:00–00:30（北京时间）。ExamForge 证书、正式发布清单和专属目录尚不存在，备案仍在审核，因此当前结论为 `no-go`，未执行任何部署或 nginx 写入。
+
 > 工作目录：/srv（root 拥有，无写权限），本报告写入 /home/ubuntu/survey-report.md
 > 勘察时间：2026-07-12 16:00 CST
 > 模式：只读勘察，未做任何修改、安装、启停、docker 变更操作
@@ -16,7 +20,7 @@
 2. 内存是首要约束：无 swap，勘察时已用约 1.4 GiB，留约 1.7–1.9 GiB；该数值包含 Codex/opencode 等交互式勘察进程，不能直接视为生产稳态。建议在私有试部署前配置 2–4 GB swap 作为峰值保护，并通过真实负载确定容器内存上限。
 3. 反向代理为 nginx（非 Caddy），托管两个站点 + Certbot 自动续期，**建议复用 nginx 新增子域名**，暂不迁移 Caddy。
 4. 两个站点都仅本地端口（8101、4173），关键端口 3000/3001/5432/6379 当前全空，与 ExamForge 无冲突。
-5. 20 G ext4 数据盘（`/srv/data/devbrain-lab/hot`，19 G 可用）可作为 ExamForge PostgreSQL、Redis 和上传数据的候选持久化位置，最终目录和配额由项目部署设计决定。
+5. 20 G ext4 数据盘（现挂载于 `/srv/data/hot`，勘察时 19 G 可用）可作为 ExamForge PostgreSQL、Redis 和上传数据的候选持久化位置，最终目录和配额由项目部署设计决定。
 6. Docker 29.4.0 + Compose v5.1.2 已就绪，存储驱动 overlayfs，Docker Root 占 144 M，磁盘空间充足。
 7. 系统无 PG/MySQL/Redis/Caddy/Apache 服务在跑，无 systemd/cron 配置文件级业务自动备份；现有 /srv/backups 目录均为空，**部署后需建立 ExamForge 的备份与日志策略**。
 8. UFW 已启用，仅放行 22/80/443；腾讯云安全组无法从主机内确认。
@@ -49,8 +53,8 @@
 | 设备 | FS | 挂载点 | 容量 | 已用 | 可用 | 建议用途 |
 |---|---|---|---|---|---|---|
 | /dev/vda2 | ext4 | / | 40 G | 18 G | 20 G | 系统盘；Docker Root、应用代码、journald |
-| /dev/vdb | ext4 | /srv/data/devbrain-lab/hot | 20 G | 15 M | 19 G | **ExamForge 持久化数据主目录** |
-| cosfs | fuse.cosfs | /srv/data/devbrain-lab/cos | 256 T（COS） | 0 | — | 对象存储，**不宜放 PG/Redis** |
+| /dev/vdb | ext4 | /srv/data/hot | 20 G | 15 M | 19 G | **ExamForge 持久化数据主目录** |
+| cosfs | fuse.cosfs | /srv/data/cos | 256 T（COS） | 0 | — | 对象存储，**不宜放 PG/Redis** |
 
 文件系统详情：
 - vda2：Block size 4096，Block count 10485243，Free blocks 7172608，Mount count 83，Last checked 2022-04-24，挂载选项 `rw,relatime`。
@@ -151,6 +155,13 @@ nginx 已配置 server（脱敏后关键字段）：
   - **结论**：campus2hand.site 明日 07-13 起大概率证书失效，HTTPS 会变自签/过期，二手交易系统前端将告警。
   - 根因推断：`campus2hand.site` 可能未完成 ICP 备案、备案失效或受到其他 DNS/接入策略影响。主机侧不能确认具体原因，需要在腾讯云控制台核实备案、DNS 和接入状态。
 
+2026-07-14 任务 6 复核补充：
+
+- `nginx -t` 通过，现有配置脱敏归档指纹为 SHA-256 `e52d6059e3cb68277783c377e1300eff936e7f64cf443bf9f42f6a21e88555b0`。
+- `examforge.site` 与 `www.examforge.site` 均可解析，但 `/etc/letsencrypt/live/examforge.site/fullchain.pem` 尚不存在。
+- `campus2hand.site` 证书现已确认过期；`my-visual-cpu.site` 证书有效至 2026-09-29。
+- TCR registry 网络可达；`ubuntu` 用户已完成交互式登录，Docker 配置 owner 为 `ubuntu:ubuntu`、权限为 600，且存在 TCR 登录项。凭据值未读取；正式 digest 拉取仍需等待镜像发布后验证。
+
 UFW：active，default deny incoming / allow outgoing / deny routed，**放行 22/80/443（含 v6）**。日志 on (low)。
 
 nginx 当前状态：master + 4 worker，CPU 0%、内存各 6–10 MiB；80/443 当前 established 连接 1 个。
@@ -168,7 +179,7 @@ nginx 当前状态：master + 4 worker，CPU 0%、内存各 6–10 MiB；80/443 
 - PostgreSQL / MySQL / MariaDB / Redis：均 inactive 且未安装二进制（无 psql / mysql / redis-server），与 ExamForge 无冲突。
 - 现有持久化：
   - trading-system：/srv/apps/trading-system/{data,logs}（bind mount，体积很小）
-  - openviking 索引/缓存：/srv/data/devbrain-lab/hot/{db,indexes,cache,runs,openviking-workspace}（15 M）
+  - openviking 索引/缓存：`/srv/data/hot` 下的现有 OpenViking 子目录（勘察时 15 M）
   - hermes：/home/ubuntu/.hermes 的 state.db（86 MiB）+ sessions/backups 目录
 - 自动备份：/srv/backups/{devbrain,project-b,project-c,trading-system} 目录**均为空**；无 PG/mongodump/restic/borg 类 cron 任务；**当前实际没有业务自动备份在运行**。
 - 日志轮转：logrotate.timer enabled，每日；journald 占 344 MiB（建议上限型配置）。
@@ -187,13 +198,13 @@ nginx 当前状态：master + 4 worker，CPU 0%、内存各 6–10 MiB；80/443 
 |---|---|
 | 应用代码目录 | /srv/apps/examforge（放 compose 文件、nginx 片段、运维脚本；不存放构建产物） |
 | Compose 项目名 | examforge |
-| 持久化数据目录 | /srv/data/devbrain-lab/hot/examforge（vdb，19 G 可用） |
+| 持久化数据目录 | /srv/data/hot/examforge（vdb，勘察时 19 G 可用） |
 | 内部端口 | Next.js Web 和 Fastify API 可按需映射到宿主机 `127.0.0.1:3000/3001` 供 nginx 反代；PostgreSQL、Redis、Worker 和 Scheduler 只在 ExamForge Compose 内部网络暴露，不映射宿主机端口 |
 | 对外入口 | nginx 新增 server `examforge.<新子域名>`：`/` → 3000，`/api` → 3001；仅 80/443 对外 |
 | TLS | 复用 Certbot，新增域名后 `certbot --nginx -d examforge.<域名>`，certbot.timer 自动续 |
 | 镜像策略 | CI 产镜像推送私有 registry；服务器 `docker compose pull && up -d`；不在 4 G 内存主机上构建 |
-| Postgres 数据卷 | bind 或 named volume 指向 /srv/data/devbrain-lab/hot/examforge/pgdata |
-| Redis 持久化 | RDB/AOF 指向 /srv/data/devbrain-lab/hot/examforge/redis |
+| Postgres 数据卷 | bind 或 named volume 指向 /srv/data/hot/examforge/pgdata |
+| Redis 持久化 | RDB/AOF 指向 /srv/data/hot/examforge/redis |
 | Worker 并发 | **固定 1**（与其它站点共享 4 核） |
 | Scheduler 资源 | 初始候选为 `cpus: 1.0-2.0`、内存 1-1.5 GB；不得在未运行 OR-Tools 真实基准前压缩到 256 MB |
 | Postgres 资源 | `memory: 512m–768m`（建议 768m，并设 `shared_buffers=128MB`） |
@@ -211,7 +222,7 @@ nginx 当前状态：master + 4 worker，CPU 0%、内存各 6–10 MiB；80/443 
 
 ### 9.1 已确认事实
 
-1. `campus2hand.site` 证书将于 2026-07-13 到期，续期 dry-run 已失败。这是现有站点的紧急运维事项，不是 ExamForge 当前实现阻塞；是否保留该站点由用户决定。
+1. `campus2hand.site` 证书已于 2026-07-13 过期，且此前续期 dry-run 已失败。这是现有站点的紧急运维事项，不是 ExamForge 当前实现阻塞；是否保留或修复该站点由用户决定。
 2. 主机没有 swap，实际内存为 3.6 GiB。ExamForge 私有试部署必须记录关闭非必要交互进程后的基线和求解峰值，再确定容器限制；建议配置 2–4 GB swap 作为保护。
 3. 现有 `trading-system` 容器日志没有尺寸上限。ExamForge 应显式设置 `json-file` 的 `max-size` 和 `max-file`。
 4. 当前没有业务级自动备份。ExamForge 正式部署前需要 PostgreSQL 备份、独立存储复制和恢复演练。
@@ -223,7 +234,7 @@ nginx 当前状态：master + 4 worker，CPU 0%、内存各 6–10 MiB；80/443 
 1. `campus2hand.site` HTTP-01 请求被 DNSPod `webblock.html` 截断的具体原因，包括备案、DNS 和接入状态。
 2. ExamForge 候选域名的备案状态、解析权限和 HTTP-01 可达性。
 3. 安全组实际放行端口、带宽、磁盘 IOPS 和云监控告警策略。
-4. COS 桶权限、生命周期、容量和能否作为数据库备份的独立目标。
+4. COS 桶已挂载到 `/srv/data/cos`；仍需确认权限、生命周期、容量和能否作为数据库备份的独立目标。
 5. sudo 需要交互密码；nginx、Certbot、swap 和系统级目录的写操作需要用户授权并现场执行。
 
 ### 9.3 项目侧复核修正
@@ -235,15 +246,16 @@ nginx 当前状态：master + 4 worker，CPU 0%、内存各 6–10 MiB；80/443 
 5. 复用现有 nginx 是 ExamForge 项目基于服务器现状作出的设计选择，不是本报告对项目的强制要求。
 
 ## 10. 后续需要用户确认的信息
-- 期望的 ExamForge 对外域名，以及该域名在腾讯云的备案、解析和接入状态。
+- ExamForge 对外域名已确定为 `examforge.site`，根域名与 `www` 已解析；仍需等待备案通过并验证 HTTP-01 可达性。
 - `campus2hand.site` 的备案、DNS 和接入状态。
 - 是否同意在私有试部署前配置 2–4 GB swap，并以真实负载确定 Compose 内存上限。
 - 是否允许你（或我提供命令后由你）执行：新增 nginx server、运行 certbot、配 nginx default_server return 444、调整 client_max_body_size。
-- 镜像托管位置（GHCR / 阿里云 ACR / 私有 registry）及拉取凭据注入方式（Compose secrets / docker login）。
-- vdb 上是否同意划出 /srv/data/devbrain-lab/hot/examforge 子目录并与 openviking 数据物理隔离。
+- 镜像托管已选腾讯云 TCR 广州个人版，命名空间为 `examforge`；registry 网络与 `ubuntu` 用户登录准备已确认，仍需在正式 digest 发布后验证只读拉取。
+- vdb 已迁到共享挂载点 `/srv/data/hot`；ExamForge 使用 `/srv/data/hot/examforge`，与 OpenViking 子目录保持逻辑隔离。
 - 是否需要配置自动备份（PG dump / 卷快照）的计划。
 - 是否在安全组放行 ExamForge 对外端口（理论上只需 80/443，内部端口全经 nginx 转发可不开放）。
 - ExamForge 项目已决定复用现有 nginx，不迁移 Caddy；仍需确认新增 server 配置和 reload 的执行权限。
+- 维护窗口已定为备案通过后的第一个可用晚上 22:00–00:30（北京时间）；进入窗口时仍需用户最终确认开始，授权不得扩张到其他站点或全局服务。
 
 ## 11. 执行过的命令（只读，敏感脱敏）
 普通用户只读：
