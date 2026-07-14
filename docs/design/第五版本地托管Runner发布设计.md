@@ -187,6 +187,15 @@ ccr.ccs.tencentyun.com/examforge/web@sha256:...
 ccr.ccs.tencentyun.com/examforge/worker@sha256:...
 ```
 
+首次 B 方案正式发布对应提交 `f7697252a931b3da871272355fec3ebcab0e3842`，工作流 `29357107371` 取得以下远程 digest：
+
+```text
+ccr.ccs.tencentyun.com/examforge/api@sha256:a09acaad2046d134869e2f2e6cb11bf9a1ca3336d362191d65d75151438073c0
+ccr.ccs.tencentyun.com/examforge/scheduler@sha256:b9bc72a5f416adaab5218f242be9257ffeb2fda5889366303eb3ccf5d6d80fad
+ccr.ccs.tencentyun.com/examforge/web@sha256:ae735a3b2fba49549cdc9f311e0b83a01011036f4166ab1e2390a7f6d1c5b36b
+ccr.ccs.tencentyun.com/examforge/worker@sha256:a346a2d0904cd08cf19e2b68c82679fe15dff79abecc5aa76552660b615c982f
+```
+
 生产服务器只使用 manifest 中的 digest。首次部署前先执行只读 manifest 检查和镜像拉取验证；正式目录、环境文件、Compose、nginx、证书和数据迁移仍按第六阶段任务 7 的独立授权执行。
 
 本地电脑关机后，服务器仍可从 TCR 拉取已经发布的当前或上一版本。回滚不依赖开发仓库或本地 Runner 在线。
@@ -222,4 +231,4 @@ ccr.ccs.tencentyun.com/examforge/worker@sha256:...
 
 ## 12. 当前状态
 
-截至 2026-07-15，用户已确认采用本地托管 Runner 的 B 方案，并保留广州 TCR。API/Worker 最小生产依赖树和 700 MB 门禁已在本地验证，工作流已拆分为 GitHub 托管质量 job 与四标签 self-hosted 发布 job，单镜像推送已具备 30 分钟上限、最多 1 次重试、状态日志和远程 digest 校验合同。Runner `2.335.1` 已安装到独立目录并完成仓库级注册，不安装系统服务；提交 `5f8eee8` 的工作流 `29354931745` 已证明 GitHub 托管质量 job 成功交接到本地 Runner，但发布 job 在首个 API 构建拉取基础镜像时因 BuildKit 未继承 WSL 代理而失败，未进入 SBOM、Trivy、TCR 登录、推送或 manifest 步骤。代理隔离修复已通过本地专用 `docker-container` builder 的真实冷拉取、构建和职责探针，待提交后重跑正式工作流；TCR 尚无可部署的四镜像正式 manifest，因此第六阶段任务 6 仍为 `no-go`。
+截至 2026-07-15，用户已确认采用本地托管 Runner 的 B 方案，并保留广州 TCR。API/Worker 最小生产依赖树和 700 MB 门禁已在本地验证，工作流已拆分为 GitHub 托管质量 job 与四标签 self-hosted 发布 job，单镜像推送已具备 30 分钟上限、最多 1 次重试、状态日志和远程 digest 校验合同。Runner `2.335.1` 已安装到独立目录并完成仓库级注册，不安装系统服务；代理隔离修复提交 `f769725` 的工作流 `29357107371` 已完整成功，GitHub 托管质量 job、本地 Runner 四镜像构建与职责探针、四份 SBOM、Trivy HIGH/CRITICAL 门禁、TCR 登录、四次推送、远程 digest 校验、release manifest 校验和 artifact 上传均通过。正式 artifact `examforge-release-f7697252a931b3da871272355fec3ebcab0e3842` 已保存，job 清理后本机无凭据访问私有 TCR 返回 `401`，符合凭据清理边界。第六阶段任务 3 已完成；北京服务器独立只读凭据尚未验证四个 digest，且备案和正式部署前提仍未满足，因此任务 6 继续为 `no-go`。
