@@ -109,7 +109,8 @@ jobs:
     name: 构建、扫描并推送镜像
     needs: quality
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # GitHub 托管运行器首次向广州 TCR 上传大镜像时可能超过一小时。
+    timeout-minutes: 180
     env:
       PUBLIC_ORIGIN: ${{ inputs.public_origin }}
       TCR_REGISTRY: ${{ vars.TCR_REGISTRY }}

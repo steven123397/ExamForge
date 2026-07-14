@@ -144,6 +144,7 @@ describe("release workflow boundary", () => {
     assert.ok(loginPosition < pushPosition);
     assert.match(workflow, /NEXT_PUBLIC_API_BASE_URL/);
     assert.match(workflow, /linux\/amd64/);
+    assert.match(workflow, /release:[\s\S]*?timeout-minutes:\s*180/);
   });
 });
 
