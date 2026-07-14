@@ -21,8 +21,10 @@ COPY packages/shared packages/shared
 RUN npm run build --workspace @examforge/shared \
     && npm run build --workspace @examforge/scheduling-application \
     && npm run build --workspace @examforge/db \
-    && npm run build --workspace @examforge/worker \
-    && npm prune --omit=dev --workspaces
+    && npm run build --workspace @examforge/worker
+
+FROM build AS production-dependencies
+RUN npm ci --omit=dev --workspace @examforge/worker --include-workspace-root=false --no-fund --no-audit
 
 FROM node:22.22.2-bookworm-slim AS runtime
 ARG SOURCE_REVISION=unknown
@@ -41,7 +43,7 @@ LABEL org.opencontainers.image.title="ExamForge Worker" \
     org.opencontainers.image.revision="${SOURCE_REVISION}" \
     org.opencontainers.image.created="${SOURCE_CREATED_AT}"
 
-COPY --from=build --chown=10003:10003 /app/node_modules /app/node_modules
+COPY --from=production-dependencies --chown=10003:10003 /app/node_modules /app/node_modules
 COPY --from=build --chown=10003:10003 /app/apps/worker/package.json /app/apps/worker/package.json
 COPY --from=build --chown=10003:10003 /app/apps/worker/dist /app/apps/worker/dist
 COPY --from=build --chown=10003:10003 /app/packages/db/package.json /app/packages/db/package.json

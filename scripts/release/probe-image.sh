@@ -36,9 +36,33 @@ source_url=$(docker image inspect --format '{{index .Config.Labels "org.opencont
 [[ "$source_url" =~ ^https://github\.com/[^/]+/[^/]+$ ]] \
   || { printf '%s image source URL is invalid.\n' "$component" >&2; exit 1; }
 
+if [[ "$component" == "api" || "$component" == "worker" ]]; then
+  max_node_image_size_bytes=700000000
+  image_size=$(docker image ls --format '{{.Size}}' "$image")
+  if ! image_size_bytes=$(numfmt --from=si "${image_size%B}"); then
+    printf '%s image size could not be normalized.\n' "$component" >&2
+    exit 1
+  fi
+  if ! [[ "$image_size_bytes" =~ ^[0-9]+$ ]] || ((image_size_bytes > max_node_image_size_bytes)); then
+    printf '%s image exceeds the 700 MB uncompressed size limit.\n' "$component" >&2
+    exit 1
+  fi
+
+  docker run --rm --entrypoint sh "$image" -c '
+    for package in next typescript tsx @playwright; do
+      test ! -e "/app/node_modules/$package" || exit 1
+    done
+  ' || { printf '%s image contains unrelated workspace tooling.\n' "$component" >&2; exit 1; }
+fi
+
 if [[ "$component" == "api" ]]; then
   docker run --rm --entrypoint sh "$image" -c \
-    '! command -v python >/dev/null && ! command -v python3 >/dev/null && ! command -v uv >/dev/null'
+    '! command -v python >/dev/null && ! command -v python3 >/dev/null && ! command -v uv >/dev/null && test ! -e /app/node_modules/bullmq'
+fi
+
+if [[ "$component" == "worker" ]]; then
+  docker run --rm --entrypoint sh "$image" -c \
+    'test ! -e /app/node_modules/fastify && test ! -e /app/node_modules/@fastify/cors'
 fi
 
 if [[ "$component" == "web" ]]; then

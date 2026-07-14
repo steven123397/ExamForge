@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,6 +18,8 @@ const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)))
 const verifierPath = join(repositoryRoot, "scripts/release/verify-release.mjs");
 const creatorPath = join(repositoryRoot, "scripts/release/create-release-manifest.mjs");
 const workflowPath = join(repositoryRoot, ".github/workflows/release-images.yml");
+const probeImagePath = join(repositoryRoot, "scripts/release/probe-image.sh");
+const pushImagePath = join(repositoryRoot, "scripts/release/push-image.sh");
 const commitSha = "1".repeat(40);
 const imageDigest = `sha256:${"2".repeat(64)}`;
 const sourceUrl = "https://github.com/steven123397/ExamForge";
@@ -144,7 +148,107 @@ describe("release workflow boundary", () => {
     assert.ok(loginPosition < pushPosition);
     assert.match(workflow, /NEXT_PUBLIC_API_BASE_URL/);
     assert.match(workflow, /linux\/amd64/);
-    assert.match(workflow, /release:[\s\S]*?timeout-minutes:\s*180/);
+  });
+
+  it("keeps quality on GitHub hosting and targets release only to the dedicated runner", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    const qualityJob = extractWorkflowJob(workflow, "quality", "release");
+    const releaseJob = extractWorkflowJob(workflow, "release");
+
+    assert.match(qualityJob, /runs-on:\s*ubuntu-24\.04/);
+    assert.doesNotMatch(qualityJob, /TCR_(?:REGISTRY|NAMESPACE|USERNAME|PASSWORD)/);
+    assert.doesNotMatch(qualityJob, /docker\/(?:login|setup-buildx)-action|docker buildx build/);
+    assert.match(releaseJob, /runs-on:\s*\[self-hosted, linux, x64, examforge-release\]/);
+    assert.doesNotMatch(releaseJob, /runs-on:\s*ubuntu-/);
+    assert.match(releaseJob, /timeout-minutes:\s*120/);
+    assert.doesNotMatch(releaseJob, /^\s+install:\s*true/m);
+  });
+
+  it("checks out the exact release SHA before the self-hosted runner builds", () => {
+    const releaseJob = extractWorkflowJob(readFileSync(workflowPath, "utf8"), "release");
+
+    assert.match(releaseJob, /ref:\s*\$\{\{\s*github\.sha\s*\}\}/);
+    assert.match(releaseJob, /persist-credentials:\s*false/);
+    assert.match(releaseJob, /git rev-parse HEAD/);
+    assert.match(releaseJob, /GITHUB_SHA/);
+    assert.ok(releaseJob.indexOf("git rev-parse HEAD") < releaseJob.indexOf("docker buildx build"));
+  });
+
+  it("limits and records each image push with one retry and remote digest verification", () => {
+    assert.ok(existsSync(pushImagePath), "push-image.sh must provide the bounded push contract");
+    const pushScript = readFileSync(pushImagePath, "utf8");
+    const releaseJob = extractWorkflowJob(readFileSync(workflowPath, "utf8"), "release");
+
+    assert.match(pushScript, /EXAMFORGE_PUSH_TIMEOUT_SECONDS:-1800/);
+    assert.match(pushScript, /max_attempts=2/);
+    assert.match(pushScript, /timeout[\s\S]*docker push/);
+    assert.match(pushScript, /docker buildx imagetools inspect/);
+    assert.match(pushScript, /status=/);
+    assert.match(releaseJob, /scripts\/release\/push-image\.sh/);
+    assert.match(releaseJob, /push-status\.log/);
+  });
+
+  it("does not contain any production server connection or deployment command", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+
+    assert.doesNotMatch(workflow, /(?:^|\s)(?:ssh|scp|rsync)(?:\s|$)/m);
+    assert.doesNotMatch(workflow, /nginx|certbot|remote compose/i);
+  });
+});
+
+describe("release image runtime boundary", () => {
+  it("installs only the selected production workspace for API and Worker", () => {
+    for (const [name, workspace] of [["api", "@examforge/api"], ["worker", "@examforge/worker"]]) {
+      const dockerfile = readFileSync(join(repositoryRoot, `apps/${name}/Dockerfile`), "utf8");
+
+      assert.match(dockerfile, /FROM build AS production-dependencies/);
+      assert.match(
+        dockerfile,
+        new RegExp(`npm ci --omit=dev --workspace ${workspace.replace("/", "\\/")} --include-workspace-root=false`),
+      );
+      assert.match(dockerfile, /COPY --from=production-dependencies[^\n]*\/app\/node_modules[^\n]*\/app\/node_modules/);
+      assert.doesNotMatch(dockerfile, /COPY --from=build[^\n]*\/app\/node_modules/);
+      assert.doesNotMatch(dockerfile, /npm prune --omit=dev --workspaces/);
+    }
+  });
+
+  it("enforces the 700 MB limit and excludes unrelated workspace tooling", () => {
+    const probeScript = readFileSync(probeImagePath, "utf8");
+
+    assert.match(probeScript, /max_node_image_size_bytes=700000000/);
+    assert.match(probeScript, /docker image ls --format '\{\{\.Size\}\}'/);
+    assert.match(probeScript, /numfmt --from=si/);
+    assert.doesNotMatch(probeScript, /docker image inspect --format '\{\{\.Size\}\}'/);
+    for (const excludedPackage of ["next", "typescript", "tsx", "@playwright"]) {
+      assert.match(probeScript, new RegExp(excludedPackage.replace("@", "@?")));
+    }
+  });
+});
+
+describe("bounded registry push helper", () => {
+  it("retries one failed push and returns the remotely inspected digest", () => {
+    const fixture = createPushFixture(2);
+    const result = runPushFixture(fixture);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(fixture.attemptPath, "utf8"), "2\n");
+    assert.equal(readFileSync(fixture.digestPath, "utf8"), `${imageDigest}\n`);
+    const status = readFileSync(fixture.statusPath, "utf8");
+    assert.match(status, /attempt=1 status=failed reason=push_failed/);
+    assert.match(status, /attempt=1 status=retrying reason=push_failed/);
+    assert.match(status, /attempt=2 status=succeeded reason=remote_digest_verified/);
+  });
+
+  it("stops after the second failed push and does not write a digest", () => {
+    const fixture = createPushFixture(3);
+    const result = runPushFixture(fixture);
+
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(fixture.attemptPath, "utf8"), "2\n");
+    assert.equal(existsSync(fixture.digestPath), false);
+    const status = readFileSync(fixture.statusPath, "utf8");
+    assert.equal((status.match(/status=failed/g) ?? []).length, 2);
+    assert.equal((status.match(/status=retrying/g) ?? []).length, 1);
   });
 });
 
@@ -249,4 +353,62 @@ function writeJson(path, value) {
 
 function sha256(content) {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+function extractWorkflowJob(workflow, name, nextName) {
+  const start = workflow.indexOf(`  ${name}:\n`);
+  assert.notEqual(start, -1, `workflow job ${name} must exist`);
+  const end = nextName ? workflow.indexOf(`  ${nextName}:\n`, start + 1) : workflow.length;
+  assert.notEqual(end, -1, `workflow job ${nextName} must exist`);
+  return workflow.slice(start, end);
+}
+
+function createPushFixture(succeedOnAttempt) {
+  const directory = mkdtempSync(join(tmpdir(), "examforge-push-"));
+  const binDirectory = join(directory, "bin");
+  const dockerPath = join(binDirectory, "docker");
+  const attemptPath = join(directory, "attempts");
+  const digestPath = join(directory, "digest.txt");
+  const statusPath = join(directory, "push-status.log");
+  mkdirSync(binDirectory, { recursive: true });
+  writeFileSync(dockerPath, `#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "$1" == "push" ]]; then
+  attempt=0
+  [[ ! -f "$FAKE_DOCKER_ATTEMPT_PATH" ]] || attempt=$(< "$FAKE_DOCKER_ATTEMPT_PATH")
+  attempt=$((attempt + 1))
+  printf '%s\\n' "$attempt" > "$FAKE_DOCKER_ATTEMPT_PATH"
+  printf 'fake push attempt %s\\n' "$attempt"
+  ((attempt >= FAKE_DOCKER_SUCCEED_ON_ATTEMPT))
+  exit
+fi
+if [[ "$1 $2 $3" == "buildx imagetools inspect" ]]; then
+  printf '{"digest":"${imageDigest}"}\\n'
+  exit 0
+fi
+exit 2
+`);
+  chmodSync(dockerPath, 0o755);
+  return { directory, binDirectory, attemptPath, digestPath, statusPath, succeedOnAttempt };
+}
+
+function runPushFixture(fixture) {
+  return spawnSync("bash", [
+    pushImagePath,
+    `ccr.ccs.tencentyun.com/examforge/api:${commitSha}`,
+    "api",
+    fixture.digestPath,
+  ], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${fixture.binDirectory}:${process.env.PATH}`,
+      EXAMFORGE_PUSH_RETRY_DELAY_SECONDS: "0",
+      EXAMFORGE_PUSH_STATUS_FILE: fixture.statusPath,
+      EXAMFORGE_PUSH_LOG_DIR: join(fixture.directory, "logs"),
+      FAKE_DOCKER_ATTEMPT_PATH: fixture.attemptPath,
+      FAKE_DOCKER_SUCCEED_ON_ATTEMPT: String(fixture.succeedOnAttempt),
+    },
+  });
 }

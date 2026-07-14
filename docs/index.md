@@ -21,6 +21,7 @@
 - `docs/design/第四版实现内容设计.md`：第四版数据一致性、服务层治理、算法能力对齐、规模验证和演示可复现设计。
 - `docs/design/第五版实现内容设计.md`：第五版可靠调度执行、真实身份权限、前端专业化和腾讯云部署设计。
 - `docs/design/第五版前端信息架构与视觉规范.md`：第五版多角色路由、工作流、设计 token、页面状态、响应式和视觉验收基线。
+- `docs/design/第五版本地托管Runner发布设计.md`：GitHub 质量门禁、本地 WSL Runner、广州 TCR、镜像瘦身和北京服务器 digest 部署边界。
 - `docs/design/企业级全栈平台第一阶段设计.md`：企业级 Web/API/数据库平台第一阶段设计。
 - `docs/design/README.md`：设计文档模板。
 
