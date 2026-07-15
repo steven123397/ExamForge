@@ -85,10 +85,10 @@
 - 目标主机仍为 Ubuntu 22.04、4 核与 3719 MiB 内存；预检时可用内存为 2598 MiB，swap 仍为 0。系统盘可用约 20 GB，`/srv/data/hot` 可用约 19 GB，`/srv/data/cos` 挂载正常且两个共享根目录对 `ubuntu` 可读写。
 - Docker 29.4.0、Compose 5.1.2、nginx 1.18.0 与 Certbot 1.21.0 可用，`nginx -t` 通过；现有站点、OpenViking、COS 挂载和交易系统容器均保持运行。候选端口 3000、3001、5432、6379、8000 和 8080 均空闲，UFW 保持启用。
 - `examforge.site` 与 `www.examforge.site` 均已解析，但 ExamForge 证书尚不存在。现有 `campus2hand.site` 证书已于 2026-07-13 过期；该问题属于既有站点运维，不授权本阶段顺带修改。
-- TCR registry 端点可在约 0.12 秒内到达。用户随后已由 `ubuntu` 完成交互式 `docker login`；只读复核确认 `~/.docker/config.json` 属于 `ubuntu:ubuntu`、权限为 600，且包含 TCR 登录项，未读取或输出凭据值。正式镜像和 GitHub release artifact 已生成，但服务器侧尚未用独立只读凭据验证四个 digest；`/srv/apps/examforge`、`/srv/data/hot/examforge`、`/srv/data/cos/examforge`、服务器正式发布清单和上一发布清单均尚不存在。
-- 远程完整 `preflight.sh --read-only` 需要 600 权限生产环境文件、生产 Compose、正式镜像 digest、目标目录和可读取镜像的 TCR 凭据。上述前提尚未建立，因此本轮只完成主机级等价只读检查，没有使用 `--skip-image-check` 或占位 digest 冒充通过。
+- TCR registry 端点可在约 0.12 秒内到达。用户随后已由 `ubuntu` 完成交互式 `docker login`；只读复核确认 `~/.docker/config.json` 属于 `ubuntu:ubuntu`、权限为 600，且包含 TCR 登录项，未读取或输出凭据值。正式镜像和 GitHub release artifact 已生成；2026-07-15 服务器使用该独立只读登录对 API、scheduler、Web、Worker 四个精确 digest 执行 `docker manifest inspect` 均成功。验证未拉取镜像层，服务器仍无发布 SHA 镜像、ExamForge 容器、三个候选目录、正式发布清单副本或上一发布清单。
+- 远程完整 `preflight.sh --read-only` 需要 600 权限生产环境文件、生产 Compose、正式镜像 digest、目标目录和可读取镜像的 TCR 凭据。正式 digest 与只读凭据已经验证；环境文件、生产 Compose 和目标目录尚未建立，因此仍未运行完整 preflight，也没有使用 `--skip-image-check` 或占位 digest 冒充通过。
 - 用户已将维护窗口定为备案通过后的第一个可用晚上 22:00–00:30（北京时间）。本轮任务 6 的远程写入范围为无；任务 7 候选范围只包含 ExamForge 专属应用/数据/COS 目录、独立 nginx site、ExamForge systemd/logrotate 文件和 Compose project `examforge`，实际开始仍需用户在窗口前最终确认。
-- 当前结论仍为 `no-go`：正式镜像与发布清单已经生成，但任务 7 前仍需经用户另行授权，在北京服务器只读验证四个 digest，并等待备案允许证书签发；正式环境文件、目标目录和完整 preflight 也尚未建立。第一版尚无上一发布清单，首次部署的回滚基线只能是部署前无 ExamForge 栈状态与已保存的 nginx 配置指纹。
+- 当前结论仍为 `no-go`：正式镜像、发布清单和服务器侧四个 manifest 读取证据已经生成，但任务 7 前仍需等待备案允许证书签发，并经用户在维护窗口前最终授权；正式环境文件、目标目录、生产 Compose 落盘和完整 preflight 尚未建立。第一版尚无上一发布清单，首次部署的回滚基线只能是部署前无 ExamForge 栈状态与已保存的 nginx 配置指纹。
 
 ### 2.11 本地托管 Runner 发布决策
 
@@ -115,7 +115,7 @@
 ## 4. 当前边界
 
 - 不可变镜像发布工作流已通过完整正式运行，广州 TCR 已具备提交 `f769725` 的四镜像 digest 和可验证 release artifact；本地 image ID 或 tag 不再作为发布结论。真实生产 secrets、nginx/HTTPS、正式异机备份、已安装的外部健康巡检和腾讯云回滚演练仍未建立。
-- 腾讯云主机级只读预检、TCR 登录准备和条件式维护窗口已完成，但服务器侧四个 digest 读取验证、ExamForge 目录、正式环境文件和证书尚未具备，任务 6 仍处于 `no-go`，不得进入任务 7 写入或切流。
+- 腾讯云主机级只读预检、TCR 登录准备、四个正式 digest 的服务器 manifest 读取和条件式维护窗口已完成，但镜像层拉取、ExamForge 目录、正式环境文件、完整 preflight 和证书尚未具备，任务 6 仍处于 `no-go`，不得进入任务 7 写入或切流。
 - 腾讯云 4 核 4 GB 服务器上的 150 场基准、完整业务闭环、资源峰值和真实网络 E2E 尚未执行；本地 Compose 结果不能冒充远程验证。
 - PostCSS override 是上游稳定 Next 仍精确依赖旧版本期间的临时处置；Next 依赖声明变化时必须重新审计并优先移除覆盖。CR-003 在本地 Docker 代理变化时重新评估，远程发布使用 TCR，不把本地代理带到服务器。
 - 第五版仍不包含多租户、SSO、多策略批量实验、Pareto 推荐、联合全局优化或 Kubernetes 高可用。
@@ -123,6 +123,6 @@
 
 ## 5. 下一步
 
-1. 经用户另行授权后，在北京服务器仅执行四个正式 digest 的只读可访问性验证，并准备将 GitHub release artifact 作为后续 preflight 输入；不得创建目录、修改配置或启动容器。
-2. 等待备案通过；进入已约定的首个可用 22:00–00:30 窗口前，由用户最终确认开始，再创建 ExamForge 专属目录与 600 权限生产环境文件并运行完整远程 `preflight.sh --read-only`。通过前不部署、不签发证书、不修改 nginx。
+1. 等待备案通过；期间保留提交 `f769725` 的 release artifact 和四个 digest，不再对服务器执行操作。
+2. 进入已约定的首个可用 22:00–00:30 窗口前，由用户最终确认开始，再创建 ExamForge 专属目录与 600 权限生产环境文件、落盘生产 Compose，并运行完整远程 `preflight.sh --read-only`。通过前不部署、不签发证书、不修改 nginx。
 3. 任务 7 之后再执行正式部署、HTTPS、首份异机备份恢复、150 场基准、线上 smoke 和镜像回滚；未取得远程证据前不得宣称第五版整体完成。

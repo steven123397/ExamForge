@@ -2,7 +2,7 @@
 
 > **2026-07-14 现状更新：** 经用户授权，数据盘和 COS 已迁到多项目共享挂载点 `/srv/data/hot`、`/srv/data/cos`，旧 `/srv/data/devbrain-lab` 层级已移除；OpenViking 与 COS 挂载服务已恢复健康。本文后续推荐路径按新挂载点更新，`## 11. 执行过的命令` 仍保留勘察当日的历史路径与证据。
 
-> **2026-07-14 任务 6 复核：** 再次执行脱敏只读检查。Ubuntu、4 核 3.6 GiB、Docker、Compose、nginx、共享挂载和候选端口均满足进入正式预检的主机前提；根域名与 `www` 已解析。`ubuntu` 用户的 TCR 登录准备已经完成，维护窗口定为备案通过后的第一个可用晚上 22:00–00:30（北京时间）。ExamForge 证书、正式发布清单和专属目录尚不存在，备案仍在审核，因此当前结论为 `no-go`，未执行任何部署或 nginx 写入。
+> **2026-07-15 任务 6 复核：** 再次执行脱敏只读检查。Ubuntu、4 核 3.6 GiB、Docker、Compose、nginx、共享挂载和候选端口均满足进入正式预检的主机前提；根域名与 `www` 已解析。正式镜像与 GitHub release artifact 已生成，`ubuntu` 用户使用既有只读 TCR 登录对四个精确 digest 执行 `docker manifest inspect` 均成功；未拉取镜像层，服务器仍无 ExamForge 镜像、容器、正式清单副本或专属目录。维护窗口仍为备案通过后的第一个可用晚上 22:00–00:30（北京时间）；ExamForge 证书尚不存在且备案仍在审核，因此当前结论为 `no-go`，未执行任何部署或 nginx 写入。
 
 > 工作目录：/srv（root 拥有，无写权限），本报告写入 /home/ubuntu/survey-report.md
 > 勘察时间：2026-07-12 16:00 CST
@@ -160,7 +160,7 @@ nginx 已配置 server（脱敏后关键字段）：
 - `nginx -t` 通过，现有配置脱敏归档指纹为 SHA-256 `e52d6059e3cb68277783c377e1300eff936e7f64cf443bf9f42f6a21e88555b0`。
 - `examforge.site` 与 `www.examforge.site` 均可解析，但 `/etc/letsencrypt/live/examforge.site/fullchain.pem` 尚不存在。
 - `campus2hand.site` 证书现已确认过期；`my-visual-cpu.site` 证书有效至 2026-09-29。
-- TCR registry 网络可达；`ubuntu` 用户已完成交互式登录，Docker 配置 owner 为 `ubuntu:ubuntu`、权限为 600，且存在 TCR 登录项。凭据值未读取；正式 digest 拉取仍需等待镜像发布后验证。
+- TCR registry 网络可达；`ubuntu` 用户已完成交互式登录，Docker 配置 owner 为 `ubuntu:ubuntu`、权限为 600，且存在 TCR 登录项。凭据值未读取；2026-07-15 已对 API、scheduler、Web、Worker 四个正式 digest 完成远程 manifest 读取验证，未执行镜像层拉取。
 
 UFW：active，default deny incoming / allow outgoing / deny routed，**放行 22/80/443（含 v6）**。日志 on (low)。
 
