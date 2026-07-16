@@ -163,6 +163,11 @@ describe("release workflow boundary", () => {
     assert.doesNotMatch(releaseJob, /runs-on:\s*ubuntu-/);
     assert.match(releaseJob, /timeout-minutes:\s*120/);
     assert.doesNotMatch(releaseJob, /^\s+install:\s*true/m);
+    assert.match(
+      releaseJob,
+      /name:\s*配置 Node\.js[\s\S]*?package-manager-cache:\s*false/,
+      "self-hosted release must not restore the package-manager cache",
+    );
   });
 
   it("checks out the exact release SHA before the self-hosted runner builds", () => {
