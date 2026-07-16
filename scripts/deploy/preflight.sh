@@ -144,6 +144,8 @@ required_variables=(
   EXAMFORGE_STUDENT_PASSWORD
   EXAMFORGE_SESSION_COOKIE_SECURE
   EXAMFORGE_SESSION_TTL_SECONDS
+  SCHEDULE_JOB_MAX_ATTEMPTS
+  SCHEDULE_JOB_RETRY_BASE_DELAY_MS
 )
 for variable in "${required_variables[@]}"; do
   require_variable "$variable"
@@ -159,6 +161,23 @@ done
   || fail "EXAMFORGE_SESSION_TTL_SECONDS must be an integer."
 ((EXAMFORGE_SESSION_TTL_SECONDS >= 300 && EXAMFORGE_SESSION_TTL_SECONDS <= 604800)) \
   || fail "EXAMFORGE_SESSION_TTL_SECONDS must be between 300 and 604800."
+
+[[ "$SCHEDULE_JOB_MAX_ATTEMPTS" =~ ^[0-9]{1,2}$ ]] \
+  || fail "SCHEDULE_JOB_MAX_ATTEMPTS must be an integer between 2 and 10."
+schedule_job_max_attempts=$((10#$SCHEDULE_JOB_MAX_ATTEMPTS))
+((schedule_job_max_attempts >= 2 && schedule_job_max_attempts <= 10)) \
+  || fail "SCHEDULE_JOB_MAX_ATTEMPTS must be an integer between 2 and 10."
+[[ "$SCHEDULE_JOB_RETRY_BASE_DELAY_MS" =~ ^[0-9]{1,5}$ ]] \
+  || fail "SCHEDULE_JOB_RETRY_BASE_DELAY_MS must be an integer between 1 and 30000."
+schedule_job_retry_delay_ms=$((10#$SCHEDULE_JOB_RETRY_BASE_DELAY_MS))
+((schedule_job_retry_delay_ms >= 1 && schedule_job_retry_delay_ms <= 30000)) \
+  || fail "SCHEDULE_JOB_RETRY_BASE_DELAY_MS must be an integer between 1 and 30000."
+schedule_job_final_retry_delay_ms=$schedule_job_retry_delay_ms
+for ((attempt = 2; attempt < schedule_job_max_attempts; attempt += 1)); do
+  ((schedule_job_final_retry_delay_ms *= 2))
+done
+((schedule_job_final_retry_delay_ms <= 30000)) \
+  || fail "Schedule job final retry delay must not exceed 30000 ms."
 
 for variable in EXAMFORGE_API_PORT EXAMFORGE_WEB_PORT; do
   [[ "${!variable}" =~ ^[0-9]+$ ]] || fail "$variable must be a TCP port."

@@ -9,11 +9,40 @@ const requiredEnvironment = {
 };
 
 describe("worker configuration", () => {
-  it("uses production-safe BullMQ lock defaults", () => {
+  it("uses production-safe retry and BullMQ lock defaults", () => {
     const config = loadWorkerConfig(requiredEnvironment);
 
+    assert.equal(config.maxAttempts, 6);
+    assert.equal(config.retryBaseDelayMs, 1_000);
     assert.equal(config.lockDurationMs, 30_000);
     assert.equal(config.stalledIntervalMs, 30_000);
+  });
+
+  it("accepts a bounded shared retry policy", () => {
+    const config = loadWorkerConfig({
+      ...requiredEnvironment,
+      SCHEDULE_JOB_MAX_ATTEMPTS: "5",
+      SCHEDULE_JOB_RETRY_BASE_DELAY_MS: "1500",
+    });
+
+    assert.equal(config.maxAttempts, 5);
+    assert.equal(config.retryBaseDelayMs, 1_500);
+  });
+
+  it("rejects a retry policy whose final exponential delay exceeds 30 seconds", () => {
+    assert.throws(() => loadWorkerConfig({
+      ...requiredEnvironment,
+      SCHEDULE_JOB_MAX_ATTEMPTS: "6",
+      SCHEDULE_JOB_RETRY_BASE_DELAY_MS: "2000",
+    }), /final retry delay must not exceed 30000 ms/);
+  });
+
+  it("rejects a retry policy above the maximum attempt count", () => {
+    assert.throws(() => loadWorkerConfig({
+      ...requiredEnvironment,
+      SCHEDULE_JOB_MAX_ATTEMPTS: "11",
+      SCHEDULE_JOB_RETRY_BASE_DELAY_MS: "1",
+    }), /SCHEDULE_JOB_MAX_ATTEMPTS must be an integer between 2 and 10/);
   });
 
   it("accepts positive lock and stalled intervals for isolated fault drills", () => {

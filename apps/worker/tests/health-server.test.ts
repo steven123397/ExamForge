@@ -72,6 +72,8 @@ describe("worker health server", () => {
       outboxBatchSize: 50,
       outboxPollIntervalMs: 500,
       cancellationPollIntervalMs: 250,
+      maxAttempts: 6,
+      retryBaseDelayMs: 1_000,
       lockDurationMs: 30_000,
       stalledIntervalMs: 30_000,
     });

@@ -112,6 +112,41 @@ describe("scheduling worker", () => {
     assert.equal((await requireDb().db.select().from(scheduleRuns)).length, 1);
   });
 
+  it("recovers after the old three-attempt scheduler outage window", async () => {
+    const store = new ScheduleJobStore(requireDb());
+    const unavailable = () => new SchedulerClientError(
+      "Scheduler service is unavailable.",
+      "unavailable",
+      "scheduler_unavailable",
+      true,
+    );
+    const scheduler = new SequencedScheduler([
+      unavailable(),
+      unavailable(),
+      unavailable(),
+      buildScheduleResult(),
+    ]);
+    const retryPolicy = { maxAttempts: 4, retryBaseDelayMs: 250 };
+    const worker = startWorker(store, scheduler, retryPolicy);
+    const queue = createScheduleQueue(redisConnectionOptions(redisUrl, 1), retryPolicy);
+    closeables.push(worker, queue);
+    await worker.waitUntilReady();
+    const submitted = await submitJob(store, "scheduler-cold-recovery");
+
+    await queue.add("schedule-job", queueData(submitted.job.id), {
+      jobId: scheduleQueueJobId(submitted.job.id),
+    });
+    await waitForJobStatus(store, submitted.job.id, "succeeded");
+
+    const attempts = await requireDb().db.select().from(scheduleJobAttempts);
+    assert.deepEqual(
+      attempts.map((attempt) => attempt.status),
+      ["failed", "failed", "failed", "succeeded"],
+    );
+    assert.equal(scheduler.calls, 4);
+    assert.equal((await requireDb().db.select().from(scheduleRuns)).length, 1);
+  });
+
   it("aborts a running scheduler request after cooperative cancellation", async () => {
     const store = new ScheduleJobStore(requireDb());
     const scheduler = new AbortableScheduler();
@@ -235,6 +270,8 @@ function startWorker(
     cancellationPollIntervalMs?: number;
     lockDurationMs?: number;
     stalledIntervalMs?: number;
+    maxAttempts?: number;
+    retryBaseDelayMs?: number;
   } = {},
 ): Worker<ScheduleQueueJobData> {
   const worker = createSchedulingWorker({
@@ -244,6 +281,8 @@ function startWorker(
     cancellationPollIntervalMs: options.cancellationPollIntervalMs,
     lockDurationMs: options.lockDurationMs,
     stalledIntervalMs: options.stalledIntervalMs,
+    maxAttempts: options.maxAttempts,
+    retryBaseDelayMs: options.retryBaseDelayMs,
   });
   worker.on("error", () => undefined);
   return worker;

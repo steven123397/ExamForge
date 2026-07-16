@@ -48,6 +48,8 @@ const productionEnvironment = {
   EXAMFORGE_SESSION_TTL_SECONDS: "43200",
   EXAMFORGE_API_PORT: "4000",
   EXAMFORGE_WEB_PORT: "3000",
+  SCHEDULE_JOB_MAX_ATTEMPTS: "6",
+  SCHEDULE_JOB_RETRY_BASE_DELAY_MS: "1000",
 };
 
 describe("production Compose configuration", () => {
@@ -117,6 +119,10 @@ describe("production Compose configuration", () => {
     assert.equal(config.services.postgres.user, "70:70");
     assert.equal(config.services.redis.user, "999:1000");
     assert.equal(config.services.api.depends_on.migrate.condition, "service_completed_successfully");
+    for (const name of ["publisher", "worker"]) {
+      assert.equal(config.services[name].environment.SCHEDULE_JOB_MAX_ATTEMPTS, "6");
+      assert.equal(config.services[name].environment.SCHEDULE_JOB_RETRY_BASE_DELAY_MS, "1000");
+    }
   });
 });
 
@@ -143,6 +149,8 @@ describe("production environment and preflight", () => {
       "EXAMFORGE_OPERATOR_PASSWORD",
       "EXAMFORGE_TEACHER_PASSWORD",
       "EXAMFORGE_STUDENT_PASSWORD",
+      "SCHEDULE_JOB_MAX_ATTEMPTS",
+      "SCHEDULE_JOB_RETRY_BASE_DELAY_MS",
     ]) {
       assert.match(example, new RegExp(`^${name}=`, "m"), `${name} must be documented`);
     }
@@ -207,6 +215,8 @@ describe("production environment and preflight", () => {
       "EXAMFORGE_STUDENT_PASSWORD",
       "EXAMFORGE_SESSION_COOKIE_SECURE",
       "EXAMFORGE_SESSION_TTL_SECONDS",
+      "SCHEDULE_JOB_MAX_ATTEMPTS",
+      "SCHEDULE_JOB_RETRY_BASE_DELAY_MS",
     ];
     writeFileSync(
       envPath,
@@ -217,6 +227,39 @@ describe("production environment and preflight", () => {
     const validResult = runPreflight(envPath);
     assert.equal(validResult.status, 0, validResult.stderr);
     assert.match(validResult.stdout, /validation passed/);
+
+    const invalidEnvironment = {
+      ...productionEnvironment,
+      SCHEDULE_JOB_RETRY_BASE_DELAY_MS: "2000",
+    };
+    writeFileSync(
+      envPath,
+      `${names.map((name) => `${name}=${invalidEnvironment[name]}`).join("\n")}\n`,
+      { mode: 0o600 },
+    );
+    const invalidResult = runPreflight(envPath);
+    assert.notEqual(invalidResult.status, 0);
+    assert.match(
+      `${invalidResult.stdout}${invalidResult.stderr}`,
+      /final retry delay must not exceed 30000 ms/,
+    );
+
+    const excessiveAttemptsEnvironment = {
+      ...productionEnvironment,
+      SCHEDULE_JOB_MAX_ATTEMPTS: "11",
+      SCHEDULE_JOB_RETRY_BASE_DELAY_MS: "1",
+    };
+    writeFileSync(
+      envPath,
+      `${names.map((name) => `${name}=${excessiveAttemptsEnvironment[name]}`).join("\n")}\n`,
+      { mode: 0o600 },
+    );
+    const excessiveAttemptsResult = runPreflight(envPath);
+    assert.notEqual(excessiveAttemptsResult.status, 0);
+    assert.match(
+      `${excessiveAttemptsResult.stdout}${excessiveAttemptsResult.stderr}`,
+      /SCHEDULE_JOB_MAX_ATTEMPTS must be an integer between 2 and 10/,
+    );
   });
 });
 

@@ -1,10 +1,13 @@
 import { Queue, type ConnectionOptions } from "bullmq";
+import {
+  DEFAULT_SCHEDULE_JOB_RETRY_POLICY,
+  type ScheduleJobRetryPolicy,
+  validateScheduleJobRetryPolicy,
+} from "./retry-policy.js";
 
 export const SCHEDULE_QUEUE_NAME = "schedule-jobs";
 export const SCHEDULE_QUEUE_PREFIX = "examforge";
 export const SCHEDULE_JOB_EVENT_CHANNEL = "examforge:schedule-job-events";
-export const SCHEDULE_QUEUE_MAX_ATTEMPTS = 3;
-export const SCHEDULE_QUEUE_RETRY_DELAY_MS = 1_000;
 
 export interface ScheduleQueueJobData {
   jobId: string;
@@ -12,15 +15,19 @@ export interface ScheduleQueueJobData {
   traceId: string;
 }
 
-export function createScheduleQueue(connection: ConnectionOptions) {
+export function createScheduleQueue(
+  connection: ConnectionOptions,
+  retryPolicy: ScheduleJobRetryPolicy = DEFAULT_SCHEDULE_JOB_RETRY_POLICY,
+) {
+  const validatedRetryPolicy = validateScheduleJobRetryPolicy(retryPolicy);
   return new Queue<ScheduleQueueJobData>(SCHEDULE_QUEUE_NAME, {
     connection,
     prefix: SCHEDULE_QUEUE_PREFIX,
     defaultJobOptions: {
-      attempts: SCHEDULE_QUEUE_MAX_ATTEMPTS,
+      attempts: validatedRetryPolicy.maxAttempts,
       backoff: {
         type: "exponential",
-        delay: SCHEDULE_QUEUE_RETRY_DELAY_MS,
+        delay: validatedRetryPolicy.retryBaseDelayMs,
       },
       removeOnComplete: { count: 1_000 },
       removeOnFail: { count: 1_000 },

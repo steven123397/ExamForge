@@ -6,16 +6,19 @@ import {
 } from "@examforge/scheduling-application";
 import { Worker, type ConnectionOptions } from "bullmq";
 import {
-  SCHEDULE_QUEUE_MAX_ATTEMPTS,
   SCHEDULE_QUEUE_NAME,
   SCHEDULE_QUEUE_PREFIX,
-  SCHEDULE_QUEUE_RETRY_DELAY_MS,
   type ScheduleQueueJobData,
 } from "./queue.js";
+import {
+  DEFAULT_SCHEDULE_JOB_RETRY_POLICY,
+  type ScheduleJobRetryPolicy,
+  validateScheduleJobRetryPolicy,
+} from "./retry-policy.js";
 
 type SchedulingWorkerRepository = ScheduleJobRepository & ScheduleResultWriter;
 
-export interface SchedulingWorkerOptions {
+export interface SchedulingWorkerOptions extends Partial<ScheduleJobRetryPolicy> {
   repository: SchedulingWorkerRepository;
   scheduler: SchedulerClient;
   connection: ConnectionOptions;
@@ -31,13 +34,18 @@ export function createSchedulingWorker(
     options.cancellationPollIntervalMs ?? 250,
     "cancellationPollIntervalMs",
   );
+  const retryPolicy = validateScheduleJobRetryPolicy({
+    maxAttempts: options.maxAttempts ?? DEFAULT_SCHEDULE_JOB_RETRY_POLICY.maxAttempts,
+    retryBaseDelayMs:
+      options.retryBaseDelayMs ?? DEFAULT_SCHEDULE_JOB_RETRY_POLICY.retryBaseDelayMs,
+  });
   const execution = new JobExecutionService(
     options.repository,
     options.repository,
     options.scheduler,
     {
-      maxAttempts: SCHEDULE_QUEUE_MAX_ATTEMPTS,
-      retryBaseDelayMs: SCHEDULE_QUEUE_RETRY_DELAY_MS,
+      maxAttempts: retryPolicy.maxAttempts,
+      retryBaseDelayMs: retryPolicy.retryBaseDelayMs,
     },
   );
   return new Worker<ScheduleQueueJobData>(SCHEDULE_QUEUE_NAME, async (queueJob) => {
@@ -79,7 +87,7 @@ export function createSchedulingWorker(
     connection: options.connection,
     prefix: SCHEDULE_QUEUE_PREFIX,
     concurrency: 1,
-    maxStalledCount: SCHEDULE_QUEUE_MAX_ATTEMPTS - 1,
+    maxStalledCount: retryPolicy.maxAttempts - 1,
     ...(options.lockDurationMs === undefined
       ? {}
       : { lockDuration: positiveInteger(options.lockDurationMs, "lockDurationMs") }),

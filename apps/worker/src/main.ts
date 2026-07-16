@@ -37,7 +37,10 @@ async function main() {
   let closeRole: () => Promise<unknown>;
   let roleTask: Promise<void>;
   if (config.role === "publisher") {
-    const queue = createScheduleQueue(redisConnectionOptions(config.redisUrl, 1));
+    const queue = createScheduleQueue(redisConnectionOptions(config.redisUrl, 1), {
+      maxAttempts: config.maxAttempts,
+      retryBaseDelayMs: config.retryBaseDelayMs,
+    });
     const publisher = new OutboxPublisher(store, {
       queue,
       publishEventId: (eventId) => healthRedis.publish(
@@ -62,6 +65,8 @@ async function main() {
       scheduler,
       connection: redisConnectionOptions(config.redisUrl, null),
       cancellationPollIntervalMs: config.cancellationPollIntervalMs,
+      maxAttempts: config.maxAttempts,
+      retryBaseDelayMs: config.retryBaseDelayMs,
       lockDurationMs: config.lockDurationMs,
       stalledIntervalMs: config.stalledIntervalMs,
     });

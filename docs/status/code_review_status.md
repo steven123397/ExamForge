@@ -32,6 +32,19 @@
 - 解决记录：未解决。
 - 本轮处置：暂缓。2026-07-12 `docker info` 显示 daemon 的 HTTP/HTTPS 代理仍为 `http://172.22.112.1:7897`，且没有 Docker Hub 镜像源；`docker pull postgres:16-alpine` 通过该路径从 Docker Hub 拉取新 digest `sha256:57c72fd...` 成功，说明代理当前可用。未经用户单独授权不修改 machine-level systemd/Windows 代理；代理地址变化、Docker Hub 拉取失败或迁移到独立服务器时重新评估。
 
+### CR-028：生产 Scheduler 冷恢复时间超过作业自动重试窗口
+
+- 状态：待解决
+- 严重级别：P1 高优先级
+- 所属模块：Worker、可靠作业与生产故障恢复
+- 发现来源：2026-07-15 腾讯云备案期内部故障演练
+- 位置：`apps/worker/src/retry-policy.ts`、`apps/worker/src/config.ts`、`apps/worker/src/queue.ts`、`apps/worker/src/worker.ts`、`compose.production.yml`、`scripts/deploy/preflight.sh`、`scripts/deploy/online-smoke.mjs`
+- 问题描述：排考队列固定最多尝试 3 次，指数退避基数为 1 秒。正式生产容器停止 Scheduler 后，作业在约 3.35 秒内依次完成 3 次 `scheduler_unavailable` 失败并进入终态；Scheduler 容器恢复 readiness 所需时间超过该窗口，故障脚本即使在首个 `schedule_job.retry_scheduled` 后立即启动 Scheduler，作业仍无法自动恢复。
+- 影响：短暂 Scheduler 重启会把本应可重试的排考作业提前终止为 `failed`，需要人工重新提交，违反第五版远端故障恢复验收标准。现有 PostgreSQL 事实、事件顺序和运行唯一性未损坏，失败作业没有生成重复运行。
+- 建议处理：先增加覆盖生产恢复时序的最窄红灯测试，再将最大尝试次数和退避窗口改为受约束的显式配置，并保证 BullMQ 投递参数与 `JobExecutionService` 状态机使用同一合同；窗口应覆盖生产 Scheduler 冷启动 readiness，同时保留明确上限和每次 attempt 证据。
+- 验证方式：运行 Worker 专项测试和生产 `online-smoke.mjs` Scheduler 重启场景；至少出现 1 次 `scheduler_unavailable` 和 `schedule_job.retry_scheduled`，恢复后作业成功、只生成 1 个运行且事件序列严格递增。
+- 解决记录：2026-07-15 已完成本地修复但保持 `待解决`。共享策略默认最多尝试 6 次、退避基数 1000 ms，限制尝试次数为 2 至 10 且最终单次退避不超过 30000 ms；Publisher、Worker/`JobExecutionService`、生产 Compose 与预检使用同一合同。配置红灯先证明旧实现缺少字段，真实 PostgreSQL/Redis 红灯再证明连续 3 次不可用后无法执行第 4 次；实现后 Worker 全套 `18 passed`，其中新增场景为 3 次失败后第 4 次成功、4 个 attempt、1 个运行。部署合同 `34 passed`、仓库类型检查和 Bash 语法检查通过。该证据尚未生成新正式 digest，也未在腾讯云重跑 Scheduler 冷恢复，因此不能移入已解决索引；未启动 Runner、提交、推送、发布或写入服务器。
+
 ## 4. 已解决问题索引
 
 - CR-001：本机默认 Python 环境不满足调度器要求
@@ -62,6 +75,10 @@
 - CR-007：排考进度仍使用轮询，没有 WebSocket 或 SSE 实时推送
 
 ## 5. 审查记录
+
+- 2026-07-15：完成 CR-028 本地修复。新增共享、受约束的 Scheduler 作业重试策略，生产默认以 6 次尝试和 1 秒指数退避提供约 31 秒恢复窗口；生产环境示例、Publisher/Worker Compose 注入及预检合同同步更新。最窄配置测试和真实 PostgreSQL/Redis Worker 测试均先取得旧实现红灯，再转为 Worker `18 passed`；部署合同 `34 passed`、仓库级类型检查和 Bash 语法检查通过。由于没有新正式 release 和远端故障演练，CR-028 继续保持待解决，第五版远端验收与归档边界不变。
+
+- 2026-07-15：腾讯云备案期内部部署验证发现 CR-028。正式制品 `f769725` 从广州 TCR 按 digest 拉取并完成迁移、bootstrap、健康检查和无故障业务 smoke；API、Redis、Publisher 与 Worker 故障场景恢复，但 Scheduler 重启作业在约 3.35 秒内耗尽 3 次尝试，attempt 均为 `unavailable/scheduler_unavailable`，事件以 `schedule_job.failed` 终止。故障后七项服务恢复健康，再次无故障 smoke、备份恢复和 50/100/150 场基准通过；该结果证明数据与运行时可恢复，但不能关闭 Scheduler 自动恢复合同。CR-028 作为 P1 待解决问题进入问题明细，第五版不得在修复并生成新正式制品前归档。
 
 - 2026-07-14：第五版第六阶段任务 1 解决 CR-002。npm 元数据确认当日稳定 Next 仍精确依赖 PostCSS 8.4.31，用户书面批准受约束的临时覆盖；仓库固定 Node.js 22.22.2 与 npm 12.0.1，以有效根级 override 将唯一的 Next 依赖链解析到 PostCSS 8.5.19，并新增依赖父链测试、三项精确安装脚本 allowlist、待审批脚本 CI 门禁和 moderate 审计。干净 `npm ci` 成功，`npm ls next postcss` 有效，`npm audit --audit-level=moderate` 为 0；治理测试 `9 passed`、Web `24 passed`，Web 类型检查和生产构建通过，API/Worker/Web 三个镜像构建通过。独立 Compose 项目从空卷完成六类故障 smoke，Playwright 为 `32 passed, 3 skipped`，验证资源随后清理，用户已有栈未修改。CR-002 移入已解决索引；当前问题明细只保留 P3 的 CR-003，无待解决 P0/P1。
 

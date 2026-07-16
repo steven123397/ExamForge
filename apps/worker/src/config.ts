@@ -1,3 +1,8 @@
+import {
+  DEFAULT_SCHEDULE_JOB_RETRY_POLICY,
+  validateScheduleJobRetryPolicy,
+} from "./retry-policy.js";
+
 export interface WorkerConfig {
   role: "publisher" | "worker";
   databaseUrl: string;
@@ -9,6 +14,8 @@ export interface WorkerConfig {
   outboxBatchSize: number;
   outboxPollIntervalMs: number;
   cancellationPollIntervalMs: number;
+  maxAttempts: number;
+  retryBaseDelayMs: number;
   lockDurationMs: number;
   stalledIntervalMs: number;
 }
@@ -18,6 +25,18 @@ export function loadWorkerConfig(
 ): WorkerConfig {
   const role = processRole(env.WORKER_ROLE);
   fixedConcurrency(env.WORKER_CONCURRENCY ?? "1");
+  const retryPolicy = validateScheduleJobRetryPolicy({
+    maxAttempts: positiveInteger(
+      env.SCHEDULE_JOB_MAX_ATTEMPTS
+        ?? String(DEFAULT_SCHEDULE_JOB_RETRY_POLICY.maxAttempts),
+      "SCHEDULE_JOB_MAX_ATTEMPTS",
+    ),
+    retryBaseDelayMs: positiveInteger(
+      env.SCHEDULE_JOB_RETRY_BASE_DELAY_MS
+        ?? String(DEFAULT_SCHEDULE_JOB_RETRY_POLICY.retryBaseDelayMs),
+      "SCHEDULE_JOB_RETRY_BASE_DELAY_MS",
+    ),
+  });
   return {
     role,
     databaseUrl: requiredUrl(env.DATABASE_URL, "DATABASE_URL", ["postgres:", "postgresql:"]),
@@ -42,6 +61,8 @@ export function loadWorkerConfig(
       env.WORKER_CANCELLATION_POLL_INTERVAL_MS ?? "250",
       "WORKER_CANCELLATION_POLL_INTERVAL_MS",
     ),
+    maxAttempts: retryPolicy.maxAttempts,
+    retryBaseDelayMs: retryPolicy.retryBaseDelayMs,
     lockDurationMs: positiveInteger(
       env.WORKER_LOCK_DURATION_MS ?? "30000",
       "WORKER_LOCK_DURATION_MS",
