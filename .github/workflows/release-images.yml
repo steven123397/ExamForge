@@ -279,12 +279,28 @@ jobs:
             --verify-files
 
       - name: 上传发布清单、SBOM 与扫描报告
+        id: release_artifact_upload
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: examforge-release-${{ github.sha }}
           path: ${{ runner.temp }}/release-bundle
           if-no-files-found: error
           retention-days: 90
+
+      - name: 等待发布 artifact 重试
+        if: ${{ steps.release_artifact_upload.outcome == 'failure' }}
+        run: sleep 5
+
+      - name: 重试上传发布清单、SBOM 与扫描报告
+        if: ${{ steps.release_artifact_upload.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: examforge-release-${{ github.sha }}
+          path: ${{ runner.temp }}/release-bundle
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
 
       - name: 上传失败诊断
         if: ${{ failure() }}

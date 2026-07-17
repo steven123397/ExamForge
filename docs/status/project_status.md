@@ -7,7 +7,7 @@
 - 教师与学生作用域由 PostgreSQL 关联和服务端会话决定。本人页面只调用 `/api/me/*`，不能通过路径、查询参数或请求体切换到其他教师或学生群体。
 - 作业、SSE、策略快照、发布资格和审计继续复用第三、第四阶段的服务端合同；页面拆分没有复制任务状态机或把 PostgreSQL 事实迁入浏览器。
 - CR-002 已在第六阶段任务 1 关闭；代码审查当前保留 P3 的 CR-003 和 P1 的 CR-028。CR-028 已完成本地修复与真实 PostgreSQL/Redis 回归，但在新正式 digest 完成腾讯云 Scheduler 冷恢复前继续保持待解决；详细问题只维护在 `docs/status/code_review_status.md`。
-- 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送，本地 WSL self-hosted Runner 的 B 方案首次正式发布提交为 `f769725`。工作流 `29357107371` 已成功生成四个广州 TCR digest、完整 release manifest、SBOM 和扫描 artifact；服务器已完成不经域名暴露的内部部署、备份恢复和 150 场基准验证，验证后 ExamForge 栈已停止，nginx、证书、域名流量和其他服务均未修改。Engine builder 修复 `a8ae2f2` 的工作流 `29558412245` 中质量 job 成功，API 与 scheduler 构建/探针通过，但 Web 因 Debian 官方 CDN 经代理连续 `502` 按有界构建合同失败，未登录 TCR、未生成新 manifest，也未修改服务器。当前本地修复已切换到带签名校验的清华 Debian 镜像并通过真实 Web 重建，等待重新发布验证。
+- 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送，本地 WSL self-hosted Runner 的 B 方案首次正式发布提交为 `f769725`。工作流 `29357107371` 已成功生成四个广州 TCR digest、完整 release manifest、SBOM 和扫描 artifact；服务器已完成不经域名暴露的内部部署、备份恢复和 150 场基准验证，验证后 ExamForge 栈已停止，nginx、证书、域名流量和其他服务均未修改。apt 修复 `b9a2274` 的工作流 `29560455791` 已通过四镜像构建、扫描、推送、远程 digest 和 manifest 校验，但正式 artifact 因一次 `CreateArtifact ECONNRESET` 缺失，候选 tag 不得部署，也未修改服务器。当前本地 workflow 已增加一次有条件 artifact 上传重试，等待完整重跑验证。
 
 ## 2. 已实现内容
 
@@ -116,6 +116,7 @@
 - CR-028 新制品尝试：提交 `ce58a6a` 的工作流 `29482599323` 中 GitHub 托管质量 job 成功，本地 Runner 在首个 API 构建中完成基础镜像与 Debian 安全包下载后，停在 `npm install npm@12.0.1`；从 08:32 至 08:49（UTC）没有新增字节、日志或子阶段证据，故主动取消。SBOM、Trivy、TCR 登录、推送和 manifest 均未执行，清理步骤成功且 Runner 已退出。最小复现确认专用 BuildKit 已注入代理但外部鉴权仍可能直连超时；本地随后新增逐镜像构建 30 分钟上限、最多 1 次重试、状态/日志 artifact 和显式 build arg 代理传递，部署合同为 `37 passed`。
 - CR-028 有界构建重跑：上述修复与 systemd 稳定路径以 `11ab909` 提交并推送。工作流 `29557441559` 的质量 job 成功，release job 在 `docker/setup-buildx-action` 的 bootstrap 阶段停滞约 8 分钟；独立探针确认本机 BuildKit 镜像完整可运行，但 `docker-container` builder 仍强制远端 pull 并在 60 秒后超时。运行在任何业务镜像构建、TCR 登录或服务器操作前取消，清理和 Runner 退出成功。当前最窄修复改用已验证的本机 Docker Engine builder，发布专项 `18 passed`。
 - CR-028 Engine builder 重跑：`a8ae2f2` 的工作流 `29558412245` 中质量 job 和本地 builder 校验成功，API/scheduler 首次构建与探针通过；Web 两次分别因 `sed` 包和 `InRelease` 的代理 `502` 失败，SBOM、Trivy、TCR 登录、推送和 manifest 全部跳过，失败诊断 artifact ID 为 `8398425713`，清理与 Runner 退出成功。对照探针中清华 Debian 镜像约 4 秒完成相同索引；当前 helper 下 API、scheduler、Web、Worker 均在首次尝试完成真实构建并通过职责探针。
+- CR-028 apt 修复重跑：`b9a2274` 的工作流 `29560455791` 中质量门禁、四镜像首次构建/探针、SBOM、Trivy、TCR 登录、四次推送、远程 digest 和 manifest 校验成功；正式 artifact 在 `CreateArtifact` 阶段遇到一次 `ECONNRESET`，失败诊断 artifact 随即上传成功。正式 bundle 缺失，因此本轮仍为失败，未连接或修改服务器；当前本地合同已增加一次同名覆盖上传重试。
 - 腾讯云备案期内部验证：服务器按正式 release manifest 拉取六个固定 digest，完成迁移、两次无故障业务 smoke、备份恢复和 50/100/150 场容量基准；API、Redis、Publisher、Worker 故障恢复通过，Scheduler 冷恢复因自动重试窗口不足失败并形成 CR-028。验证后 ExamForge 栈停止，域名仍无解析，nginx、证书、其他容器和主机级服务未修改。
 
 ## 4. 当前边界
@@ -129,6 +130,6 @@
 
 ## 5. 下一步
 
-1. 有界 apt helper 与清华 Debian 镜像已取得发布专项红灯转绿和四镜像真实构建/探针证据；下一步提交并推送修复后重新发布 CR-028 新制品。
+1. 正式 artifact 有条件重试合同已红灯转绿；下一步提交并推送该修复，重新发布 CR-028 新制品并取得完整 release artifact。
 2. 新正式 release 就绪后，在备案期内部维护窗口部署新 digest，验证 Scheduler 冷恢复，以 `f769725` 完成真实跨版本回滚，再恢复新 release；同时执行备份恢复、内部巡检和资源观察，完成后停止 ExamForge 栈。
 3. 备案通过前继续保持域名无解析，不修改 nginx、证书、防火墙或其他服务；正式域名 HTTPS、核心 Playwright、证书续期和有限开放观察保留到备案通过后。

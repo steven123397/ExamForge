@@ -76,6 +76,8 @@
 
 ## 5. 审查记录
 
+- 2026-07-17：apt 修复提交 `b9a2274` 的工作流 `29560455791` 中，GitHub 质量 job、本地四镜像首次构建与职责探针、四份 SBOM、Trivy HIGH/CRITICAL 门禁、TCR 登录、四次推送、远程 digest 读取和 release manifest 校验均成功；正式 bundle 在 `CreateArtifact` 阶段遇到一次 `ECONNRESET`，主 artifact 上传失败，失败诊断 artifact 随即成功。由于正式 artifact 缺失，本轮候选 tag 与 manifest 不得部署，运行没有连接服务器。最窄合同红灯随后要求首次上传失败保留 bundle、等待 5 秒并以同名 `overwrite` 最多重试 1 次；实现与 Actionlint 转绿。尚未取得完整新 release artifact，CR-028 状态不变。
+
 - 2026-07-17：Engine builder 修复提交 `a8ae2f2` 的工作流 `29558412245` 中，质量 job、本地 builder 校验、API 与 scheduler 首次构建/探针通过；Web 第一次在下载 `sed` 安全更新时遇到代理 `502`，第二次在 Debian `InRelease` 遇到 `502`，有界 helper 正确记录 failed/retrying/failed。运行未进入 SBOM、Trivy、TCR 登录、推送或 manifest，失败诊断 artifact ID 为 `8398425713`，清理与 Runner 退出成功。对照探针证明相同容器经官方 CDN 连续 3 次达到 120 秒边界，经清华 Debian 镜像约 4 秒完成 9.3 MB 签名索引；当前本地 `upgrade-debian.sh` 保留 Debian Release 签名与包哈希校验，对 update/upgrade 各设置单次 120 秒、最多 3 次并输出状态，四个正式镜像均在首次尝试完成真实构建与职责探针。发布专项 `19 passed`、部署合同 `38 passed`；尚未生成新正式 digest，CR-028 状态不变。
 
 - 2026-07-17：`11ab909` 的新制品工作流 `29557441559` 中，GitHub 质量 job 成功，本地 release job 在 `docker/setup-buildx-action` 的 `buildx inspect --bootstrap` 阶段连续约 8 分钟无日志、Docker 事件或 builder 状态变化，故在业务镜像构建前取消。独立探针确认本机 `moby/buildkit` 镜像完整且可直接运行，但 `docker-container` driver 仍强制远端 pull 并在 60 秒后超时；Docker Engine `default` builder 则在约 2 秒内完成真实 `scratch` 镜像构建与加载。最窄合同测试先要求 release job 禁止 setup Action、`docker-container` 与 `--bootstrap`，随后工作流改为校验并显式使用 Engine builder，发布专项恢复为 `18 passed`。运行未登录 TCR、未生成 manifest、未连接服务器，CR-028 状态不变。

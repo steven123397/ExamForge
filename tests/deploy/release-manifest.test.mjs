@@ -151,6 +151,14 @@ describe("release workflow boundary", () => {
     const buildScript = readFileSync(buildImagePath, "utf8");
     assert.match(buildScript, /NEXT_PUBLIC_API_BASE_URL/);
     assert.match(buildScript, /linux\/amd64/);
+    assert.match(
+      workflow,
+      /name:\s*上传发布清单、SBOM 与扫描报告[\s\S]*?id:\s*release_artifact_upload[\s\S]*?continue-on-error:\s*true/,
+    );
+    assert.match(
+      workflow,
+      /name:\s*重试上传发布清单、SBOM 与扫描报告[\s\S]*?steps\.release_artifact_upload\.outcome\s*==\s*'failure'[\s\S]*?overwrite:\s*true/,
+    );
   });
 
   it("keeps quality on GitHub hosting and targets release only to the dedicated runner", () => {
