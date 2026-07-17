@@ -21,6 +21,7 @@ const workflowPath = join(repositoryRoot, ".github/workflows/release-images.yml"
 const probeImagePath = join(repositoryRoot, "scripts/release/probe-image.sh");
 const buildImagePath = join(repositoryRoot, "scripts/release/build-image.sh");
 const pushImagePath = join(repositoryRoot, "scripts/release/push-image.sh");
+const upgradeDebianPath = join(repositoryRoot, "scripts/release/upgrade-debian.sh");
 const commitSha = "1".repeat(40);
 const imageDigest = `sha256:${"2".repeat(64)}`;
 const sourceUrl = "https://github.com/steven123397/ExamForge";
@@ -257,6 +258,26 @@ describe("release image runtime boundary", () => {
     assert.doesNotMatch(probeScript, /docker image inspect --format '\{\{\.Size\}\}'/);
     for (const excludedPackage of ["next", "typescript", "tsx", "@playwright"]) {
       assert.match(probeScript, new RegExp(excludedPackage.replace("@", "@?")));
+    }
+  });
+
+  it("bounds Debian package retries and network waits in every release image", () => {
+    assert.ok(existsSync(upgradeDebianPath), "upgrade-debian.sh must bound apt network work");
+    const upgradeScript = readFileSync(upgradeDebianPath, "utf8");
+
+    assert.match(upgradeScript, /EXAMFORGE_APT_TIMEOUT_SECONDS:-120/);
+    assert.match(upgradeScript, /max_attempts=3/);
+    assert.match(upgradeScript, /mirrors\.tuna\.tsinghua\.edu\.cn/);
+    assert.match(upgradeScript, /timeout[\s\S]*apt-get/);
+    assert.match(upgradeScript, /status=/);
+    for (const status of ["started", "failed", "retrying", "succeeded"]) {
+      assert.match(upgradeScript, new RegExp(status));
+    }
+    for (const name of imageNames) {
+      const dockerfile = readFileSync(join(repositoryRoot, dockerfiles[name]), "utf8");
+
+      assert.match(dockerfile, /COPY scripts\/release\/upgrade-debian\.sh \/tmp\/upgrade-debian\.sh/);
+      assert.match(dockerfile, /RUN sh \/tmp\/upgrade-debian\.sh/);
     }
   });
 });

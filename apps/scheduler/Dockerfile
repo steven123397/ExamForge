@@ -8,8 +8,9 @@ FROM python:3.12-slim-bookworm AS runtime
 ARG SOURCE_REVISION=unknown
 ARG SOURCE_URL=unknown
 ARG SOURCE_CREATED_AT=1970-01-01T00:00:00Z
-RUN apt-get update \
-    && apt-get upgrade --yes \
+COPY scripts/release/upgrade-debian.sh /tmp/upgrade-debian.sh
+RUN sh /tmp/upgrade-debian.sh \
+    && rm -f /tmp/upgrade-debian.sh \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10002 scheduler \
     && useradd --uid 10002 --gid 10002 --create-home scheduler

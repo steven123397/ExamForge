@@ -164,6 +164,7 @@ API 与 Worker 现在分别执行 `npm ci --omit=dev --workspace <目标> --incl
 - 每个镜像的构建和推送分别记录开始时间、镜像名、尝试次数、结束状态与独立日志，不把四次构建或四次 `docker push` 隐藏在无边界等待中。
 - 单镜像每次构建和每次推送上限均为 30 分钟，各最多重试 1 次。超时后当前发布失败，不继续后续镜像，也不生成正式 release manifest。
 - Runner 的四组 `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy` 作为 BuildKit 预定义 build arg 显式传入构建步骤；不写入最终镜像层，也不修改 Docker daemon 全局配置。
+- Debian 运行时安全更新统一由 `scripts/release/upgrade-debian.sh` 执行：构建时把官方签名源切换到清华 Debian 镜像，每次 `apt-get update` / `upgrade` 最长 120 秒、最多 3 次，并逐次输出状态。镜像站只提供传输，APT 继续验证 Debian Release 签名和包哈希；失败仍终止镜像构建，不使用 `--allow-unauthenticated`、`--fix-missing` 或忽略索引错误。
 - job 总上限为 120 分钟，仅作为最终保护；不得以继续增加总超时替代根因分析。
 - TCR 中可能保留已上传但未进入正式 manifest 的 SHA tag。部署入口只接受完整、已验证的 manifest，因此部分推送不能进入生产。
 - 同一 SHA 重跑时允许 registry 复用已上传层，但仍必须重新读取四个远程 digest、生成清单并上传完整报告。
@@ -236,5 +237,7 @@ ccr.ccs.tencentyun.com/examforge/worker@sha256:a346a2d0904cd08cf19e2b68c82679fe1
 截至 2026-07-17，用户已确认采用本地托管 Runner 的 B 方案，并保留广州 TCR。API/Worker 最小生产依赖树和 700 MB 门禁已在本地验证，工作流已拆分为 GitHub 托管质量 job 与四标签 self-hosted 发布 job，单镜像构建和推送均具备 30 分钟上限、最多 1 次重试、状态日志与远程 digest 校验合同。Runner `2.335.1` 已安装到独立目录并完成仓库级注册，不安装系统服务；提交 `f769725` 的工作流 `29357107371` 已完整成功并生成正式 artifact `examforge-release-f7697252a931b3da871272355fec3ebcab0e3842`，证明 B 方案的职责隔离与凭据清理边界成立。
 
 CR-028 修复提交后的工作流 `29482599323` 在首个 API 构建中连续 17 分钟没有新增字节、日志或子阶段证据，因而主动取消。逐镜像构建边界与 systemd 稳定路径随后以 `11ab909` 提交并推送；工作流 `29557441559` 的 GitHub 质量 job 成功，但 self-hosted job 在 `docker/setup-buildx-action` 的远端 BuildKit bootstrap 阶段连续 8 分钟无进展后取消，尚未开始任何业务镜像构建。独立 60 秒探针证明即使本机已有完整 `moby/buildkit` 镜像，`docker-container` 驱动仍会强制执行远端 pull；当前本地修复因此移除该 Action 和 bootstrap 脚本，改为显式使用已验证的 Docker Engine `default` builder。发布合同保持 `18 passed`，完整部署合同保持 `37 passed`；新正式运行完成前，CR-028 仍没有新 release 证据。
+
+Engine builder 修复以 `a8ae2f2` 提交并推送后，工作流 `29558412245` 已证明质量 job、Engine builder 校验、审计下载和精确 SHA 校验通过；API 与 scheduler 均在首次尝试构建并通过职责探针。Web 第一次在下载 `sed` 安全更新时遇到代理 `502`，第二次在 Debian `InRelease` 遇到同类错误，故有界构建步骤失败；SBOM、Trivy、TCR 登录、推送和 manifest 全部跳过，失败诊断 artifact 与清理成功。对照探针显示相同容器经清华 Debian 镜像下载 9.3 MB 索引约 4 秒，而官方 CDN 连续 120 秒超时；当前本地 helper 已把镜像选择、单次 120 秒和最多 3 次重试纳入日志合同。API、scheduler、Web、Worker 随后均在首次尝试完成真实 linux/amd64 构建和职责探针，apt 更新分别输出成功状态；发布专项现为 `19 passed`，完整部署合同为 `38 passed`。该修复仍需新正式运行验证。
 
 北京服务器随后使用独立 `ubuntu` 凭据按 release manifest 拉取四个应用和两个基础镜像的固定 digest，不访问 GitHub、不构建源码；仅回环可见的内部部署完成迁移、业务 smoke、备份恢复和 150 场基准后已停止。四个应用容器中的 OCI revision 均为 `f7697252a931b3da871272355fec3ebcab0e3842`，服务器没有使用本地 image ID 或部分 tag 作为发布依据。Runner 仍未持有服务器 SSH 私钥或生产 secrets，GitHub workflow 也未自动连接服务器。第六阶段任务 3 和 Runner 发布边界已经完成验证；备案、nginx/HTTPS、正式域名 E2E、Scheduler 冷恢复缺口 CR-028 与跨版本回滚属于部署验收后续，不改变本设计的职责隔离结论。

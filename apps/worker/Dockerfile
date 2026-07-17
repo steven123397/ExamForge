@@ -30,8 +30,9 @@ FROM node:22.22.2-bookworm-slim AS runtime
 ARG SOURCE_REVISION=unknown
 ARG SOURCE_URL=unknown
 ARG SOURCE_CREATED_AT=1970-01-01T00:00:00Z
-RUN apt-get update \
-    && apt-get upgrade --yes \
+COPY scripts/release/upgrade-debian.sh /tmp/upgrade-debian.sh
+RUN sh /tmp/upgrade-debian.sh \
+    && rm -f /tmp/upgrade-debian.sh \
     && rm -rf /var/lib/apt/lists/* /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
     && groupadd --gid 10003 worker \
     && useradd --uid 10003 --gid 10003 --create-home worker
