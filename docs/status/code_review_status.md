@@ -43,7 +43,7 @@
 - 影响：短暂 Scheduler 重启会把本应可重试的排考作业提前终止为 `failed`，需要人工重新提交，违反第五版远端故障恢复验收标准。现有 PostgreSQL 事实、事件顺序和运行唯一性未损坏，失败作业没有生成重复运行。
 - 建议处理：先增加覆盖生产恢复时序的最窄红灯测试，再将最大尝试次数和退避窗口改为受约束的显式配置，并保证 BullMQ 投递参数与 `JobExecutionService` 状态机使用同一合同；窗口应覆盖生产 Scheduler 冷启动 readiness，同时保留明确上限和每次 attempt 证据。
 - 验证方式：运行 Worker 专项测试和生产 `online-smoke.mjs` Scheduler 重启场景；至少出现 1 次 `scheduler_unavailable` 和 `schedule_job.retry_scheduled`，恢复后作业成功、只生成 1 个运行且事件序列严格递增。
-- 解决记录：2026-07-15 已完成本地修复但保持 `待解决`。共享策略默认最多尝试 6 次、退避基数 1000 ms，限制尝试次数为 2 至 10 且最终单次退避不超过 30000 ms；Publisher、Worker/`JobExecutionService`、生产 Compose 与预检使用同一合同。配置红灯先证明旧实现缺少字段，真实 PostgreSQL/Redis 红灯再证明连续 3 次不可用后无法执行第 4 次；实现后 Worker 全套 `18 passed`，其中新增场景为 3 次失败后第 4 次成功、4 个 attempt、1 个运行。部署合同 `34 passed`、仓库类型检查和 Bash 语法检查通过。该证据尚未生成新正式 digest，也未在腾讯云重跑 Scheduler 冷恢复，因此不能移入已解决索引；未启动 Runner、提交、推送、发布或写入服务器。
+- 解决记录：2026-07-15 已完成本地修复但保持 `待解决`。共享策略默认最多尝试 6 次、退避基数 1000 ms，限制尝试次数为 2 至 10 且最终单次退避不超过 30000 ms；Publisher、Worker/`JobExecutionService`、生产 Compose 与预检使用同一合同。配置红灯先证明旧实现缺少字段，真实 PostgreSQL/Redis 红灯再证明连续 3 次不可用后无法执行第 4 次；实现后 Worker 全套 `18 passed`，其中新增场景为 3 次失败后第 4 次成功、4 个 attempt、1 个运行。逐镜像构建边界与 systemd 路径修复已由 `11ab909` 提交并推送，但工作流 `29557441559` 在远端 BuildKit bootstrap 阶段取消，仍未生成新正式 digest，也未在腾讯云重跑 Scheduler 冷恢复，因此不能移入已解决索引。
 
 ## 4. 已解决问题索引
 
@@ -75,6 +75,8 @@
 - CR-007：排考进度仍使用轮询，没有 WebSocket 或 SSE 实时推送
 
 ## 5. 审查记录
+
+- 2026-07-17：`11ab909` 的新制品工作流 `29557441559` 中，GitHub 质量 job 成功，本地 release job 在 `docker/setup-buildx-action` 的 `buildx inspect --bootstrap` 阶段连续约 8 分钟无日志、Docker 事件或 builder 状态变化，故在业务镜像构建前取消。独立探针确认本机 `moby/buildkit` 镜像完整且可直接运行，但 `docker-container` driver 仍强制远端 pull 并在 60 秒后超时；Docker Engine `default` builder 则在约 2 秒内完成真实 `scratch` 镜像构建与加载。最窄合同测试先要求 release job 禁止 setup Action、`docker-container` 与 `--bootstrap`，随后工作流改为校验并显式使用 Engine builder，发布专项恢复为 `18 passed`。运行未登录 TCR、未生成 manifest、未连接服务器，CR-028 状态不变。
 
 - 2026-07-16：CR-028 新制品工作流 `29482599323` 的 GitHub 托管质量 job 成功，本地 Runner 在首个 API 构建中完成基础镜像与 Debian 安全更新下载后，停在 `npm install npm@12.0.1`，连续 17 分钟没有可证明进度。运行主动取消，未进入 SBOM、Trivy、TCR 登录、推送或 manifest；清理步骤和 Runner 退出成功。系统化复现确认专用 BuildKit 已注入四组代理变量，但基础镜像鉴权仍可能出现直连超时，构建内部 npm 也缺少工作流级边界。本地新增逐镜像构建状态、独立日志、单次 30 分钟上限、最多 1 次重试和显式 build arg 代理传递；同时修正 systemd 模板误从只含供应链附件的 `releases/current` 查找运维脚本的问题。部署合同 `37 passed`、`npm run check:ci`、Bash 语法和 `git diff --check` 通过。上述改动尚未提交、推送或生成新正式 digest，CR-028 继续保持待解决。
 

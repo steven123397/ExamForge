@@ -83,7 +83,7 @@ for ((attempt = 1; attempt <= max_attempts; attempt += 1)); do
 
   set +e
   timeout --foreground --signal=TERM --kill-after=30s "${timeout_seconds}s" \
-    docker buildx build "${build_args[@]}" . 2>&1 | tee "$attempt_log"
+    docker buildx build --builder default "${build_args[@]}" . 2>&1 | tee "$attempt_log"
   pipeline_status=("${PIPESTATUS[@]}")
   set -e
   build_exit=${pipeline_status[0]}

@@ -15,7 +15,7 @@
 
 1. GitHub 继续作为源码真相源、质量门禁和发布审计入口。
 2. 正式镜像构建、职责探针、SBOM、漏洞扫描和 TCR 推送迁移到用户本地 WSL 中的 GitHub self-hosted runner。
-3. 本地 Runner 与开发仓库位于同一台电脑，但使用独立程序目录、独立工作目录和专用 Buildx builder；正式构建只读取 GitHub 检出的精确提交，不读取开发仓库的未提交内容。
+3. 本地 Runner 与开发仓库位于同一台电脑，但使用独立程序目录和独立工作目录；正式构建只读取 GitHub 检出的精确提交，并显式使用本机 Docker Engine 内置的 `default` Buildx builder，不读取开发仓库的未提交内容。
 4. 广州 TCR 继续作为正式制品仓库。生产服务器只按 release manifest 中的 digest 拉取镜像，不接收本地 `docker save` 归档，也不从源码构建。
 5. 镜像发布与生产部署继续分离。本地 Runner 不持有北京服务器 SSH 私钥或生产环境 secrets；服务器写入仍需单独授权和维护窗口确认。
 6. API 与 Worker 必须先完成部署依赖瘦身，再重新执行正式 TCR 发布。延长全局超时只能作为兜底，不能替代可观察、有限时的单镜像推送。
@@ -61,7 +61,8 @@ Runner 仅在正式发布时手动启动。未启动时，带 `examforge-release
 
 - workflow 必须从 GitHub 检出目标完整 SHA，并在构建前验证 `HEAD == GITHUB_SHA`。
 - `actions/checkout` 不复用开发仓库，不读取开发目录中的 `.env`、未提交文件或本地补丁。
-- 使用专用 Buildx builder 和独立 cache scope；可以复用内容寻址的基础层，但不得依赖本地已有业务镜像作为发布输入。若 Runner 通过宿主机 HTTP(S) 代理访问外网，只把当前进程继承的 `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy` 作为 builder driver option 注入本次 `docker-container` BuildKit，并使用宿主网络；不得写入全局 Docker CLI 或 daemon 配置。
+- workflow 在构建前选择并校验 Docker Engine 内置的 `default` Buildx builder，要求 driver 为 `docker`、状态为 `running` 且包含 `linux/amd64`。构建可以复用内容寻址的基础层，但不得通过 `--cache-from` 或本地业务镜像作为发布输入；所有正式构建命令显式指定 `--builder default`。
+- 若 Runner 通过宿主机 HTTP(S) 代理访问外网，只把当前进程继承的 `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy` 作为 BuildKit 预定义 build arg 传入构建，不写入最终镜像层，也不修改全局 Docker CLI 或 daemon 配置。
 - Runner 工作目录只保存本次检出和临时发布 bundle。成功上传 artifact 后删除临时 bundle；Docker 层缓存按受控策略保留。
 - Runner 使用 Docker 权限，等同于对本机 Docker daemon 的高权限访问。因此只允许受信任的 `main` 提交和手动发布 workflow 使用该标签。
 
@@ -91,7 +92,7 @@ Runner 仅在正式发布时手动启动。未启动时，带 `examforge-release
   --unattended
 ```
 
-workflow 使用固定的 `docker/setup-buildx-action` 创建本次 job 专用的 `docker-container` builder，再由 `scripts/release/configure-buildx.sh` 以同名 builder 绑定 Runner 当前 HTTP(S) 代理和宿主网络；Action 仍负责 job 结束清理。Runner 宿主机只需已有 Docker CLI/daemon，不要求在注册前另行安装全局 Buildx 插件，脚本也不修改 `~/.docker/config.json` 或 Docker daemon 配置。
+workflow 不再调用 `docker/setup-buildx-action`，也不创建需要从 Docker Hub bootstrap 的 `docker-container` builder。Runner 宿主机必须已有可用的 Docker CLI、daemon 和 Buildx 插件；job 只执行 `docker buildx use default` 与只读 `inspect` 合同检查，镜像构建显式指定 `--builder default`。这样仍由本机 Engine 执行 linux/amd64 构建，但发布启动不再依赖额外的远端 BuildKit 镜像拉取。
 
 ## 5. GitHub 工作流拆分
 
@@ -156,13 +157,13 @@ runs-on: [self-hosted, linux, x64, examforge-release]
 
 API 与 Worker 现在分别执行 `npm ci --omit=dev --workspace <目标> --include-workspace-root=false`，运行镜像从独立 `production-dependencies` 阶段复制依赖，不再复制构建阶段的完整 monorepo 根依赖树。镜像探针按 `docker image ls` 的十进制 MB 口径强制 700 MB 上限，并拒绝 Next、Playwright、TypeScript、tsx 及越界服务依赖。
 
-两个镜像均完成运行时内部包导入、非 root、linux/amd64、OCI source/revision、职责隔离和体积探针；固定 Syft 生成 SPDX 2.3 SBOM，固定 Trivy 0.72.0 扫描 HIGH/CRITICAL 为 0。首次 self-hosted 运行暴露 `docker-container` BuildKit 未继承 WSL 代理的问题后，本地使用与 workflow 相同的专用 builder、宿主网络和显式 HTTP(S) 代理重新执行 API 冷拉取与构建，成功解析 Docker Hub 元数据、加载 linux/amd64 镜像并通过职责探针；该证据证明构建网络修复，但仍不替代四镜像正式 TCR 推送和完整 manifest。
+两个镜像均完成运行时内部包导入、非 root、linux/amd64、OCI source/revision、职责隔离和体积探针；固定 Syft 生成 SPDX 2.3 SBOM，固定 Trivy 0.72.0 扫描 HIGH/CRITICAL 为 0。首次 self-hosted 运行暴露 `docker-container` BuildKit 未继承 WSL 代理的问题，临时专用 builder 曾完成 API 冷拉取与职责探针并支撑 `f769725` 正式发布；后续运行又证明 `docker-container` bootstrap 自身会强制远端 pull，无法作为稳定启动前提。当前实现改用本机 Engine 内置 builder，本地真实 `scratch` 镜像在 2 秒内完成构建和加载；该证据只验证 builder 路径，不替代四镜像正式 TCR 推送和完整 manifest。
 
 ## 7. 构建、推送可观察性与失败语义
 
 - 每个镜像的构建和推送分别记录开始时间、镜像名、尝试次数、结束状态与独立日志，不把四次构建或四次 `docker push` 隐藏在无边界等待中。
 - 单镜像每次构建和每次推送上限均为 30 分钟，各最多重试 1 次。超时后当前发布失败，不继续后续镜像，也不生成正式 release manifest。
-- Runner 的四组 `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy` 除注入专用 BuildKit 容器外，还作为 BuildKit 预定义 build arg 显式传入构建步骤；不写入最终镜像层，也不修改 Docker daemon 全局配置。
+- Runner 的四组 `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy` 作为 BuildKit 预定义 build arg 显式传入构建步骤；不写入最终镜像层，也不修改 Docker daemon 全局配置。
 - job 总上限为 120 分钟，仅作为最终保护；不得以继续增加总超时替代根因分析。
 - TCR 中可能保留已上传但未进入正式 manifest 的 SHA tag。部署入口只接受完整、已验证的 manifest，因此部分推送不能进入生产。
 - 同一 SHA 重跑时允许 registry 复用已上传层，但仍必须重新读取四个远程 digest、生成清单并上传完整报告。
@@ -232,8 +233,8 @@ ccr.ccs.tencentyun.com/examforge/worker@sha256:a346a2d0904cd08cf19e2b68c82679fe1
 
 ## 12. 当前状态
 
-截至 2026-07-16，用户已确认采用本地托管 Runner 的 B 方案，并保留广州 TCR。API/Worker 最小生产依赖树和 700 MB 门禁已在本地验证，工作流已拆分为 GitHub 托管质量 job 与四标签 self-hosted 发布 job，单镜像推送已具备 30 分钟上限、最多 1 次重试、状态日志和远程 digest 校验合同。Runner `2.335.1` 已安装到独立目录并完成仓库级注册，不安装系统服务；代理隔离修复提交 `f769725` 的工作流 `29357107371` 已完整成功，GitHub 托管质量 job、本地 Runner 四镜像构建与职责探针、四份 SBOM、Trivy HIGH/CRITICAL 门禁、TCR 登录、四次推送、远程 digest 校验、release manifest 校验和 artifact 上传均通过。正式 artifact `examforge-release-f7697252a931b3da871272355fec3ebcab0e3842` 已保存，job 清理后本机无凭据访问私有 TCR 返回 `401`，符合凭据清理边界。
+截至 2026-07-17，用户已确认采用本地托管 Runner 的 B 方案，并保留广州 TCR。API/Worker 最小生产依赖树和 700 MB 门禁已在本地验证，工作流已拆分为 GitHub 托管质量 job 与四标签 self-hosted 发布 job，单镜像构建和推送均具备 30 分钟上限、最多 1 次重试、状态日志与远程 digest 校验合同。Runner `2.335.1` 已安装到独立目录并完成仓库级注册，不安装系统服务；提交 `f769725` 的工作流 `29357107371` 已完整成功并生成正式 artifact `examforge-release-f7697252a931b3da871272355fec3ebcab0e3842`，证明 B 方案的职责隔离与凭据清理边界成立。
 
-CR-028 修复提交后的工作流 `29482599323` 再次证明 GitHub 质量 job 成功且四标签调度有效，但首个 API 构建在 `npm install npm@12.0.1` 阶段连续 17 分钟没有新增字节、日志或子阶段证据，用户授权的执行会话据此主动取消。该运行未进入 SBOM、Trivy、TCR 登录、推送或 manifest，不能视为新 release。根因收敛后，本地工作流新增逐镜像构建状态、独立日志、单次 30 分钟上限、最多 1 次重试和显式 build arg 代理传递；发布合同 `37 passed`。这些变更在提交、推送并完成新正式运行前只属于本地修复。
+CR-028 修复提交后的工作流 `29482599323` 在首个 API 构建中连续 17 分钟没有新增字节、日志或子阶段证据，因而主动取消。逐镜像构建边界与 systemd 稳定路径随后以 `11ab909` 提交并推送；工作流 `29557441559` 的 GitHub 质量 job 成功，但 self-hosted job 在 `docker/setup-buildx-action` 的远端 BuildKit bootstrap 阶段连续 8 分钟无进展后取消，尚未开始任何业务镜像构建。独立 60 秒探针证明即使本机已有完整 `moby/buildkit` 镜像，`docker-container` 驱动仍会强制执行远端 pull；当前本地修复因此移除该 Action 和 bootstrap 脚本，改为显式使用已验证的 Docker Engine `default` builder。发布合同保持 `18 passed`，完整部署合同保持 `37 passed`；新正式运行完成前，CR-028 仍没有新 release 证据。
 
 北京服务器随后使用独立 `ubuntu` 凭据按 release manifest 拉取四个应用和两个基础镜像的固定 digest，不访问 GitHub、不构建源码；仅回环可见的内部部署完成迁移、业务 smoke、备份恢复和 150 场基准后已停止。四个应用容器中的 OCI revision 均为 `f7697252a931b3da871272355fec3ebcab0e3842`，服务器没有使用本地 image ID 或部分 tag 作为发布依据。Runner 仍未持有服务器 SSH 私钥或生产 secrets，GitHub workflow 也未自动连接服务器。第六阶段任务 3 和 Runner 发布边界已经完成验证；备案、nginx/HTTPS、正式域名 E2E、Scheduler 冷恢复缺口 CR-028 与跨版本回滚属于部署验收后续，不改变本设计的职责隔离结论。

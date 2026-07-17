@@ -127,18 +127,15 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
 
-      - name: 配置 Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-        with:
-          name: examforge-release-${{ github.run_id }}-${{ github.run_attempt }}
-          driver: docker-container
-          cleanup: true
-
-      - name: 绑定 Runner 网络代理到 Buildx
-        env:
-          BUILDX_NAME: ${{ steps.buildx.outputs.name }}
-        run: bash scripts/release/configure-buildx.sh "$BUILDX_NAME"
+      - name: 校验本地 Docker Engine Buildx
+        run: |
+          set -Eeuo pipefail
+          docker buildx use default
+          builder_info=$(docker buildx inspect default)
+          printf '%s\n' "$builder_info"
+          grep -Eq '^Driver:[[:space:]]+docker$' <<< "$builder_info"
+          grep -Eq '^Status:[[:space:]]+running$' <<< "$builder_info"
+          grep -Eq 'Platforms:.*linux/amd64' <<< "$builder_info"
 
       - name: 下载生产依赖审计
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

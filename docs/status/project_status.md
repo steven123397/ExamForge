@@ -7,7 +7,7 @@
 - 教师与学生作用域由 PostgreSQL 关联和服务端会话决定。本人页面只调用 `/api/me/*`，不能通过路径、查询参数或请求体切换到其他教师或学生群体。
 - 作业、SSE、策略快照、发布资格和审计继续复用第三、第四阶段的服务端合同；页面拆分没有复制任务状态机或把 PostgreSQL 事实迁入浏览器。
 - CR-002 已在第六阶段任务 1 关闭；代码审查当前保留 P3 的 CR-003 和 P1 的 CR-028。CR-028 已完成本地修复与真实 PostgreSQL/Redis 回归，但在新正式 digest 完成腾讯云 Scheduler 冷恢复前继续保持待解决；详细问题只维护在 `docs/status/code_review_status.md`。
-- 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送，TCR 冷上传超时调整为 `6c94599`，本地 WSL self-hosted Runner 的 B 方案实现为 `5f8eee8`，Buildx 代理修复和首次正式发布提交为 `f769725`。工作流 `29357107371` 已成功生成四个广州 TCR digest、完整 release manifest、SBOM 和扫描 artifact；服务器已完成不经域名暴露的内部部署、备份恢复和 150 场基准验证，验证后 ExamForge 栈已停止，nginx、证书、域名流量和其他服务均未修改。CR-028 修复后的工作流 `29482599323` 因首个 API 构建无法证明持续进度而取消，未登录 TCR、未推送镜像、未生成新 manifest，也未修改服务器。
+- 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送，本地 WSL self-hosted Runner 的 B 方案首次正式发布提交为 `f769725`。工作流 `29357107371` 已成功生成四个广州 TCR digest、完整 release manifest、SBOM 和扫描 artifact；服务器已完成不经域名暴露的内部部署、备份恢复和 150 场基准验证，验证后 ExamForge 栈已停止，nginx、证书、域名流量和其他服务均未修改。CR-028 与逐镜像构建边界已由 `11ab909` 提交并推送；工作流 `29557441559` 的质量 job 成功，但 release job 在远端 BuildKit bootstrap 阶段无进展后取消，未构建业务镜像、未登录 TCR、未生成新 manifest，也未修改服务器。当前本地修复已改用 Docker Engine 内置 builder，等待重新发布验证。
 
 ## 2. 已实现内容
 
@@ -61,8 +61,8 @@
 - 发布清单固定提交、创建时间、构建平台、四个 TCR tag/digest、OCI 来源、生产 npm 审计、SPDX SBOM、Trivy 报告及附件 SHA-256。验证器拒绝 `latest`、本地 image ID、提交或 tag 不一致、附件缺失或篡改、HIGH/CRITICAL 非零、越界附件路径和疑似 secret 字段。
 - 工作流 artifact 保存发布清单及全部审计、SBOM、扫描附件 90 天。正式 GitHub 托管 Runner 发布已执行两次：`29330180914` 达到原 60 分钟 job 上限后取消；`29334386863` 在推送步骤超过 60 分钟仍无可下载的实时日志或可证明进度，用户要求人工取消。两次运行的质量门禁、四镜像构建/探针、SBOM 和 HIGH/CRITICAL 扫描均成功，但均未生成完整 release manifest 或四个可部署 TCR digest。
 - 优化前本地镜像证据为 API 约 982 MB、Worker 约 980 MB，两者各复制约 499 MB 的完整根 `node_modules` 层，容器内目录约 477 MB。当前本地重建改为目标 workspace 最小生产依赖，API 为 417 MB、Worker 为 414 MB，依赖目录分别为 42 MB 和 40 MB；运行镜像探针按同一 `docker image ls` 口径强制 700 MB 上限。
-- self-hosted 发布 job 使用本次 job 专用 Buildx builder；每个镜像最长推送 30 分钟、最多重试 1 次，并独立记录状态和远程 registry digest。失败会停止后续镜像且不生成正式 manifest。workflow 不执行 SSH、SCP、nginx、Certbot 或远程 Compose；北京服务器继续只按 digest 部署，Runner 不持有生产 SSH 私钥或环境 secrets。
-- 首次 self-hosted 工作流 `29354931745` 的 GitHub 托管质量 job 成功，本地 Runner 接收发布 job；首个 API 构建因 `docker-container` BuildKit 未继承 WSL HTTP(S) 代理而无法解析 Docker Hub 基础镜像，运行在 SBOM、Trivy、TCR 登录和推送之前失败。当前修复只把 Runner 进程代理注入本次专用 builder 并使用宿主网络，不修改 Docker 全局配置；本地空缓存 builder 已完成真实拉取、构建和职责探针。
+- self-hosted 发布 job 只使用本机 Docker Engine 内置的 `default` Buildx builder，并在构建前校验 driver、运行状态和 linux/amd64 平台；每个镜像最长构建和推送 30 分钟、最多重试 1 次，并独立记录状态与远程 registry digest。失败会停止后续镜像且不生成正式 manifest。workflow 不执行 SSH、SCP、nginx、Certbot 或远程 Compose；北京服务器继续只按 digest 部署，Runner 不持有生产 SSH 私钥或环境 secrets。
+- 首次 self-hosted 工作流 `29354931745` 暴露 `docker-container` BuildKit 未继承 WSL HTTP(S) 代理的问题；临时专用 builder 修复支撑了 `f769725` 的正式发布。工作流 `29557441559` 进一步证明该驱动的 bootstrap 会强制远端 pull，即使本机已有完整 BuildKit 镜像也可能无进展。当前实现已移除 setup Action 和 bootstrap 脚本，Runner 代理只作为 BuildKit 预定义 build arg 传入，不修改 Docker 全局配置。
 - 代理修复提交 `f769725` 的工作流 `29357107371` 已成功：GitHub 托管质量 job 与本地 Runner 发布 job 均为 `success`，四镜像构建/探针、SBOM、Trivy HIGH/CRITICAL 门禁、TCR 登录、逐镜像推送、远程 digest 校验、release manifest 校验和正式 artifact 上传全部通过。正式 digest 为 API `sha256:a09acaad...73c0`、scheduler `sha256:b9bc72a5...0fad`、Web `sha256:ae735a3b...5b36b`、Worker `sha256:a346a2d0...982f`；artifact 为 `examforge-release-f7697252a931b3da871272355fec3ebcab0e3842`。
 
 ### 2.8 备份恢复与运维巡检
@@ -102,7 +102,7 @@
 
 ## 3. 最新验证事实
 
-- 快速与静态门禁：`npm run test:ci` 为 `9 passed`；发布专项当前为 `18 passed`，覆盖专用 Buildx 代理隔离、逐镜像构建/推送边界和远程 digest 校验，部署类 Node.js 合同总计 `37 passed`；`npm run check:scheduler-openapi`、`npm run build`、`docker compose config --quiet` 的既有基线通过，CR-028 本地修复后 `npm run check:ci`、仓库级 `npm run typecheck`、Bash 语法和 `git diff --check` 重新通过。
+- 快速与静态门禁：`npm run test:ci` 为 `9 passed`；发布专项当前为 `18 passed`，覆盖 Docker Engine builder、逐镜像构建/推送边界和远程 digest 校验，部署类 Node.js 合同总计 `37 passed`；`npm run check:scheduler-openapi`、`npm run build`、`docker compose config --quiet` 的既有基线通过，CR-028 本地修复后 `npm run check:ci`、仓库级 `npm run typecheck`、Bash 语法和 `git diff --check` 重新通过。
 - 应用测试：shared `21 passed`，scheduling application `11 passed`，API `97 passed`，Web `24 passed`；CR-028 修复后隔离 PostgreSQL/Redis Worker 为 `18 passed`，新增连续 3 次不可用后第 4 次成功的恢复场景；scheduler `97 passed`，保留 1 条 Starlette/httpx 2 上游弃用警告。
 - 数据库门禁：15 个迁移从空库首次全部应用，第二次应用数为 0；迁移测试 `9 passed`，迁移检查无缺失表、约束、回填或策略不一致，正式迁移入口返回 `applied: []`；PostgreSQL 集成测试 `21 passed`。
 - 浏览器门禁：任务 2 独立 Compose 从空卷重新运行六类故障 smoke 和完整 Playwright，结果为 `32 passed, 3 skipped`，共 35 项；3 项只在主 Chromium 运行的状态专项在其他视觉视口按配置跳过。四角色路由、本人作用域、草稿 pointer/keyboard 操作、运营页面、Axe 扫描、截图和溢出检查均通过。
@@ -113,6 +113,7 @@
 - B 方案首次运行：提交 `5f8eee8` 已推送到 `origin/main`，工作流 `29354931745` 的质量 job 成功并调度到本地 Runner；发布在首个 API 构建拉取基础镜像时因 BuildKit 代理缺失失败，未进入 SBOM、Trivy、TCR 登录、推送或 manifest。代理隔离修复已在本地专用 `docker-container` builder 上完成真实冷拉取、API 构建和职责探针；该本地镜像不是正式制品。
 - B 方案正式发布：提交 `f769725` 的工作流 `29357107371` 于 2026-07-15 02:28（北京时间）以 `success` 完成；四次 TCR 推送均在首次尝试成功，发布阶段约 62 秒，正式 artifact ID 为 `8320804747`。本轮未连接或修改北京服务器。
 - CR-028 新制品尝试：提交 `ce58a6a` 的工作流 `29482599323` 中 GitHub 托管质量 job 成功，本地 Runner 在首个 API 构建中完成基础镜像与 Debian 安全包下载后，停在 `npm install npm@12.0.1`；从 08:32 至 08:49（UTC）没有新增字节、日志或子阶段证据，故主动取消。SBOM、Trivy、TCR 登录、推送和 manifest 均未执行，清理步骤成功且 Runner 已退出。最小复现确认专用 BuildKit 已注入代理但外部鉴权仍可能直连超时；本地随后新增逐镜像构建 30 分钟上限、最多 1 次重试、状态/日志 artifact 和显式 build arg 代理传递，部署合同为 `37 passed`。
+- CR-028 有界构建重跑：上述修复与 systemd 稳定路径以 `11ab909` 提交并推送。工作流 `29557441559` 的质量 job 成功，release job 在 `docker/setup-buildx-action` 的 bootstrap 阶段停滞约 8 分钟；独立探针确认本机 BuildKit 镜像完整可运行，但 `docker-container` builder 仍强制远端 pull 并在 60 秒后超时。运行在任何业务镜像构建、TCR 登录或服务器操作前取消，清理和 Runner 退出成功。当前最窄修复改用已验证的本机 Docker Engine builder，发布专项 `18 passed`。
 - 腾讯云备案期内部验证：服务器按正式 release manifest 拉取六个固定 digest，完成迁移、两次无故障业务 smoke、备份恢复和 50/100/150 场容量基准；API、Redis、Publisher、Worker 故障恢复通过，Scheduler 冷恢复因自动重试窗口不足失败并形成 CR-028。验证后 ExamForge 栈停止，域名仍无解析，nginx、证书、其他容器和主机级服务未修改。
 
 ## 4. 当前边界
@@ -126,6 +127,6 @@
 
 ## 5. 下一步
 
-1. CR-028 代码修复、逐镜像构建边界和 systemd 稳定路径合同已在本地通过；用户已于 2026-07-17 确认继续，下一步提交并推送修复后重新发布新制品。
+1. Docker Engine builder 修复已取得发布专项红灯转绿和本地真实构建证据；下一步提交并推送该修复，重新发布 CR-028 新制品。
 2. 新正式 release 就绪后，在备案期内部维护窗口部署新 digest，验证 Scheduler 冷恢复，以 `f769725` 完成真实跨版本回滚，再恢复新 release；同时执行备份恢复、内部巡检和资源观察，完成后停止 ExamForge 栈。
 3. 备案通过前继续保持域名无解析，不修改 nginx、证书、防火墙或其他服务；正式域名 HTTPS、核心 Playwright、证书续期和有限开放观察保留到备案通过后。
