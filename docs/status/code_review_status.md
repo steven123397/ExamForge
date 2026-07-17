@@ -32,19 +32,6 @@
 - 解决记录：未解决。
 - 本轮处置：暂缓。2026-07-12 `docker info` 显示 daemon 的 HTTP/HTTPS 代理仍为 `http://172.22.112.1:7897`，且没有 Docker Hub 镜像源；`docker pull postgres:16-alpine` 通过该路径从 Docker Hub 拉取新 digest `sha256:57c72fd...` 成功，说明代理当前可用。未经用户单独授权不修改 machine-level systemd/Windows 代理；代理地址变化、Docker Hub 拉取失败或迁移到独立服务器时重新评估。
 
-### CR-028：生产 Scheduler 冷恢复时间超过作业自动重试窗口
-
-- 状态：待解决
-- 严重级别：P1 高优先级
-- 所属模块：Worker、可靠作业与生产故障恢复
-- 发现来源：2026-07-15 腾讯云备案期内部故障演练
-- 位置：`apps/worker/src/retry-policy.ts`、`apps/worker/src/config.ts`、`apps/worker/src/queue.ts`、`apps/worker/src/worker.ts`、`compose.production.yml`、`scripts/deploy/preflight.sh`、`scripts/deploy/online-smoke.mjs`
-- 问题描述：排考队列固定最多尝试 3 次，指数退避基数为 1 秒。正式生产容器停止 Scheduler 后，作业在约 3.35 秒内依次完成 3 次 `scheduler_unavailable` 失败并进入终态；Scheduler 容器恢复 readiness 所需时间超过该窗口，故障脚本即使在首个 `schedule_job.retry_scheduled` 后立即启动 Scheduler，作业仍无法自动恢复。
-- 影响：短暂 Scheduler 重启会把本应可重试的排考作业提前终止为 `failed`，需要人工重新提交，违反第五版远端故障恢复验收标准。现有 PostgreSQL 事实、事件顺序和运行唯一性未损坏，失败作业没有生成重复运行。
-- 建议处理：先增加覆盖生产恢复时序的最窄红灯测试，再将最大尝试次数和退避窗口改为受约束的显式配置，并保证 BullMQ 投递参数与 `JobExecutionService` 状态机使用同一合同；窗口应覆盖生产 Scheduler 冷启动 readiness，同时保留明确上限和每次 attempt 证据。
-- 验证方式：运行 Worker 专项测试和生产 `online-smoke.mjs` Scheduler 重启场景；至少出现 1 次 `scheduler_unavailable` 和 `schedule_job.retry_scheduled`，恢复后作业成功、只生成 1 个运行且事件序列严格递增。
-- 解决记录：2026-07-15 已完成本地修复但保持 `待解决`。共享策略默认最多尝试 6 次、退避基数 1000 ms，限制尝试次数为 2 至 10 且最终单次退避不超过 30000 ms；Publisher、Worker/`JobExecutionService`、生产 Compose 与预检使用同一合同。配置红灯先证明旧实现缺少字段，真实 PostgreSQL/Redis 红灯再证明连续 3 次不可用后无法执行第 4 次；实现后 Worker 全套 `18 passed`，其中新增场景为 3 次失败后第 4 次成功、4 个 attempt、1 个运行。逐镜像构建边界与 systemd 路径修复已由 `11ab909` 提交并推送，但工作流 `29557441559` 在远端 BuildKit bootstrap 阶段取消，仍未生成新正式 digest，也未在腾讯云重跑 Scheduler 冷恢复，因此不能移入已解决索引。
-
 ## 4. 已解决问题索引
 
 - CR-001：本机默认 Python 环境不满足调度器要求
@@ -71,14 +58,19 @@
 - CR-025：运营历史子查询失败会被吞掉并显示成空数据
 - CR-026：发布、回滚、废弃和删除等高影响操作没有确认步骤
 - CR-027：草稿矩阵 ARIA 网格语义和异步错误播报不完整
+- CR-028：生产 Scheduler 冷恢复时间超过作业自动重试窗口
 - CR-008：Python 调度器尚未独立 FastAPI 服务化
 - CR-007：排考进度仍使用轮询，没有 WebSocket 或 SSE 实时推送
 
 ## 5. 审查记录
 
+- 2026-07-17：CR-028 完成远端关闭。共享重试策略继续固定为最多 6 次尝试、1000 ms 指数退避基数，Publisher、Worker/`JobExecutionService`、生产 Compose 和预检使用同一合同。提交 `a507993` 的工作流 `29561565291` 中，GitHub 质量 job 与本地 release job 均为 `success`；四镜像首次构建/探针、SBOM、Trivy HIGH/CRITICAL、TCR 推送、远程 digest、release manifest 和正式 artifact `8399608869` 全部通过。北京服务器按新 manifest 部署后，Scheduler 停止场景依次产生 3 个 `scheduler_unavailable` attempt 和 3 个 `schedule_job.retry_scheduled`，第 4 个 attempt 成功；最终仅 1 个运行、14 个严格有序事件。API 重启后的 SSE 以 `Last-Event-ID` 重连，只回放后续 4 个事件并收到成功终态；Redis、Publisher 和 Worker 故障同样保持单一运行。随后真实回滚到 `f769725` 用时 127 秒，回滚后业务 smoke 通过；重新部署 `a507993` 用时 128 秒并再次通过 smoke。CR-028 从问题明细移除并进入已解决索引，当前没有待解决 P0/P1。
+
+- 2026-07-17：远端部署前发现 Ubuntu 主机 Node.js `v12.22.9` 无法解析宿主侧 release verifier 的逻辑空值赋值、可选链、空值合并和 CommonJS `node:` 模块名。两次失败均发生在镜像拉取和容器启动前，部署错误处理保留旧 `current` 与环境文件。最窄合同先约束宿主侧校验库不使用 `??`、`?.`，且 `deploy.sh` 不使用 `require("node:...")`，再改为等价显式判断和 `require("fs")`；服务器原生 Node 完成语法检查与完整 bundle 校验，部署合同增至 `39 passed`。应用构建与运行仍固定 Node.js 22.22.2，没有降低应用运行时基线或全局升级同机 Node。
+
 - 2026-07-17：apt 修复提交 `b9a2274` 的工作流 `29560455791` 中，GitHub 质量 job、本地四镜像首次构建与职责探针、四份 SBOM、Trivy HIGH/CRITICAL 门禁、TCR 登录、四次推送、远程 digest 读取和 release manifest 校验均成功；正式 bundle 在 `CreateArtifact` 阶段遇到一次 `ECONNRESET`，主 artifact 上传失败，失败诊断 artifact 随即成功。由于正式 artifact 缺失，本轮候选 tag 与 manifest 不得部署，运行没有连接服务器。最窄合同红灯随后要求首次上传失败保留 bundle、等待 5 秒并以同名 `overwrite` 最多重试 1 次；实现与 Actionlint 转绿。尚未取得完整新 release artifact，CR-028 状态不变。
 
-- 2026-07-17：Engine builder 修复提交 `a8ae2f2` 的工作流 `29558412245` 中，质量 job、本地 builder 校验、API 与 scheduler 首次构建/探针通过；Web 第一次在下载 `sed` 安全更新时遇到代理 `502`，第二次在 Debian `InRelease` 遇到 `502`，有界 helper 正确记录 failed/retrying/failed。运行未进入 SBOM、Trivy、TCR 登录、推送或 manifest，失败诊断 artifact ID 为 `8398425713`，清理与 Runner 退出成功。对照探针证明相同容器经官方 CDN 连续 3 次达到 120 秒边界，经清华 Debian 镜像约 4 秒完成 9.3 MB 签名索引；当前本地 `upgrade-debian.sh` 保留 Debian Release 签名与包哈希校验，对 update/upgrade 各设置单次 120 秒、最多 3 次并输出状态，四个正式镜像均在首次尝试完成真实构建与职责探针。发布专项 `19 passed`、部署合同 `38 passed`；尚未生成新正式 digest，CR-028 状态不变。
+- 2026-07-17：Engine builder 修复提交 `a8ae2f2` 的工作流 `29558412245` 中，质量 job、本地 builder 校验、API 与 scheduler 首次构建/探针通过；Web 第一次在下载 `sed` 安全更新时遇到代理 `502`，第二次在 Debian `InRelease` 遇到 `502`，有界 helper 正确记录 failed/retrying/failed。运行未进入 SBOM、Trivy、TCR 登录、推送或 manifest，失败诊断 artifact ID 为 `8398425713`，清理与 Runner 退出成功。对照探针证明相同容器经官方 CDN 连续 3 次达到 120 秒边界，经清华 Debian 镜像约 4 秒完成 9.3 MB 签名索引；修复后的 `upgrade-debian.sh` 保留 Debian Release 签名与包哈希校验，对 update/upgrade 各设置单次 120 秒、最多 3 次并输出状态，四个正式镜像均在首次尝试完成真实构建与职责探针。该时点发布专项为 `19 passed`、部署合同为 `38 passed`；尚未生成新正式 digest，CR-028 状态不变。
 
 - 2026-07-17：`11ab909` 的新制品工作流 `29557441559` 中，GitHub 质量 job 成功，本地 release job 在 `docker/setup-buildx-action` 的 `buildx inspect --bootstrap` 阶段连续约 8 分钟无日志、Docker 事件或 builder 状态变化，故在业务镜像构建前取消。独立探针确认本机 `moby/buildkit` 镜像完整且可直接运行，但 `docker-container` driver 仍强制远端 pull 并在 60 秒后超时；Docker Engine `default` builder 则在约 2 秒内完成真实 `scratch` 镜像构建与加载。最窄合同测试先要求 release job 禁止 setup Action、`docker-container` 与 `--bootstrap`，随后工作流改为校验并显式使用 Engine builder，发布专项恢复为 `18 passed`。运行未登录 TCR、未生成 manifest、未连接服务器，CR-028 状态不变。
 

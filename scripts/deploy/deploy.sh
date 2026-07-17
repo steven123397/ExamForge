@@ -124,7 +124,7 @@ node "$repository_root/scripts/release/verify-release.mjs" \
   "$release_manifest" --verify-files >/dev/null \
   || operations_fail "release_manifest_invalid" "deployment" "release_verification_failed"
 commit_sha=$(node -e \
-  'const fs=require("node:fs"); const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(value.commitSha)' \
+  'const fs=require("fs"); const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(value.commitSha)' \
   "$release_manifest")
 [[ "$commit_sha" =~ ^[a-f0-9]{40}$ ]] \
   || operations_fail "release_manifest_invalid" "deployment" "commit_sha_invalid"

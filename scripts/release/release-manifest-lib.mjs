@@ -53,7 +53,9 @@ export function validateReleaseManifest(manifest, options = {}) {
     const image = manifest.images[name];
     validateImage(name, image, manifest);
     const currentPrefix = image.repository.slice(0, -(name.length + 1));
-    repositoryPrefix ??= currentPrefix;
+    if (repositoryPrefix === undefined) {
+      repositoryPrefix = currentPrefix;
+    }
     assert(
       repositoryPrefix === currentPrefix,
       "all images must use the same registry and namespace",
@@ -94,7 +96,10 @@ export function parseNamedArguments(argv, requiredNames) {
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
     const value = argv[index + 1];
-    assert(flag?.startsWith("--") && value !== undefined, `invalid argument near ${flag ?? "end"}`);
+    assert(
+      typeof flag === "string" && flag.startsWith("--") && value !== undefined,
+      `invalid argument near ${flag === undefined ? "end" : flag}`,
+    );
     const name = flag.slice(2);
     assert(requiredNames.includes(name), `unknown argument: ${flag}`);
     assert(values[name] === undefined, `argument provided more than once: ${flag}`);
@@ -219,7 +224,8 @@ function verifyReport(baseDirectory, relativePath, expectedChecksum) {
 function validateAttachedAudit(path) {
   const report = parseJsonReport(path, "npm audit");
   assert(
-    report?.metadata?.vulnerabilities?.total === 0,
+    report && report.metadata && report.metadata.vulnerabilities
+      && report.metadata.vulnerabilities.total === 0,
     "attached npm audit report must contain zero vulnerabilities",
   );
 }
@@ -232,7 +238,9 @@ function validateAttachedSbom(path, imageName) {
 function validateAttachedScan(path, imageName) {
   const report = parseJsonReport(path, `${imageName} Trivy scan`);
   assert(Array.isArray(report.Results), `${imageName} Trivy scan must contain Results`);
-  const findings = report.Results.flatMap((result) => result.Vulnerabilities ?? []);
+  const findings = report.Results.flatMap((result) => (
+    result.Vulnerabilities === undefined ? [] : result.Vulnerabilities
+  ));
   const blocking = findings.filter((finding) => (
     finding.Severity === "HIGH" || finding.Severity === "CRITICAL"
   ));

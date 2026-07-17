@@ -111,6 +111,9 @@ async function run() {
     faults.api = await timed("api_restart", async () => {
       compose("stop", "publisher");
       const job = await submitJob(operatorHeaders, "api-restart");
+      const initialEvents = await readSse(job.id, operatorHeaders, { stopAfterFirstEvent: true });
+      assert(initialEvents.length > 0, "API restart SSE did not return an initial event.");
+      const lastEventId = initialEvents.at(-1).id;
       await waitForEvidence(job.id, (value) => value.pendingOutbox > 0, "API restart outbox");
       compose("restart", "api");
       await waitForApiReady();
@@ -118,7 +121,20 @@ async function run() {
       operatorHeaders = { cookie: operatorCookie };
       compose("start", "publisher");
       await waitForInternalReadiness("publisher");
-      return finishFaultJob(job.id, operatorHeaders, "API restart");
+      const resumedEvents = await readSse(job.id, operatorHeaders, { lastEventId });
+      assert(resumedEvents.some((event) => terminalEvents.has(event.type)),
+        "API restart SSE reconnect did not deliver a terminal event.");
+      assert(resumedEvents.every((event) => event.id !== lastEventId),
+        "API restart SSE reconnect replayed the acknowledged event.");
+      const evidence = await finishFaultJob(job.id, operatorHeaders, "API restart");
+      return {
+        ...evidence,
+        sseReconnect: {
+          lastEventId,
+          replayedEventCount: resumedEvents.length,
+          terminalEvent: resumedEvents.at(-1).type,
+        },
+      };
     });
 
     faults.redis = await timed("redis_restart", async () => {
@@ -224,9 +240,13 @@ function mutationHeaders(headers) {
   return { ...headers, origin: publicOrigin };
 }
 
-async function readSse(jobId, headers) {
+async function readSse(jobId, headers, options = {}) {
+  const requestHeaders = { ...headers, accept: "text/event-stream" };
+  if (options.lastEventId !== undefined) {
+    requestHeaders["last-event-id"] = options.lastEventId;
+  }
   const response = await fetch(`${apiBase}/api/schedule-jobs/${encodeURIComponent(jobId)}/events`, {
-    headers: { ...headers, accept: "text/event-stream" },
+    headers: requestHeaders,
     signal: AbortSignal.timeout(90_000),
   });
   assert(response.ok && response.body, `SSE returned HTTP ${response.status}.`);
@@ -243,7 +263,11 @@ async function readSse(jobId, headers) {
       const event = parseSseFrame(frame);
       if (event) events.push(event);
     }
-    if (done || events.some((event) => terminalEvents.has(event.type))) {
+    if (
+      done
+      || (options.stopAfterFirstEvent === true && events.length > 0)
+      || events.some((event) => terminalEvents.has(event.type))
+    ) {
       await reader.cancel().catch(() => undefined);
       return events;
     }

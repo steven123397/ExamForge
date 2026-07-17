@@ -20,6 +20,7 @@ const paths = {
   deploy: join(repositoryRoot, "scripts/deploy/deploy.sh"),
   rollback: join(repositoryRoot, "scripts/deploy/rollback.sh"),
   onlineSmoke: join(repositoryRoot, "scripts/deploy/online-smoke.mjs"),
+  releaseManifestLibrary: join(repositoryRoot, "scripts/release/release-manifest-lib.mjs"),
 };
 const commitSha = "a".repeat(40);
 
@@ -44,6 +45,15 @@ describe("production deployment contract", () => {
     assert.match(source, /previous/);
     assert.match(source, /deployment_failed_rollback/);
     assert.doesNotMatch(source, /docker compose[^\n]*build/);
+  });
+
+  it("keeps the host-side release verifier compatible with the server parser", () => {
+    const source = readFileSync(paths.releaseManifestLibrary, "utf8");
+    const deploySource = readFileSync(paths.deploy, "utf8");
+
+    assert.doesNotMatch(source, /\?\?/);
+    assert.doesNotMatch(source, /\?\./);
+    assert.doesNotMatch(deploySource, /require\(["']node:/);
   });
 
   it("rolls back through the previous verified manifest", () => {
@@ -79,6 +89,8 @@ describe("production deployment contract", () => {
     for (const service of ["api", "redis", "publisher", "worker", "scheduler"]) {
       assert.ok(smoke.includes(`\"${service}\"`), `online smoke must drill ${service}`);
     }
+    assert.match(smoke, /last-event-id/);
+    assert.match(smoke, /sseReconnect/);
     assert.doesNotMatch(smoke, /console\.(log|error).*password/i);
   });
 });
