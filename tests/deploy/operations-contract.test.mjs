@@ -10,6 +10,8 @@ const paths = {
   backup: join(repositoryRoot, "scripts/deploy/backup-postgres.sh"),
   restore: join(repositoryRoot, "scripts/deploy/restore-postgres.sh"),
   health: join(repositoryRoot, "scripts/deploy/health-check.sh"),
+  backupService: join(repositoryRoot, "deploy/systemd/examforge-backup.service"),
+  backupTimer: join(repositoryRoot, "deploy/systemd/examforge-backup.timer"),
   healthService: join(repositoryRoot, "deploy/systemd/examforge-health.service"),
   healthTimer: join(repositoryRoot, "deploy/systemd/examforge-health.timer"),
   nginxLogrotate: join(repositoryRoot, "deploy/logrotate/examforge-nginx"),
@@ -54,15 +56,28 @@ describe("production operations contract", () => {
     assert.match(source, /restore_summary_mismatch/);
   });
 
-  it("installs a hardened recurring health check and bounded nginx logs", () => {
-    for (const path of [paths.healthService, paths.healthTimer, paths.nginxLogrotate]) {
+  it("runs hardened recurring operations from the stable deployment directory", () => {
+    for (const path of [
+      paths.backupService,
+      paths.backupTimer,
+      paths.healthService,
+      paths.healthTimer,
+      paths.nginxLogrotate,
+    ]) {
       assert.ok(existsSync(path), `${path} must exist`);
     }
-    const service = readFileSync(paths.healthService, "utf8");
-    assert.match(service, /^User=examforge$/m);
-    assert.match(service, /^NoNewPrivileges=true$/m);
-    assert.match(service, /^ProtectSystem=strict$/m);
-    assert.match(service, /health-check\.sh/);
+    for (const [name, path] of Object.entries({
+      backup: paths.backupService,
+      health: paths.healthService,
+    })) {
+      const service = readFileSync(path, "utf8");
+      assert.match(service, /^User=examforge$/m);
+      assert.match(service, /^NoNewPrivileges=true$/m);
+      assert.match(service, /^ProtectSystem=strict$/m);
+      assert.match(service, /^WorkingDirectory=\/srv\/apps\/examforge$/m);
+      assert.match(service, new RegExp(`^ExecStart=/srv/apps/examforge/scripts/deploy/${name === "backup" ? "backup-postgres" : "health-check"}\\.sh `, "m"));
+      assert.doesNotMatch(service, /\/srv\/apps\/examforge\/current\//);
+    }
 
     const timer = readFileSync(paths.healthTimer, "utf8");
     assert.match(timer, /^OnUnitActiveSec=5min$/m);

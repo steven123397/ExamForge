@@ -19,6 +19,7 @@ const verifierPath = join(repositoryRoot, "scripts/release/verify-release.mjs");
 const creatorPath = join(repositoryRoot, "scripts/release/create-release-manifest.mjs");
 const workflowPath = join(repositoryRoot, ".github/workflows/release-images.yml");
 const probeImagePath = join(repositoryRoot, "scripts/release/probe-image.sh");
+const buildImagePath = join(repositoryRoot, "scripts/release/build-image.sh");
 const pushImagePath = join(repositoryRoot, "scripts/release/push-image.sh");
 const configureBuildxPath = join(repositoryRoot, "scripts/release/configure-buildx.sh");
 const commitSha = "1".repeat(40);
@@ -147,8 +148,9 @@ describe("release workflow boundary", () => {
     const pushPosition = workflow.indexOf("推送通过门禁的镜像");
     assert.ok(scanPosition > 0 && scanPosition < loginPosition);
     assert.ok(loginPosition < pushPosition);
-    assert.match(workflow, /NEXT_PUBLIC_API_BASE_URL/);
-    assert.match(workflow, /linux\/amd64/);
+    const buildScript = readFileSync(buildImagePath, "utf8");
+    assert.match(buildScript, /NEXT_PUBLIC_API_BASE_URL/);
+    assert.match(buildScript, /linux\/amd64/);
   });
 
   it("keeps quality on GitHub hosting and targets release only to the dedicated runner", () => {
@@ -177,7 +179,9 @@ describe("release workflow boundary", () => {
     assert.match(releaseJob, /persist-credentials:\s*false/);
     assert.match(releaseJob, /git rev-parse HEAD/);
     assert.match(releaseJob, /GITHUB_SHA/);
-    assert.ok(releaseJob.indexOf("git rev-parse HEAD") < releaseJob.indexOf("docker buildx build"));
+    assert.ok(
+      releaseJob.indexOf("git rev-parse HEAD") < releaseJob.indexOf("scripts/release/build-image.sh"),
+    );
   });
 
   it("limits and records each image push with one retry and remote digest verification", () => {
@@ -192,6 +196,20 @@ describe("release workflow boundary", () => {
     assert.match(pushScript, /status=/);
     assert.match(releaseJob, /scripts\/release\/push-image\.sh/);
     assert.match(releaseJob, /push-status\.log/);
+  });
+
+  it("limits and records each image build with one retry and explicit runner proxies", () => {
+    assert.ok(existsSync(buildImagePath), "build-image.sh must provide the bounded build contract");
+    const buildScript = readFileSync(buildImagePath, "utf8");
+    const releaseJob = extractWorkflowJob(readFileSync(workflowPath, "utf8"), "release");
+
+    assert.match(buildScript, /EXAMFORGE_BUILD_TIMEOUT_SECONDS:-1800/);
+    assert.match(buildScript, /max_attempts=2/);
+    assert.match(buildScript, /timeout[\s\S]*docker buildx build/);
+    assert.match(buildScript, /HTTP_PROXY HTTPS_PROXY http_proxy https_proxy/);
+    assert.match(buildScript, /status=/);
+    assert.match(releaseJob, /scripts\/release\/build-image\.sh/);
+    assert.match(releaseJob, /build-status\.log/);
   });
 
   it("does not contain any production server connection or deployment command", () => {
@@ -278,6 +296,33 @@ describe("bounded registry push helper", () => {
     assert.notEqual(result.status, 0);
     assert.equal(readFileSync(fixture.attemptPath, "utf8"), "2\n");
     assert.equal(existsSync(fixture.digestPath), false);
+    const status = readFileSync(fixture.statusPath, "utf8");
+    assert.equal((status.match(/status=failed/g) ?? []).length, 2);
+    assert.equal((status.match(/status=retrying/g) ?? []).length, 1);
+  });
+});
+
+describe("bounded image build helper", () => {
+  it("retries one failed build and passes runner proxies to BuildKit", () => {
+    const fixture = createBuildFixture(2);
+    const result = runBuildFixture(fixture);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(fixture.attemptPath, "utf8"), "2\n");
+    const status = readFileSync(fixture.statusPath, "utf8");
+    assert.match(status, /attempt=1 status=failed reason=build_failed/);
+    assert.match(status, /attempt=1 status=retrying reason=build_failed/);
+    assert.match(status, /attempt=2 status=succeeded reason=image_loaded/);
+    const calls = readFileSync(fixture.callsPath, "utf8");
+    assert.match(calls, /--build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg http_proxy --build-arg https_proxy/);
+  });
+
+  it("stops after the second failed build", () => {
+    const fixture = createBuildFixture(3);
+    const result = runBuildFixture(fixture);
+
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(fixture.attemptPath, "utf8"), "2\n");
     const status = readFileSync(fixture.statusPath, "utf8");
     assert.equal((status.match(/status=failed/g) ?? []).length, 2);
     assert.equal((status.match(/status=retrying/g) ?? []).length, 1);
@@ -441,6 +486,58 @@ function runPushFixture(fixture) {
       EXAMFORGE_PUSH_LOG_DIR: join(fixture.directory, "logs"),
       FAKE_DOCKER_ATTEMPT_PATH: fixture.attemptPath,
       FAKE_DOCKER_SUCCEED_ON_ATTEMPT: String(fixture.succeedOnAttempt),
+    },
+  });
+}
+
+function createBuildFixture(succeedOnAttempt) {
+  const directory = mkdtempSync(join(tmpdir(), "examforge-build-"));
+  const binDirectory = join(directory, "bin");
+  const dockerPath = join(binDirectory, "docker");
+  const attemptPath = join(directory, "attempts");
+  const statusPath = join(directory, "build-status.log");
+  const callsPath = join(directory, "docker-calls.log");
+  mkdirSync(binDirectory, { recursive: true });
+  writeFileSync(dockerPath, `#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\\n' "$*" >> "$FAKE_DOCKER_CALLS_PATH"
+attempt=0
+[[ ! -f "$FAKE_DOCKER_ATTEMPT_PATH" ]] || attempt=$(< "$FAKE_DOCKER_ATTEMPT_PATH")
+attempt=$((attempt + 1))
+printf '%s\\n' "$attempt" > "$FAKE_DOCKER_ATTEMPT_PATH"
+printf 'fake build attempt %s\\n' "$attempt"
+((attempt >= FAKE_DOCKER_SUCCEED_ON_ATTEMPT))
+`);
+  chmodSync(dockerPath, 0o755);
+  return { directory, binDirectory, attemptPath, statusPath, callsPath, succeedOnAttempt };
+}
+
+function runBuildFixture(fixture) {
+  return spawnSync("bash", [
+    buildImagePath,
+    `ccr.ccs.tencentyun.com/examforge/api:${commitSha}`,
+    "api",
+    "apps/api/Dockerfile",
+  ], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${fixture.binDirectory}:${process.env.PATH}`,
+      EXAMFORGE_BUILD_RETRY_DELAY_SECONDS: "0",
+      EXAMFORGE_BUILD_STATUS_FILE: fixture.statusPath,
+      EXAMFORGE_BUILD_LOG_DIR: join(fixture.directory, "logs"),
+      FAKE_DOCKER_ATTEMPT_PATH: fixture.attemptPath,
+      FAKE_DOCKER_CALLS_PATH: fixture.callsPath,
+      FAKE_DOCKER_SUCCEED_ON_ATTEMPT: String(fixture.succeedOnAttempt),
+      SOURCE_REVISION: commitSha,
+      SOURCE_URL: sourceUrl,
+      SOURCE_CREATED_AT: "2026-07-14T00:00:00.000Z",
+      PUBLIC_ORIGIN: "https://examforge.site",
+      HTTP_PROXY: "http://127.0.0.1:7890",
+      HTTPS_PROXY: "http://127.0.0.1:7891",
+      http_proxy: "http://127.0.0.1:7890",
+      https_proxy: "http://127.0.0.1:7891",
     },
   });
 }

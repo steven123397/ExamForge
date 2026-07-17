@@ -76,6 +76,8 @@
 
 ## 5. 审查记录
 
+- 2026-07-16：CR-028 新制品工作流 `29482599323` 的 GitHub 托管质量 job 成功，本地 Runner 在首个 API 构建中完成基础镜像与 Debian 安全更新下载后，停在 `npm install npm@12.0.1`，连续 17 分钟没有可证明进度。运行主动取消，未进入 SBOM、Trivy、TCR 登录、推送或 manifest；清理步骤和 Runner 退出成功。系统化复现确认专用 BuildKit 已注入四组代理变量，但基础镜像鉴权仍可能出现直连超时，构建内部 npm 也缺少工作流级边界。本地新增逐镜像构建状态、独立日志、单次 30 分钟上限、最多 1 次重试和显式 build arg 代理传递；同时修正 systemd 模板误从只含供应链附件的 `releases/current` 查找运维脚本的问题。部署合同 `37 passed`、`npm run check:ci`、Bash 语法和 `git diff --check` 通过。上述改动尚未提交、推送或生成新正式 digest，CR-028 继续保持待解决。
+
 - 2026-07-15：完成 CR-028 本地修复。新增共享、受约束的 Scheduler 作业重试策略，生产默认以 6 次尝试和 1 秒指数退避提供约 31 秒恢复窗口；生产环境示例、Publisher/Worker Compose 注入及预检合同同步更新。最窄配置测试和真实 PostgreSQL/Redis Worker 测试均先取得旧实现红灯，再转为 Worker `18 passed`；部署合同 `34 passed`、仓库级类型检查和 Bash 语法检查通过。由于没有新正式 release 和远端故障演练，CR-028 继续保持待解决，第五版远端验收与归档边界不变。
 
 - 2026-07-15：腾讯云备案期内部部署验证发现 CR-028。正式制品 `f769725` 从广州 TCR 按 digest 拉取并完成迁移、bootstrap、健康检查和无故障业务 smoke；API、Redis、Publisher 与 Worker 故障场景恢复，但 Scheduler 重启作业在约 3.35 秒内耗尽 3 次尝试，attempt 均为 `unavailable/scheduler_unavailable`，事件以 `schedule_job.failed` 终止。故障后七项服务恢复健康，再次无故障 smoke、备份恢复和 50/100/150 场基准通过；该结果证明数据与运行时可恢复，但不能关闭 Scheduler 自动恢复合同。CR-028 作为 P1 待解决问题进入问题明细，第五版不得在修复并生成新正式制品前归档。

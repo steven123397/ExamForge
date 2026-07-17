@@ -7,7 +7,7 @@
 - 教师与学生作用域由 PostgreSQL 关联和服务端会话决定。本人页面只调用 `/api/me/*`，不能通过路径、查询参数或请求体切换到其他教师或学生群体。
 - 作业、SSE、策略快照、发布资格和审计继续复用第三、第四阶段的服务端合同；页面拆分没有复制任务状态机或把 PostgreSQL 事实迁入浏览器。
 - CR-002 已在第六阶段任务 1 关闭；代码审查当前保留 P3 的 CR-003 和 P1 的 CR-028。CR-028 已完成本地修复与真实 PostgreSQL/Redis 回归，但在新正式 digest 完成腾讯云 Scheduler 冷恢复前继续保持待解决；详细问题只维护在 `docs/status/code_review_status.md`。
-- 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送，TCR 冷上传超时调整为 `6c94599`，本地 WSL self-hosted Runner 的 B 方案实现为 `5f8eee8`，Buildx 代理修复和正式发布提交为 `f769725`。工作流 `29357107371` 已成功生成四个广州 TCR digest、完整 release manifest、SBOM 和扫描 artifact；服务器已完成不经域名暴露的内部部署、备份恢复和 150 场基准验证，验证后 ExamForge 栈已停止，nginx、证书、域名流量和其他服务均未修改。
+- 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送，TCR 冷上传超时调整为 `6c94599`，本地 WSL self-hosted Runner 的 B 方案实现为 `5f8eee8`，Buildx 代理修复和首次正式发布提交为 `f769725`。工作流 `29357107371` 已成功生成四个广州 TCR digest、完整 release manifest、SBOM 和扫描 artifact；服务器已完成不经域名暴露的内部部署、备份恢复和 150 场基准验证，验证后 ExamForge 栈已停止，nginx、证书、域名流量和其他服务均未修改。CR-028 修复后的工作流 `29482599323` 因首个 API 构建无法证明持续进度而取消，未登录 TCR、未推送镜像、未生成新 manifest，也未修改服务器。
 
 ## 2. 已实现内容
 
@@ -69,7 +69,7 @@
 
 - 第六阶段任务 4 已新增 PostgreSQL custom-format 备份和恢复脚本。备份集合固定包含转储、SHA-256、迁移版本、脱敏摘要与 `.meta` 完成标记；本地和 COS 挂载目录均在附件到齐后才发布完成标记，外部复制失败不会删除上一份有效备份，也不会提前执行保留期清理。
 - 恢复入口拒绝源库，只允许同时满足命令行确认、`_disposable` 名称和数据库级 `examforge.disposable=true` 标记的目标。恢复后使用生产 migrate 服务运行迁移检查，并比较关键表、本人 scope、发布版本、作业/attempt/事件序列和审计计数的脱敏摘要。
-- 新增每 5 分钟健康巡检和每日备份的 systemd 模板，以及独立 nginx access/error logrotate。健康检查以稳定类别报告证书、数据盘、容器状态、API/Publisher/Worker/scheduler readiness、本地/异机备份完整性和年龄，不输出环境文件值。
+- 新增每 5 分钟健康巡检和每日备份的 systemd 模板，以及独立 nginx access/error logrotate。健康检查以稳定类别报告证书、数据盘、容器状态、API/Publisher/Worker/scheduler readiness、本地/异机备份完整性和年龄，不输出环境文件值。systemd 模板固定从 `/srv/apps/examforge` 稳定运维目录读取脚本、Compose 和 600 环境文件，不把只含 manifest/SBOM 的 `releases/current` 当成源码目录。
 - 上述 systemd 与 logrotate 文件尚未在腾讯云安装，外部监控也未启用。腾讯云已手动生成首份 custom-format 备份，将四件套同时写入热备和 COS 目录，并在标记为 disposable 的临时库完成恢复、迁移检查和脱敏摘要比对；该证据证明备份恢复链可用，但不等于定时任务和持续巡检已经安装。
 
 ### 2.9 本地生产部署与 digest 回滚
@@ -102,7 +102,7 @@
 
 ## 3. 最新验证事实
 
-- 快速与静态门禁：`npm run test:ci` 为 `9 passed`；发布合同当前为 `15 passed`，新增专用 Buildx 代理隔离测试，部署类 Node.js 合同总计 `34 passed`；`npm run check:scheduler-openapi`、`npm run build`、`docker compose config --quiet` 的既有基线通过，CR-028 本地修复后 `npm run check:ci`、仓库级 `npm run typecheck`、Bash 语法和 `git diff --check` 重新通过。
+- 快速与静态门禁：`npm run test:ci` 为 `9 passed`；发布专项当前为 `18 passed`，覆盖专用 Buildx 代理隔离、逐镜像构建/推送边界和远程 digest 校验，部署类 Node.js 合同总计 `37 passed`；`npm run check:scheduler-openapi`、`npm run build`、`docker compose config --quiet` 的既有基线通过，CR-028 本地修复后 `npm run check:ci`、仓库级 `npm run typecheck`、Bash 语法和 `git diff --check` 重新通过。
 - 应用测试：shared `21 passed`，scheduling application `11 passed`，API `97 passed`，Web `24 passed`；CR-028 修复后隔离 PostgreSQL/Redis Worker 为 `18 passed`，新增连续 3 次不可用后第 4 次成功的恢复场景；scheduler `97 passed`，保留 1 条 Starlette/httpx 2 上游弃用警告。
 - 数据库门禁：15 个迁移从空库首次全部应用，第二次应用数为 0；迁移测试 `9 passed`，迁移检查无缺失表、约束、回填或策略不一致，正式迁移入口返回 `applied: []`；PostgreSQL 集成测试 `21 passed`。
 - 浏览器门禁：任务 2 独立 Compose 从空卷重新运行六类故障 smoke 和完整 Playwright，结果为 `32 passed, 3 skipped`，共 35 项；3 项只在主 Chromium 运行的状态专项在其他视觉视口按配置跳过。四角色路由、本人作用域、草稿 pointer/keyboard 操作、运营页面、Axe 扫描、截图和溢出检查均通过。
@@ -112,6 +112,7 @@
 - 正式发布尝试：提交 `f741fc0` 和 `6c94599` 已推送到 `origin/main`。工作流 `29330180914` 与 `29334386863` 均通过推送前全部门禁；前者因 60 分钟上限取消，后者在超过 60 分钟且无法取得实时进度证据后由用户人工取消。服务器未参与构建或推送，未发生远程写入。
 - B 方案首次运行：提交 `5f8eee8` 已推送到 `origin/main`，工作流 `29354931745` 的质量 job 成功并调度到本地 Runner；发布在首个 API 构建拉取基础镜像时因 BuildKit 代理缺失失败，未进入 SBOM、Trivy、TCR 登录、推送或 manifest。代理隔离修复已在本地专用 `docker-container` builder 上完成真实冷拉取、API 构建和职责探针；该本地镜像不是正式制品。
 - B 方案正式发布：提交 `f769725` 的工作流 `29357107371` 于 2026-07-15 02:28（北京时间）以 `success` 完成；四次 TCR 推送均在首次尝试成功，发布阶段约 62 秒，正式 artifact ID 为 `8320804747`。本轮未连接或修改北京服务器。
+- CR-028 新制品尝试：提交 `ce58a6a` 的工作流 `29482599323` 中 GitHub 托管质量 job 成功，本地 Runner 在首个 API 构建中完成基础镜像与 Debian 安全包下载后，停在 `npm install npm@12.0.1`；从 08:32 至 08:49（UTC）没有新增字节、日志或子阶段证据，故主动取消。SBOM、Trivy、TCR 登录、推送和 manifest 均未执行，清理步骤成功且 Runner 已退出。最小复现确认专用 BuildKit 已注入代理但外部鉴权仍可能直连超时；本地随后新增逐镜像构建 30 分钟上限、最多 1 次重试、状态/日志 artifact 和显式 build arg 代理传递，部署合同为 `37 passed`。
 - 腾讯云备案期内部验证：服务器按正式 release manifest 拉取六个固定 digest，完成迁移、两次无故障业务 smoke、备份恢复和 50/100/150 场容量基准；API、Redis、Publisher、Worker 故障恢复通过，Scheduler 冷恢复因自动重试窗口不足失败并形成 CR-028。验证后 ExamForge 栈停止，域名仍无解析，nginx、证书、其他容器和主机级服务未修改。
 
 ## 4. 当前边界
@@ -125,6 +126,6 @@
 
 ## 5. 下一步
 
-1. CR-028 本地修复与验证已完成；保持 Runner 离线，重新发布 TCR、提交、推送或部署新 digest 前再次取得用户确认。
-2. 备案通过前保持域名无解析和 ExamForge 栈停止，不修改 nginx、证书、防火墙或其他服务；保留 `f769725` 正式 artifact、六个固定 digest、服务器数据、备份和脱敏验证证据。
-3. 备案通过且新正式 release 就绪后，在用户确认的窗口部署新 digest，验证 Scheduler 恢复，并以 `f769725` 作为上一 release 完成真实应用回滚；最后执行正式域名 HTTPS、核心 Playwright、证书续期、运维单元安装和有限开放观察，再判断第五版是否可以归档。
+1. CR-028 代码修复、逐镜像构建边界和 systemd 稳定路径合同已在本地通过；用户已于 2026-07-17 确认继续，下一步提交并推送修复后重新发布新制品。
+2. 新正式 release 就绪后，在备案期内部维护窗口部署新 digest，验证 Scheduler 冷恢复，以 `f769725` 完成真实跨版本回滚，再恢复新 release；同时执行备份恢复、内部巡检和资源观察，完成后停止 ExamForge 栈。
+3. 备案通过前继续保持域名无解析，不修改 nginx、证书、防火墙或其他服务；正式域名 HTTPS、核心 Playwright、证书续期和有限开放观察保留到备案通过后。

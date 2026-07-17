@@ -193,7 +193,7 @@ chmod 600 .env.production
 node scripts/release/verify-release.mjs release-manifest.json --verify-files
 ```
 
-生产部署只能读取清单里的 TCR `sha256` digest，不接受 `latest`、普通 tag 或本地 image ID。`NEXT_PUBLIC_API_BASE_URL` 会在 Web 构建时写入浏览器代码，因此正式域名或 API origin 改变后必须重新发布 Web 镜像并使用新的 digest。当前仓库只完成了未登录 TCR 的本地真实构建与清单演练；首次正式 digest 需要在代码提交后手动运行该工作流生成。
+生产部署只能读取清单里的 TCR `sha256` digest，不接受 `latest`、普通 tag 或本地 image ID。`NEXT_PUBLIC_API_BASE_URL` 会在 Web 构建时写入浏览器代码，因此正式域名或 API origin 改变后必须重新发布 Web 镜像并使用新的 digest。提交 `f769725` 已通过该入口生成首个完整正式 release；后续提交仍必须重新通过四镜像构建、职责探针、SBOM、Trivy、逐镜像推送和 manifest 校验，不能沿用旧 digest 冒充新版本。
 
 ## 备份、恢复与健康巡检
 
@@ -235,7 +235,7 @@ SQL
   --compose-file compose.production.yml
 ```
 
-巡检覆盖证书期限、数据盘、容器 health、API/Publisher/Worker/scheduler readiness，以及本地和异机备份完整性与年龄。`deploy/systemd/` 提供每 5 分钟健康检查和每日备份模板，`deploy/logrotate/examforge-nginx` 约束独立 nginx 日志；这些文件需要在正式部署时由运维用户安装，目前尚未在腾讯云启用。
+巡检覆盖证书期限、数据盘、容器 health、API/Publisher/Worker/scheduler readiness，以及本地和异机备份完整性与年龄。`deploy/systemd/` 提供每 5 分钟健康检查和每日备份模板，固定从 `/srv/apps/examforge` 的稳定运维目录读取脚本、Compose 和环境文件；`releases/current` 只保存不可变 release manifest 与供应链附件，不能作为源码或运维脚本目录。`deploy/logrotate/examforge-nginx` 约束独立 nginx 日志；这些文件需要在正式部署时由运维用户安装，目前尚未在腾讯云启用。
 
 ## 按 digest 部署与回滚
 

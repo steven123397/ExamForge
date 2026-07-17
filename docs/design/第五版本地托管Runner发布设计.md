@@ -158,10 +158,11 @@ API 与 Worker 现在分别执行 `npm ci --omit=dev --workspace <目标> --incl
 
 两个镜像均完成运行时内部包导入、非 root、linux/amd64、OCI source/revision、职责隔离和体积探针；固定 Syft 生成 SPDX 2.3 SBOM，固定 Trivy 0.72.0 扫描 HIGH/CRITICAL 为 0。首次 self-hosted 运行暴露 `docker-container` BuildKit 未继承 WSL 代理的问题后，本地使用与 workflow 相同的专用 builder、宿主网络和显式 HTTP(S) 代理重新执行 API 冷拉取与构建，成功解析 Docker Hub 元数据、加载 linux/amd64 镜像并通过职责探针；该证据证明构建网络修复，但仍不替代四镜像正式 TCR 推送和完整 manifest。
 
-## 7. 推送可观察性与失败语义
+## 7. 构建、推送可观察性与失败语义
 
-- 每个镜像单独记录开始时间、镜像名、尝试次数和结束状态，不把四次 `docker push` 隐藏在一个无边界等待中。
-- 单镜像初始推送上限为 30 分钟，最多重试 1 次。超时后当前发布失败，不继续推送后续镜像，也不生成正式 release manifest。
+- 每个镜像的构建和推送分别记录开始时间、镜像名、尝试次数、结束状态与独立日志，不把四次构建或四次 `docker push` 隐藏在无边界等待中。
+- 单镜像每次构建和每次推送上限均为 30 分钟，各最多重试 1 次。超时后当前发布失败，不继续后续镜像，也不生成正式 release manifest。
+- Runner 的四组 `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy` 除注入专用 BuildKit 容器外，还作为 BuildKit 预定义 build arg 显式传入构建步骤；不写入最终镜像层，也不修改 Docker daemon 全局配置。
 - job 总上限为 120 分钟，仅作为最终保护；不得以继续增加总超时替代根因分析。
 - TCR 中可能保留已上传但未进入正式 manifest 的 SHA tag。部署入口只接受完整、已验证的 manifest，因此部分推送不能进入生产。
 - 同一 SHA 重跑时允许 registry 复用已上传层，但仍必须重新读取四个远程 digest、生成清单并上传完整报告。
@@ -231,6 +232,8 @@ ccr.ccs.tencentyun.com/examforge/worker@sha256:a346a2d0904cd08cf19e2b68c82679fe1
 
 ## 12. 当前状态
 
-截至 2026-07-15，用户已确认采用本地托管 Runner 的 B 方案，并保留广州 TCR。API/Worker 最小生产依赖树和 700 MB 门禁已在本地验证，工作流已拆分为 GitHub 托管质量 job 与四标签 self-hosted 发布 job，单镜像推送已具备 30 分钟上限、最多 1 次重试、状态日志和远程 digest 校验合同。Runner `2.335.1` 已安装到独立目录并完成仓库级注册，不安装系统服务；代理隔离修复提交 `f769725` 的工作流 `29357107371` 已完整成功，GitHub 托管质量 job、本地 Runner 四镜像构建与职责探针、四份 SBOM、Trivy HIGH/CRITICAL 门禁、TCR 登录、四次推送、远程 digest 校验、release manifest 校验和 artifact 上传均通过。正式 artifact `examforge-release-f7697252a931b3da871272355fec3ebcab0e3842` 已保存，job 清理后本机无凭据访问私有 TCR 返回 `401`，符合凭据清理边界。
+截至 2026-07-16，用户已确认采用本地托管 Runner 的 B 方案，并保留广州 TCR。API/Worker 最小生产依赖树和 700 MB 门禁已在本地验证，工作流已拆分为 GitHub 托管质量 job 与四标签 self-hosted 发布 job，单镜像推送已具备 30 分钟上限、最多 1 次重试、状态日志和远程 digest 校验合同。Runner `2.335.1` 已安装到独立目录并完成仓库级注册，不安装系统服务；代理隔离修复提交 `f769725` 的工作流 `29357107371` 已完整成功，GitHub 托管质量 job、本地 Runner 四镜像构建与职责探针、四份 SBOM、Trivy HIGH/CRITICAL 门禁、TCR 登录、四次推送、远程 digest 校验、release manifest 校验和 artifact 上传均通过。正式 artifact `examforge-release-f7697252a931b3da871272355fec3ebcab0e3842` 已保存，job 清理后本机无凭据访问私有 TCR 返回 `401`，符合凭据清理边界。
+
+CR-028 修复提交后的工作流 `29482599323` 再次证明 GitHub 质量 job 成功且四标签调度有效，但首个 API 构建在 `npm install npm@12.0.1` 阶段连续 17 分钟没有新增字节、日志或子阶段证据，用户授权的执行会话据此主动取消。该运行未进入 SBOM、Trivy、TCR 登录、推送或 manifest，不能视为新 release。根因收敛后，本地工作流新增逐镜像构建状态、独立日志、单次 30 分钟上限、最多 1 次重试和显式 build arg 代理传递；发布合同 `37 passed`。这些变更在提交、推送并完成新正式运行前只属于本地修复。
 
 北京服务器随后使用独立 `ubuntu` 凭据按 release manifest 拉取四个应用和两个基础镜像的固定 digest，不访问 GitHub、不构建源码；仅回环可见的内部部署完成迁移、业务 smoke、备份恢复和 150 场基准后已停止。四个应用容器中的 OCI revision 均为 `f7697252a931b3da871272355fec3ebcab0e3842`，服务器没有使用本地 image ID 或部分 tag 作为发布依据。Runner 仍未持有服务器 SSH 私钥或生产 secrets，GitHub workflow 也未自动连接服务器。第六阶段任务 3 和 Runner 发布边界已经完成验证；备案、nginx/HTTPS、正式域名 E2E、Scheduler 冷恢复缺口 CR-028 与跨版本回滚属于部署验收后续，不改变本设计的职责隔离结论。

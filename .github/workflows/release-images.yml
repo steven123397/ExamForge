@@ -169,25 +169,22 @@ jobs:
           SOURCE_CREATED_AT: ${{ steps.source.outputs.created_at }}
         run: |
           set -Eeuo pipefail
+          status_file="$RUNNER_TEMP/release-bundle/build-status.log"
+          log_directory="$RUNNER_TEMP/release-bundle/build-logs"
+          : > "$status_file"
+          for name in api scheduler web worker; do
+            printf 'timestamp=%s image=%s attempt=0 status=pending reason=not_started\n' \
+              "$(date --utc +'%Y-%m-%dT%H:%M:%SZ')" "$name" >> "$status_file"
+          done
           for name in api scheduler web worker; do
             dockerfile="apps/$name/Dockerfile"
             repository="$TCR_REGISTRY/$TCR_NAMESPACE/$name"
             image_ref="$repository:$GITHUB_SHA"
             mkdir -p "$RUNNER_TEMP/release-bundle/images/$name"
-            build_args=(
-              --file "$dockerfile"
-              --platform linux/amd64
-              --load
-              --tag "$image_ref"
-              --build-arg "SOURCE_REVISION=$GITHUB_SHA"
-              --build-arg "SOURCE_URL=$SOURCE_URL"
-              --build-arg "SOURCE_CREATED_AT=$SOURCE_CREATED_AT"
-            )
-            if [[ "$name" == "web" ]]; then
-              build_args+=(--build-arg "NEXT_PUBLIC_API_BASE_URL=$PUBLIC_ORIGIN")
-            fi
-            docker buildx build "${build_args[@]}" \
-              .
+            EXAMFORGE_BUILD_STATUS_FILE="$status_file" \
+            EXAMFORGE_BUILD_LOG_DIR="$log_directory" \
+            SOURCE_REVISION="$GITHUB_SHA" \
+              bash scripts/release/build-image.sh "$image_ref" "$name" "$dockerfile"
             bash scripts/release/probe-image.sh "$image_ref" "$name" "$GITHUB_SHA" "$PUBLIC_ORIGIN"
           done
 
@@ -298,6 +295,8 @@ jobs:
         with:
           name: examforge-release-failure-${{ github.sha }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/release-bundle/build-status.log
+            ${{ runner.temp }}/release-bundle/build-logs
             ${{ runner.temp }}/release-bundle/push-status.log
             ${{ runner.temp }}/release-bundle/push-logs
           if-no-files-found: warn
