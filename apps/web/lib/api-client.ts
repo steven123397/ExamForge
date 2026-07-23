@@ -9,8 +9,9 @@ import type {
   CurrentTeacherAvailabilityResponse,
   DashboardResponse,
   PublishedScheduleAudienceResponse,
-  PublishedScheduleNotificationsResponse,
   PublishedScheduleResponse,
+  PublicPublishedScheduleNotificationsResponse,
+  PublicPublishedScheduleResponse,
   ReferenceDataResponse,
   ReferenceDeleteResponse,
   ReferenceImportResponse,
@@ -271,8 +272,15 @@ export const apiClient = {
     );
   },
 
-  getPublishedSchedule() {
-    return requestJson<PublishedScheduleResponse>("/api/published-schedule");
+  getPublicPublishedSchedule() {
+    return requestJson<PublicPublishedScheduleResponse>("/api/published-schedule");
+  },
+
+  getOperationalPublishedSchedule() {
+    return requestJson<PublishedScheduleResponse>(
+      "/api/published-schedule/operations",
+      internalReadInit(),
+    );
   },
 
   rollbackPublishedSchedule() {
@@ -295,7 +303,7 @@ export const apiClient = {
   },
 
   getPublishedScheduleNotifications() {
-    return requestJson<PublishedScheduleNotificationsResponse>(
+    return requestJson<PublicPublishedScheduleNotificationsResponse>(
       "/api/published-schedule/notifications",
     );
   },

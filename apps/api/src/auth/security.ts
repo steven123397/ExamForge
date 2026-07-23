@@ -46,6 +46,14 @@ export function hashSessionToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
+export function hashLoginAttemptKey(ipAddress: string | null, username: string) {
+  const normalizedSource = ipAddress?.trim().toLowerCase() || "unknown";
+  const normalizedUsername = username.normalize("NFKC").trim().toLowerCase();
+  return createHash("sha256")
+    .update(`${normalizedSource}\u0000${normalizedUsername}`)
+    .digest("hex");
+}
+
 function derivePassword(
   password: string,
   salt: Buffer,

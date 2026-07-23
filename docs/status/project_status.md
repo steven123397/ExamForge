@@ -6,7 +6,7 @@
 - Web 已从根路由组合原型拆分为登录、管理员、排考、运行、草稿、审计、教师本人和学生本人页面；筛选、分页、对比和选中对象进入 URL，可直接访问、刷新和前进后退。
 - 教师与学生作用域由 PostgreSQL 关联和服务端会话决定。本人页面只调用 `/api/me/*`，不能通过路径、查询参数或请求体切换到其他教师或学生群体。
 - 作业、SSE、策略快照、发布资格和审计继续复用第三、第四阶段的服务端合同；页面拆分没有复制任务状态机或把 PostgreSQL 事实迁入浏览器。
-- CR-002 与 CR-028 均已关闭；代码审查当前只保留 P3 的 CR-003，没有待解决 P0/P1。CR-028 的共享重试策略已通过本地真实 PostgreSQL/Redis 和腾讯云 Scheduler 冷恢复验证；详细问题只维护在 `docs/status/code_review_status.md`。
+- CR-002、CR-028、CR-029、CR-030、CR-031、CR-032、CR-033、CR-034 与 CR-035 均已关闭。2026-07-17 的第五版双轨独立全量审查新增 CR-029 至 CR-036；2026-07-23 已完成角色授权、创建顺序、发布并发、登录失败防护、受控密码轮换、匿名公开 DTO 裁剪和有界草稿建议整改，当前问题明细为 P3 2 项，共 2 项、没有 P0/P1/P2。新制品、正式域名和任务 7 验收尚未完成；详细问题只维护在 `docs/status/code_review_status.md`。
 - 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送。提交 `a507993` 的工作流 `29561565291` 已成功生成四个新广州 TCR digest、完整 release manifest、SBOM、扫描报告和正式 artifact `8399608869`。北京服务器按新 digest 完成仅回环部署、五类故障与 SSE 重连、真实跨版本回滚、备份恢复和 10 分 28 秒内部观察；验证后 ExamForge 栈已停止，`current` 保留 `a507993`、`previous` 保留 `f769725`，nginx、证书、域名流量、systemd 和其他服务均未修改。
 
 ## 2. 已实现内容
@@ -16,6 +16,7 @@
 - 新增 `0014_user_audience_scopes.sql`，以 `user_teacher_scopes` 和 `user_student_group_scopes` 保存用户与教师/学生群体的关系；外键、教师唯一绑定、重复迁移和第四阶段数据升级均由迁移测试与检查器覆盖。
 - 新增 `/api/me/audience`、`/api/me/published-schedule`、`GET /api/me/teacher-unavailable-slots` 和 `PATCH /api/me/teacher-unavailable-slots`。教师只能读取本人监考与维护本人不可用时间，学生只能读取所属群体的已发布安排。
 - 旧按教师或学生群体 ID 的发布查询不再匿名开放；管理员/排考员保留受保护的运营预览，教师/学生越权访问稳定返回 403，缺失本人 scope 不回退到演示 ID。
+- 匿名聚合课表与公告保留为独立的 `contractVersion: 1` 公开 DTO，只投影公告所需的批次摘要、可见名称、日期时间、通知数量和文案；内部运行、标识、评分、冲突、诊断、报告、统计和约束追踪不再通过匿名 API 输出。公开标签缺失或为空时只返回 `null` 或省略，不以内部 ID 回退。
 - 全局 `AuthProvider`、角色路由守卫和两类应用壳已经落地。根路由按真实会话角色分流，匿名深链使用安全 `returnTo` 回跳，会话失效清理私有 Query cache；403、404、页面错误和加载状态均有独立页面表达。
 
 ### 2.2 页面化运营工作流
@@ -39,6 +40,10 @@
 - API 重启与 SSE 重连最终为 1 个 attempt、5 个事件和 1 个运行；Redis 停止恢复和 Publisher 重启也各保持 1 个 attempt、5 个事件和 1 个运行。
 - Worker 崩溃由第 2 个 attempt 以 `worker_delivery_reclaimed` 回收，scheduler 暂停由第 2 个 attempt 在首个 `scheduler_unavailable` 后恢复；两种场景均为 8 个有序事件和 1 个运行。
 - 重复投递同一 outbox 只增加 outbox 投递次数，不增加作业 attempt、业务事件或运行。全部证据使用独立端口、卷和测试数据库，完成后已删除该项目的容器、网络和卷，用户已有 Compose 栈未被修改。
+- 新增 `0015_batch_publication_version.sql`。运行发布、草稿发布和发布回滚统一以批次发布版本在 PostgreSQL 单事务中锁定并比较，发布指针与成功审计原子提交；并发陈旧请求稳定返回 `409`，审计写入失败不保留指针变更。
+- 新增 `0016_auth_login_attempts.sql`。登录失败状态以来源和规范化用户名组合的摘要键持久化到 PostgreSQL；5 次失败／15 分钟窗口触发 15 分钟临时锁定，成功认证清除状态。API 仅信任 loopback 反向代理的来源转发，锁定审计不保存密码或明文来源。
+- 新增 `0018_creation_sequences.sql`。`schedule_runs`、`audit_events` 与 `schedule_jobs` 分别以表内创建顺序键支持稳定的列表、分页和最新运行查询；PostgreSQL 与内存仓储均不再以毫秒时间戳加随机 UUID 推断先后。该键不承诺无间隙，也不用于跨表比较。
+- 草稿局部建议先按房间要求、时段、学生群体、房间和教师占用剪枝，教师组合改为惰性生成；主路径最多完整校验并返回 8 条候选。无可直接应用方案时仍保留冲突原因，但额外完整校验固定最多 256 条诊断候选，避免重建完整组合空间。
 
 ### 2.5 第六阶段依赖与服务器前置准备
 
@@ -51,6 +56,7 @@
 - 第六阶段任务 2 已建立独立 `compose.production.yml`。生产定义不继承演示 build、seed、端口或弱默认值；六类镜像必须使用 digest，只有 Web/API 绑定 loopback，PostgreSQL、Redis、scheduler、Publisher 和 Worker 只在内部网络通信。
 - 全部生产容器使用非 root、只读根文件系统、能力移除、`no-new-privileges`、进程/CPU/内存、日志轮转、优雅停止和健康检查约束。PostgreSQL 与 Redis 的持久数据分别写入 `/srv/data/hot/examforge` 下的独立目录，COS 目录只作为异机备份目标。
 - API 新增显式 `demo`/`production` 部署模式。生产模式在监听前拒绝缺失数据库或 Redis、非 HTTP scheduler、弱或占位四角色密码、非精确 HTTPS Origin、关闭 Secure Cookie、非法 Cookie 名称或 TTL；演示 Compose 显式保持 `demo` 模式。
+- CR-033 新增 `0017_auth_credential_versions.sql` 与 API 镜像内维护 CLI。四个 `EXAMFORGE_*_PASSWORD` 继续只用于首次 bootstrap；已有账户轮换在同一 PostgreSQL 事务中更新 scrypt 散列和凭据版本、吊销全部旧会话并写入脱敏审计，不新增公网管理员改密路由。CLI 的 actor 参数仅为审计标签，生产执行仍受服务器访问控制和维护窗口约束。
 - `scripts/deploy/preflight.sh` 以只读方式校验 600 环境文件、owner、必填变量、镜像 digest、目录边界与 UID/GID、磁盘、内存、端口和镜像可访问性。腾讯云已建立 700 权限应用目录、600 权限环境文件及独立数据/备份目录；除一次 Docker Hub manifest 查询超时外，主机合同检查通过，六个固定 digest 随后均由实际 `pull` 验证可读。内部验证期间只有 Web/API 绑定 loopback，其他服务无宿主端口。
 - CR-028 本地修复新增共享重试策略，生产默认最多尝试 6 次、指数退避基数 1000 ms，最终单次退避限制为 30000 ms；`.env.production.example` 显式声明两项配置，Compose 同时注入 Publisher 与 Worker，预检拒绝缺失、越界或跨字段不一致的窗口组合。
 
@@ -93,7 +99,7 @@
 - 新备份同步到热备与 COS，四类文件逐字节一致；带数据库级 disposable 标记的临时库完成校验和、恢复、迁移检查和脱敏摘要比对后删除。固定 seed `20260711` 的 50/100/150 场 HTTP 基准继续采用 2026-07-15 的已验证结论：三组均 feasible、0 冲突，solver/HTTP 耗时分别为 432/545 ms、894/906 ms、1223/1237 ms。
 - 10 分 28 秒内部观察共 20 个样本，API/Web 全程 200；主机最低可用内存 2126 MiB、swap 为 0、数据盘最低可用 19319136 KiB。Scheduler 峰值 34.45% CPU/85.74 MiB，API 峰值 11.63% CPU/120 MiB；七个容器的 OOM、重启、不健康状态和错误日志计数均为 0。
 - 验证结束后 Compose project `examforge` 的容器与网络全部移除，3000/4000 无监听；`current` 保留 `a507993`，`previous` 保留 `f769725`，数据、镜像、备份和脱敏 evidence 保留。服务器没有 ExamForge nginx 文件、证书或 systemd 单元，既有两个 nginx 配置哈希、原交易系统和其他监听均未改变。
-- 当前仍不可公开上线：备案、正式域名 HTTPS/E2E、nginx site、Certbot、systemd/logrotate 安装和真实有限开放观察尚未完成；内部回环观察不能替代备案后的公网结论。
+- 当前仍不可公开上线：包含 CR-029 至 CR-035 整改的新正式制品尚未生成或验证；正式域名 HTTPS/E2E、独立 nginx site、Certbot、systemd/logrotate 安装和真实有限开放观察尚未完成。内部回环观察不能替代公网结论。
 
 ### 2.11 本地托管 Runner 发布决策
 
@@ -107,8 +113,8 @@
 ## 3. 最新验证事实
 
 - 快速与静态门禁：`npm run test:ci` 为 `9 passed`；发布专项当前为 `19 passed`，覆盖 Docker Engine builder、有界 apt 更新、逐镜像构建/推送边界和远程 digest 校验；部署类 Node.js 合同总计 `39 passed`，新增覆盖 Ubuntu 宿主 Node.js 12 的发布清单解析兼容与 API 重启后 `Last-Event-ID` 重连。`npm run check:scheduler-openapi`、`npm run build`、`docker compose config --quiet` 的既有基线通过，CR-028 修复后 `npm run check:ci`、仓库级 `npm run typecheck`、Bash 语法和 `git diff --check` 重新通过。
-- 应用测试：shared `21 passed`，scheduling application `11 passed`，API `97 passed`，Web `24 passed`；CR-028 修复后隔离 PostgreSQL/Redis Worker 为 `18 passed`，新增连续 3 次不可用后第 4 次成功的恢复场景；scheduler `97 passed`，保留 1 条 Starlette/httpx 2 上游弃用警告。
-- 数据库门禁：15 个迁移从空库首次全部应用，第二次应用数为 0；迁移测试 `9 passed`，迁移检查无缺失表、约束、回填或策略不一致，正式迁移入口返回 `applied: []`；PostgreSQL 集成测试 `21 passed`。
+- 应用测试：shared `22 passed`，scheduling application `11 passed`，CR-033 的 API 命令、轮换和生产密码策略定向集为 `8 passed`（含既有登录失败限流验证），Web `24 passed`；CR-035 的完整 API 回归为 `114 passed`，其中 3 条专项覆盖高基数可应用候选、冲突说明与有界回退。CR-028 修复后隔离 PostgreSQL/Redis Worker 为 `18 passed`，新增连续 3 次不可用后第 4 次成功的恢复场景；scheduler `97 passed`，保留 1 条 Starlette/httpx 2 上游弃用警告。
+- 数据库门禁：可丢弃 PostgreSQL 16 从空库应用 19 个迁移；迁移测试为 `10 passed`，迁移检查确认顺序键等约束完整，API PostgreSQL 集成为 `32 passed`。CR-035 不引入数据库 schema 或 SQL 行为变化；该集继续覆盖既有凭据轮换、跨 API 实例失败计数、临时锁定、运行、草稿发布与回滚竞争、成功审计原子性和审计失败回滚。
 - 浏览器门禁：任务 2 独立 Compose 从空卷重新运行六类故障 smoke 和完整 Playwright，结果为 `32 passed, 3 skipped`，共 35 项；3 项只在主 Chromium 运行的状态专项在其他视觉视口按配置跳过。四角色路由、本人作用域、草稿 pointer/keyboard 操作、运营页面、Axe 扫描、截图和溢出检查均通过。
 - 供应链门禁：npm 12.0.1 干净 `npm ci` 成功；`npm ls next postcss` 有效并解析为 `next@15.5.20 -> postcss@8.5.19 overridden`；生产依赖 moderate 审计为 0，安装脚本审批完整。正式运行 `29357107371` 与 `29561565291` 均完成四镜像非 root、OCI、体积与职责探针、四份 SPDX SBOM、固定 Trivy 0.72.0 的 HIGH/CRITICAL 门禁、四个 TCR digest 和完整 release manifest；最新 artifact `8399608869` 下载后再次通过提交与附件校验。
 - 备份恢复门禁：本地可丢弃 PostgreSQL 完成 15 个迁移、演示 seed、custom archive、SHA/摘要、保留期、模拟异机复制失败、未标记目标拒绝、标记目标恢复、迁移检查和 scope 读取；测试结束后已删除独立容器、网络、卷与临时备份。腾讯云正式库的新备份也完成热备/COS 四类附件逐字节比对，并在带 disposable 标记的临时库通过恢复、迁移检查和业务摘要校验后删除目标库。过期备份、磁盘阈值、证书窗口和 API readiness 四类故障注入均返回非 0 且未输出测试 secret。
@@ -121,18 +127,26 @@
 - CR-028 Engine builder 重跑：`a8ae2f2` 的工作流 `29558412245` 中质量 job 和本地 builder 校验成功，API/scheduler 首次构建与探针通过；Web 两次分别因 `sed` 包和 `InRelease` 的代理 `502` 失败，SBOM、Trivy、TCR 登录、推送和 manifest 全部跳过，失败诊断 artifact ID 为 `8398425713`，清理与 Runner 退出成功。对照探针中清华 Debian 镜像约 4 秒完成相同索引；修复后的 helper 使 API、scheduler、Web、Worker 均在首次尝试完成真实构建并通过职责探针。
 - CR-028 apt 修复重跑：`b9a2274` 的工作流 `29560455791` 中质量门禁、四镜像首次构建/探针、SBOM、Trivy、TCR 登录、四次推送、远程 digest 和 manifest 校验成功；正式 artifact 在 `CreateArtifact` 阶段遇到一次 `ECONNRESET`，失败诊断 artifact 随即上传成功。正式 bundle 缺失，因此本轮仍为失败，未连接或修改服务器；当前本地合同已增加一次同名覆盖上传重试。
 - 腾讯云备案期内部验证：服务器先后按 `f769725` 与 `a507993` 的正式 release manifest 拉取固定 digest，完成迁移、业务 smoke、50/100/150 场容量基准、API/Redis/Publisher/Worker/Scheduler 故障恢复、SSE 重连、真实跨版本回滚、重新部署、备份恢复和 10 分 28 秒观察；Scheduler 在第 4 个 attempt 成功，CR-028 已关闭。验证后 ExamForge 栈停止，域名仍无解析，nginx、证书、其他容器和主机级服务未修改。
+- 第五版全量审查：Codex 与 Grok Build 在固定基线 `b1aaedea236c142f42cc0df6e40d38db935b5841` 的隔离工作树完成独立审查。主线汇总去重后新增 CR-029 至 CR-036；真实 PostgreSQL 并发发布复现取得“两次成功、两条成功审计、一个最终指针”，草稿建议固定规模复现为 130,500 个候选、约 10,278 ms 和约 77.8 MiB 堆增长。nginx 模板仍归属未完成的任务 7，不重复登记为缺陷。
+- CR-029 整改：先以最窄服务端授权矩阵取得红灯，再限制 dashboard、基础数据、运行、草稿、比较、建议和 CSV 为 `admin/operator`，审计为 `admin`。内存 API 为 `97 passed`，类型检查、生产构建和 `git diff --check` 通过；可丢弃 PostgreSQL 16 为 `22 passed`，教师和学生对 11 条运营读取路径（含 CSV）均返回 `403`。独立复核无 Critical、Important 或 Minor；未触发 Runner、TCR、服务器写入或公开 release。
+- CR-031 整改：先以两个不同可发布运行的 PostgreSQL 并发发布取得 `[200, 200]` 红灯，再以批次发布版本、行锁和 CAS 将运行发布、草稿发布、发布回滚及成功审计收敛为单事务合同；冲突返回 `409`，审计失败回滚指针。内存 API 为 `97 passed`，可丢弃 PostgreSQL 16 为 `27 passed`，迁移测试为 `9 passed`，仓库级类型检查和构建通过；未触发 Runner、TCR、服务器写入或公开 release。
+- CR-032 整改：先以连续失败第 5 次仍为 `401`、以及仅允许 loopback 代理转发来源的两条红灯确认缺口；随后以 PostgreSQL 行锁保护来源／规范化用户名摘要键的失败窗口与临时锁定。内存 API 为 `102 passed`，可丢弃 PostgreSQL 16 为 `28 passed`，迁移测试为 `9 passed`，仓库级类型检查和生产构建通过；未触发 Runner、TCR、服务器写入或公开 release。
+- CR-033 整改：先由缺少账户轮换服务和维护命令的最窄测试取得红灯，再以用户／会话凭据版本和单事务轮换收敛散列更新、全会话吊销、脱敏审计及审计失败回滚；会话创建与恢复均拒绝旧版本，共享密码策略拒绝全空白值。定向 API 回归为 `8 passed`（含既有登录失败限流验证），迁移为 `9 passed`，可丢弃 PostgreSQL 16 为 `30 passed`，仓库级类型检查和生产构建通过；已编译 CLI 在本地隔离数据库确认旧密码失效、新密码匹配、版本递增和旧会话撤销。完整 API 两次运行先后为 `104 passed, 1 failed` 和 `105 passed`，失败仅为既有 CR-030 排序断言，后一次全绿不改变该风险；未触发 Runner、TCR、服务器写入或公开 release。
+- CR-034 整改：先由匿名课表与通知端点直接返回内部结果的最窄合同测试取得红灯，再以严格、版本化 public DTO 在服务层投影匿名响应；内部运行、标识、评分、冲突、诊断、报告、统计和约束追踪均被裁剪，缺失或空标签不回退到内部 ID。完整运营响应仅迁入管理员／排考员的受保护端点，教师／学生仍只读取 `/api/me/*` 本人范围。shared 为 `22 passed`，完整 API 为 `109 passed`，仓库级类型检查和生产构建通过；可丢弃 PostgreSQL 16 的公开合同与运营角色负向回归为 `2 passed`。一次完整 PostgreSQL 集成在既有 CR-031 场景的等待观测窗口超时（`29 passed, 1 failed`），随即独立重跑该场景两次通过；该现象未被计为 CR-034 通过证据，也未改变 CR-031 状态。未触发 Runner、TCR、服务器写入或公开 release。
+- CR-030 整改：先用同一冻结时间的 10 条运行、审计和作业记录复现随机 UUID 导致的跨页顺序失配，再以三张表各自的 identity 顺序键、内存同语义计数器和统一倒序查询收束列表、分页及 dashboard 最新运行。顺序键为表内分配顺序，不承诺无间隙、不可跨表比较，也不追溯旧同毫秒记录的原始相对顺序。完整 API 为 `111 passed`，可丢弃 PostgreSQL 16 为 `32 passed`，迁移为 `10 passed`，迁移检查确认 19 个迁移及新增约束完整，仓库级类型检查、生产构建和 `git diff --check` 通过；未触发 Runner、TCR、服务器写入或公开 release。
+- CR-035 整改：先以 30 名教师、15 个教室、20 个时段和 150 个任务的 130,500 理论组合空间取得约 13,183 ms 的红灯；随后以占用剪枝、惰性教师组合、主路径 8 条完整校验上限和 256 条诊断回退上限替代完整物化。相同主路径新鲜测量约 9 ms；完整 API 为 `114 passed`，迁移为 `10 passed`，可丢弃 PostgreSQL 16 为 `32 passed`，仓库级类型检查、生产构建和 `git diff --check` 通过；未触发 Runner、TCR、服务器写入或公开 release。
 
 ## 4. 当前边界
 
 - 不可变镜像发布工作流已通过两次完整正式运行，广州 TCR 已具备 `f769725` 与 `a507993` 的四镜像 digest 和可验证 release artifact；北京服务器只按清单 digest 完成新旧版本部署、回滚与恢复，本地 image ID 或部分 tag 不作为发布结论。生产 secrets 已在服务器以 600 文件建立，但 nginx/HTTPS、定时运维单元和外部监控仍未安装。
-- 腾讯云 4 核、3719 MiB 主机已完成内部迁移、业务 smoke、备份恢复、150 场基准、五类故障、SSE 重连、跨版本回滚和资源观察；该证据不包含正式域名、HTTPS、公网网络或有限开放流量。内部栈当前停止，域名继续无解析，不得恢复流量或把内部验证写成备案完成后的公开上线。
-- CR-028 已由本地真实依赖回归、`a507993` 正式制品和腾讯云 Scheduler 冷恢复共同关闭。第五版归档当前不再受 P0/P1 阻塞，但仍必须等待正式域名 HTTPS/E2E、切流后备份、有限开放观察和任务 9 的全量代码审查与交付归档完成。
+- 腾讯云 4 核、3719 MiB 主机已完成内部迁移、业务 smoke、备份恢复、150 场基准、五类故障、SSE 重连、跨版本回滚和资源观察；该历史证据不包含正式域名、HTTPS、公网网络或有限开放流量。内部验证结束时栈已停止；本轮未对正式域名或服务器执行新的检查、写入或切流，不能把既有内部验证或 DNS 恢复写成公开上线完成。
+- CR-028 已由本地真实依赖回归、`a507993` 正式制品和腾讯云 Scheduler 冷恢复共同关闭。CR-029 已由本地授权回归关闭，CR-030 已由持久化表内顺序键、内存同语义计数器与 PostgreSQL 分页回归关闭，CR-031 已由 PostgreSQL 并发与回滚回归关闭，CR-032 已由跨实例登录锁定回归关闭，CR-033 已由凭据版本、会话吊销和轮换事务回归关闭，CR-034 已由匿名公开 DTO 和角色负向回归关闭，CR-035 已由有界候选搜索与专项性能回归关闭；当前只剩 P3 的 CR-036 与 CR-003。下一步先评估并生成包含全部整改的新正式制品，再完成正式域名 HTTPS/E2E、切流后备份、有限开放观察和任务 9 的交付归档；任何 Runner、TCR 或服务器动作仍须用户确认。
 - PostCSS override 是上游稳定 Next 仍精确依赖旧版本期间的临时处置；Next 依赖声明变化时必须重新审计并优先移除覆盖。CR-003 在本地 Docker 代理变化时重新评估，远程发布使用 TCR，不把本地代理带到服务器。
 - 第五版仍不包含多租户、SSO、多策略批量实验、Pareto 推荐、联合全局优化或 Kubernetes 高可用。
 - 运行中取消仍是协作式尽力语义，不承诺强制终止已进入 OR-Tools 的线程，也不保留被强杀求解的中间最优解。
 
 ## 5. 下一步
 
-1. 以当前已验证的 `a507993` 应用制品和备案期远端证据为基线，执行任务 9 中不依赖备案的第五版全量代码审查；新问题进入 `code_review_status.md`，P0/P1 未解决时不得归档。
-2. 备案通过前继续保持域名无解析和 ExamForge 栈停止，不安装 nginx site、签发证书、恢复流量或把内部观察解释为有限开放；定时备份、健康巡检和 logrotate 在正式栈需要持续运行时一并安装验证。
-3. 备案通过后进入确认过的维护窗口，完成 nginx/HTTPS、证书续期 dry run、正式域名核心 Playwright、切流后首份备份和真实有限开放观察，再同步 README、部署验证记录、索引与历史计划并归档第六阶段。
+1. CR-029、CR-030、CR-031、CR-032、CR-033、CR-034 与 CR-035 已完成服务端整改及内存／PostgreSQL 回归。CR-036 与 CR-003 维持 P3 暂缓边界；下一步仅评估包含全部整改的新正式制品，不自动触发发布链。
+2. 用户已确认备案通过且服务器域名解析恢复；这不是发布或服务器写入授权。代码修复完成后必须重新生成正式制品；触发 Runner、推送 TCR、服务器写入、nginx reload、Certbot 或流量切换前，先列出确切命令、影响路径和回滚点并等待用户确认。
+3. 获得维护窗口确认后，补齐任务 7 的独立 nginx site 模板与合同，完成 nginx/HTTPS、证书续期 dry run、正式域名核心 Playwright、切流后首份备份和真实有限开放观察，再同步 README、部署验证记录、索引与历史计划并归档第六阶段。

@@ -134,7 +134,10 @@ done
 )
 docker compose --env-file "$env_file" -f "$compose_file" -p "$project_name" \
   exec -T postgres pg_restore --list < "$backup_dir/$backup_id.dump" >/dev/null
-grep -qx 'schema_migration_count=15' "$backup_dir/$backup_id.summary" \
+expected_migration_count=$(find "$repository_root/packages/db/drizzle" -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d '[:space:]')
+[[ "$expected_migration_count" =~ ^[1-9][0-9]*$ ]] \
+  || fail "migration source count is invalid: $expected_migration_count"
+grep -qx "schema_migration_count=$expected_migration_count" "$backup_dir/$backup_id.summary" \
   || fail "migration count is missing from the redacted summary"
 grep -qx 'scope_association_count=1' "$backup_dir/$backup_id.summary" \
   || fail "scope association count is missing from the redacted summary"

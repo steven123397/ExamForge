@@ -10,6 +10,8 @@ import {
   buildPublishedScheduleAudience,
   buildPublishedScheduleCsv,
   buildPublishedScheduleNotifications,
+  buildPublicPublishedSchedule,
+  buildPublicPublishedScheduleNotifications,
 } from "../src/services/published-schedule-service.js";
 
 describe("published schedule service", () => {
@@ -60,6 +62,91 @@ describe("published schedule service", () => {
       ],
     );
     assert.ok(notifications.notifications[0].message.includes("考试安排已发布"));
+  });
+
+  it("projects public schedules without falling back to internal identifiers", () => {
+    const referenceData = buildReferenceData();
+    referenceData.scheduleInput.courses = referenceData.scheduleInput.courses.filter(
+      (course) => course.id !== "c-database",
+    );
+    referenceData.scheduleInput.student_groups = referenceData.scheduleInput.student_groups.filter(
+      (group) => group.id !== "g-cs-2302",
+    );
+    referenceData.scheduleInput.rooms = referenceData.scheduleInput.rooms.filter(
+      (room) => room.id !== "r-lab-1",
+    );
+    referenceData.scheduleInput.time_slots = referenceData.scheduleInput.time_slots.filter(
+      (slot) => slot.id !== "s-003",
+    );
+
+    const schedule = buildPublicPublishedSchedule(referenceData, buildPublishedSchedule());
+    assert.equal(schedule.contractVersion, 1);
+    assert.deepEqual(Object.keys(schedule.batch).sort(), ["endDate", "name", "startDate"]);
+    const missingReferenceEntry = schedule.entries.find((entry) => entry.courseName === null);
+    assert.deepEqual(missingReferenceEntry, {
+      courseName: null,
+      studentGroupNames: [],
+      roomName: null,
+      date: null,
+      startTime: null,
+      endTime: null,
+    });
+    const serializedSchedule = JSON.stringify(schedule);
+    for (const identifier of ["e-database", "g-cs-2302", "r-lab-1", "s-003"]) {
+      assert.equal(serializedSchedule.includes(identifier), false, `${identifier} must not be public`);
+    }
+
+    const notifications = buildPublicPublishedScheduleNotifications(
+      referenceData,
+      buildPublishedSchedule(),
+    );
+    assert.deepEqual(notifications.notifications.map((notice) => notice.studentGroupName), ["计算机 2301"]);
+    assert.equal(JSON.stringify(notifications).includes("g-cs-2302"), false);
+  });
+
+  it("normalizes blank public schedule labels to null instead of rejecting the response", () => {
+    const referenceData = buildReferenceData();
+    referenceData.scheduleInput.courses = referenceData.scheduleInput.courses.map((course) => (
+      course.id === "c-data-structures" ? { ...course, name: "   " } : course
+    ));
+    referenceData.scheduleInput.student_groups = referenceData.scheduleInput.student_groups.map((group) => (
+      group.id === "g-cs-2301" ? { ...group, name: "   " } : group
+    ));
+    referenceData.scheduleInput.rooms = referenceData.scheduleInput.rooms.map((room) => (
+      room.id === "r-101" ? { ...room, name: "   " } : room
+    ));
+    referenceData.scheduleInput.time_slots = referenceData.scheduleInput.time_slots.map((slot) => (
+      slot.id === "s-001"
+        ? { ...slot, date: "   ", start_time: "   ", end_time: "   " }
+        : slot
+    ));
+
+    assert.doesNotThrow(() => buildPublicPublishedSchedule(referenceData, buildPublishedSchedule()));
+    assert.deepEqual(buildPublicPublishedSchedule(referenceData, buildPublishedSchedule()).entries[0], {
+      courseName: null,
+      studentGroupNames: [],
+      roomName: null,
+      date: null,
+      startTime: null,
+      endTime: null,
+    });
+  });
+
+  it("omits blank public notification labels without falling back to group IDs", () => {
+    const referenceData = buildReferenceData();
+    referenceData.scheduleInput.student_groups = referenceData.scheduleInput.student_groups.map((group) => (
+      group.id === "g-cs-2301" ? { ...group, name: "   " } : group
+    ));
+
+    assert.doesNotThrow(() => (
+      buildPublicPublishedScheduleNotifications(referenceData, buildPublishedSchedule())
+    ));
+    assert.deepEqual(
+      buildPublicPublishedScheduleNotifications(referenceData, buildPublishedSchedule())
+        .notifications
+        .map((notification) => notification.studentGroupName),
+      ["计算机 2302"],
+    );
   });
 
   it("exports CSV with stable headers and escaped cells", () => {

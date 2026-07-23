@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:net";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import {
   ScheduleJobStore,
@@ -106,7 +107,9 @@ describe("outbox publisher", () => {
     const db = requireDb();
     const store = new ScheduleJobStore(db);
     await submitJob(store, "publisher-unavailable");
-    const unavailableConnection = new IORedis("redis://127.0.0.1:56380", {
+    const resetServer = await createResetServer();
+    closeables.push(resetServer);
+    const unavailableConnection = new IORedis(`redis://127.0.0.1:${resetServer.port}`, {
       enableOfflineQueue: false,
       lazyConnect: true,
       maxRetriesPerRequest: 1,
@@ -219,6 +222,31 @@ function createRedis(url: string) {
   });
   client.on("error", () => undefined);
   return client;
+}
+
+async function createResetServer() {
+  const server = createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  return {
+    port: address.port,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    }),
+  };
 }
 
 async function submitJob(store: ScheduleJobStore, suffix: string) {

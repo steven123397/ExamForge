@@ -1,4 +1,5 @@
 import {
+  bigint,
   bigserial,
   boolean,
   index,
@@ -66,6 +67,7 @@ export const users = pgTable("users", {
   scryptR: integer("scrypt_r").notNull(),
   scryptP: integer("scrypt_p").notNull(),
   scryptKeyLength: integer("scrypt_key_length").notNull(),
+  credentialVersion: integer("credential_version").notNull().default(1),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -94,9 +96,20 @@ export const sessions = pgTable("sessions", {
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
   userAgent: text("user_agent"),
   ipAddress: text("ip_address"),
+  credentialVersion: integer("credential_version").notNull().default(1),
 }, (table) => ({
   tokenDigestUnique: uniqueIndex("sessions_token_digest_unique").on(table.tokenDigest),
   userExpiresAtIndex: index("sessions_user_expires_at_idx").on(table.userId, table.expiresAt),
+}));
+
+export const authLoginAttempts = pgTable("auth_login_attempts", {
+  keyDigest: text("key_digest").primaryKey(),
+  failureCount: integer("failure_count").notNull().default(0),
+  windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
+  lockedUntil: timestamp("locked_until", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  updatedAtIndex: index("auth_login_attempts_updated_at_idx").on(table.updatedAt),
 }));
 
 export const constraintProfiles = pgTable("constraint_profiles", {
@@ -150,6 +163,7 @@ export const examBatches = pgTable("exam_batches", {
   endDate: text("end_date").notNull(),
   constraintProfile: jsonb("constraint_profile").notNull(),
   publishedRunId: text("published_run_id"),
+  publicationVersion: integer("publication_version").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -260,7 +274,14 @@ export const scheduleRuns = pgTable("schedule_runs", {
     mode: "number",
   }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+  createdSequence: bigint("created_sequence", { mode: "number" }).generatedAlwaysAsIdentity({
+    name: "schedule_runs_created_sequence_seq",
+  }),
+}, (table) => ({
+  createdSequenceUnique: uniqueIndex("schedule_runs_created_sequence_unique").on(
+    table.createdSequence,
+  ),
+}));
 
 export const scheduledExams = pgTable("scheduled_exams", {
   id: text("id").primaryKey(),
@@ -355,7 +376,14 @@ export const auditEvents = pgTable("audit_events", {
   entityId: text("entity_id").notNull(),
   payload: jsonb("payload").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+  createdSequence: bigint("created_sequence", { mode: "number" }).generatedAlwaysAsIdentity({
+    name: "audit_events_created_sequence_seq",
+  }),
+}, (table) => ({
+  createdSequenceUnique: uniqueIndex("audit_events_created_sequence_unique").on(
+    table.createdSequence,
+  ),
+}));
 
 export const scheduleJobs = pgTable("schedule_jobs", {
   id: text("id").primaryKey(),
@@ -391,10 +419,16 @@ export const scheduleJobs = pgTable("schedule_jobs", {
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdSequence: bigint("created_sequence", { mode: "number" }).generatedAlwaysAsIdentity({
+    name: "schedule_jobs_created_sequence_seq",
+  }),
 }, (table) => ({
   idempotencyKeyUnique: uniqueIndex("schedule_jobs_idempotency_key_unique").on(table.idempotencyKey),
   batchCreatedAtIndex: index("schedule_jobs_batch_created_at_idx").on(table.batchId, table.createdAt),
   statusUpdatedAtIndex: index("schedule_jobs_status_updated_at_idx").on(table.status, table.updatedAt),
+  createdSequenceUnique: uniqueIndex("schedule_jobs_created_sequence_unique").on(
+    table.createdSequence,
+  ),
 }));
 
 export const scheduleJobAttempts = pgTable("schedule_job_attempts", {

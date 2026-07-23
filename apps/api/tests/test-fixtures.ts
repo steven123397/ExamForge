@@ -45,6 +45,7 @@ export async function seedTestAuth(repository: PlatformRepository) {
       expiresAt,
       userAgent: "ExamForge test fixture",
       ipAddress: "127.0.0.1",
+      credentialVersion: 1,
     });
   }
   await repository.setTeacherAudienceScope("user-teacher", "t-zhang");
@@ -71,6 +72,7 @@ async function buildTestAuthUser(
     active,
     roles: [role],
     password: await hashPassword(password),
+    credentialVersion: 1,
   };
 }
 

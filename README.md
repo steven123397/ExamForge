@@ -285,7 +285,7 @@ node --env-file=.env.production scripts/deploy/online-smoke.mjs
 - `WORKER_LOCK_DURATION_MS` 与 `WORKER_STALLED_INTERVAL_MS` 控制 BullMQ 崩溃领取恢复。默认均为 30 秒，隔离故障演练缩短为 5 秒。
 - `SCHEDULER_TRANSPORT` 可显式选择 `cli` 或 `http`；Compose 固定使用 `http://scheduler:8000`，不会在 HTTP 故障时静默回退 CLI。
 - `SCHEDULER_HTTP_TIMEOUT_MS` 限制 API 到 scheduler 的 HTTP 等待时间；调用方取消只中止网络等待，不宣称能够强制终止已经进入 OR-Tools 的线程。
-- Compose 与生产代码不提供账户默认密码；只有显式配置的 `EXAMFORGE_*_PASSWORD` 才会初始化对应本地账户。不要把真实密码、会话 token 或外部数据库凭据写入 `.env.example`、Compose 文件或 Git。
+- Compose 与生产代码不提供账户默认密码；只有显式配置的 `EXAMFORGE_*_PASSWORD` 才会初始化对应本地账户。这些变量只参与首次 bootstrap：修改环境变量或重启 API 不会改写已有密码，也不会吊销已有会话。不要把真实密码、会话 token 或外部数据库凭据写入 `.env.example`、Compose 文件或 Git。
 
 如需手工验证 PostgreSQL 数据层，应使用名称包含 `test` 的隔离数据库，并通过 `TEST_DATABASE_URL` 运行集成测试；测试会重建目标数据库的 `public` schema。
 
@@ -301,6 +301,25 @@ API 使用数据库账户、角色和可撤销服务端会话。密码通过 scr
 - `EXAMFORGE_STUDENT_PASSWORD`：`student` 学生。
 
 登录接口为 `POST /api/auth/login`，会话恢复与退出分别为 `GET /api/auth/me` 和 `POST /api/auth/logout`。管理员和排考员进入运营工作台；教师和学生进入只读已发布查询门户。前端不提供角色切换，也不接受公开 Bearer token。
+
+### 受控密码轮换
+
+已有账户改密必须使用显式维护命令，不得以修改 `EXAMFORGE_*_PASSWORD` 或重启容器代替。以下命令只可在已获生产维护窗口和服务器操作授权时，从部署目录执行；本轮整改没有执行该命令：
+
+```bash
+read -r -p '账户名：' rotation_username
+read -r -p '变更单或操作者标识：' rotation_actor
+read -r -s -p '新密码（至少 20 个字符，不回显）：' rotation_password
+printf '\n'
+printf '%s' "$rotation_password" | docker compose --env-file .env.production -f compose.production.yml \
+  exec -T api node dist/src/auth/rotate-account.js \
+  --username "$rotation_username" \
+  --confirm-username "$rotation_username" \
+  --actor "$rotation_actor"
+unset rotation_password
+```
+
+命令只从标准输入读取新密码，拒绝密码参数和交互式 TTY 输入；目标账户必须重复确认。成功时，它在同一 PostgreSQL 事务内更新 scrypt 散列与凭据版本、撤销该账户全部旧会话，并写入不含新旧密码的 `auth.password_rotated` 审计；任一步失败都会回滚。标准输出只包含目标用户名、凭据版本和已吊销会话数量。成功后，按受控 secrets 流程把同一新值同步到权限为 600 的 `.env.production`，仅供未来空库 bootstrap 使用；该同步不改变当前数据库或会话，不能替代本命令。`--actor` 是审计标签，不替代服务器访问控制或维护授权。若轮换后需要再次变更，应使用新的强密码重新执行受控命令；不要把环境文件改回旧值并误认为已完成回滚。
 
 ## 核心演示链路
 

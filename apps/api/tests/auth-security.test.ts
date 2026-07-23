@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   createSessionToken,
+  hashLoginAttemptKey,
   hashPassword,
   hashSessionToken,
   verifyPassword,
@@ -28,6 +29,14 @@ describe("authentication security", () => {
     assert.ok(first.length >= 40);
     assert.match(hashSessionToken(first), /^[a-f0-9]{64}$/);
     assert.equal(hashSessionToken(first), hashSessionToken(first));
+  });
+
+  it("derives login failure keys from normalized usernames and sources without retaining either value", () => {
+    const normalized = hashLoginAttemptKey("2001:DB8::17", "  ＯＰＥＲＡＴＯＲ  ");
+
+    assert.equal(normalized, hashLoginAttemptKey("2001:db8::17", "operator"));
+    assert.notEqual(normalized, hashLoginAttemptKey("2001:db8::18", "operator"));
+    assert.match(normalized, /^[a-f0-9]{64}$/);
   });
 
   it("allows local HTTP cookies but refuses an insecure production override", () => {

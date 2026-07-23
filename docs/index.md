@@ -24,6 +24,7 @@
 - `docs/design/第五版本地托管Runner发布设计.md`：GitHub 质量门禁、本地 WSL Runner、广州 TCR、镜像瘦身和北京服务器 digest 部署边界。
 - `docs/design/第六版实现内容设计.md`：第六版脱敏学生与考试报名、批次级参与者模式、不可变快照、个体冲突语义、算法证据和范围停止线设计。
 - `docs/design/企业级全栈平台第一阶段设计.md`：企业级 Web/API/数据库平台第一阶段设计。
+- `docs/design/CONTEXT.md`：ExamForge 规范术语、领域边界和概念关系。
 - `docs/design/README.md`：设计文档模板。
 
 ## 计划文档

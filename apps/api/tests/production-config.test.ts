@@ -46,7 +46,7 @@ describe("API production configuration", () => {
     }), /SCHEDULER_TRANSPORT must be http/);
   });
 
-  it("rejects missing, short and example account passwords", () => {
+  it("rejects missing, blank, short and example account passwords", () => {
     assert.throws(() => validateApiProductionEnvironment({
       ...productionEnvironment,
       EXAMFORGE_ADMIN_PASSWORD: "",
@@ -57,7 +57,11 @@ describe("API production configuration", () => {
     }), /at least 20 characters/);
     assert.throws(() => validateApiProductionEnvironment({
       ...productionEnvironment,
-      EXAMFORGE_TEACHER_PASSWORD: "replace-with-real-password",
+      EXAMFORGE_TEACHER_PASSWORD: "                    ",
+    }), /EXAMFORGE_TEACHER_PASSWORD is required/);
+    assert.throws(() => validateApiProductionEnvironment({
+      ...productionEnvironment,
+      EXAMFORGE_STUDENT_PASSWORD: "replace-with-real-password",
     }), /placeholder/);
   });
 });

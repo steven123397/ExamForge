@@ -113,7 +113,7 @@ export interface PlatformRepository
   ): Promise<void> | void;
   publishScheduleRun(id: string): Promise<PublishScheduleRunResult>;
   getPublishedSchedule(): Promise<PublishedScheduleResponse | null>;
-  rollbackPublishedSchedule(): Promise<ScheduleRollbackResponse>;
+  rollbackPublishedSchedule(): Promise<ScheduleRollbackResult>;
   createScheduleDraftFromRun(id: string): Promise<ScheduleDraftDetailResponse | null>;
   listScheduleDrafts(): Promise<ScheduleDraftListResponse>;
   getScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | null>;
@@ -137,7 +137,9 @@ export interface PlatformRepository
     examTaskId: string,
   ): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
   rebalanceScheduleDraft(id: string): Promise<ScheduleDraftDetailResponse | "not_editable" | null>;
-  publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null>;
+  publishScheduleDraft(
+    id: string,
+  ): Promise<ScheduleDraftPublishResponse | "conflict" | "publication_conflict" | "not_publishable" | null>;
   discardScheduleDraft(id: string): Promise<ScheduleDraftDiscardResponse | "not_discardable" | null>;
   transitionScheduleJob(
     id: string,
@@ -146,9 +148,19 @@ export interface PlatformRepository
   getScheduleJobDetail(id: string): Promise<ScheduleJobDetailResponse | null>;
   createAuthUser(command: CreateAuthUserCommand): Promise<AuthUserRecord>;
   findAuthUserByUsername(username: string): Promise<AuthUserRecord | null>;
-  createAuthSession(command: CreateAuthSessionCommand): Promise<AuthSessionRecord>;
+  createAuthSession(command: CreateAuthSessionCommand): Promise<AuthSessionRecord | null>;
   findAuthSessionByTokenDigest(tokenDigest: string): Promise<AuthSessionWithUser | null>;
   revokeAuthSession(id: string, revokedAt: string): Promise<boolean>;
+  rotateAuthUserPassword(
+    command: RotateAuthUserPasswordCommand,
+  ): Promise<RotateAuthUserPasswordResult | null>;
+  getLoginFailureLock(keyDigest: string, attemptedAt: string): Promise<LoginFailureLockResult>;
+  recordLoginFailure(
+    keyDigest: string,
+    attemptedAt: string,
+    policy: LoginFailurePolicy,
+  ): Promise<LoginFailureLockResult>;
+  clearLoginFailures(keyDigest: string): Promise<void>;
   getAudienceScope(userId: string): Promise<AudienceScope | "invalid" | null>;
   setTeacherAudienceScope(userId: string, teacherId: string): Promise<void>;
   addStudentGroupAudienceScope(userId: string, studentGroupId: string): Promise<void>;
@@ -168,9 +180,12 @@ export interface AuthUserRecord {
   active: boolean;
   roles: UserRole[];
   password: PasswordHash;
+  credentialVersion: number;
 }
 
-export interface CreateAuthUserCommand extends AuthUserRecord {}
+export interface CreateAuthUserCommand extends Omit<AuthUserRecord, "credentialVersion"> {
+  credentialVersion?: number;
+}
 
 export interface CreateAuthSessionCommand {
   id: string;
@@ -180,6 +195,7 @@ export interface CreateAuthSessionCommand {
   expiresAt: string;
   userAgent: string | null;
   ipAddress: string | null;
+  credentialVersion: number;
 }
 
 export interface AuthSessionRecord extends CreateAuthSessionCommand {
@@ -190,6 +206,38 @@ export interface AuthSessionRecord extends CreateAuthSessionCommand {
 export interface AuthSessionWithUser {
   session: AuthSessionRecord;
   user: AuthUserRecord;
+}
+
+export interface RotateAuthUserPasswordCommand {
+  userId: string;
+  password: PasswordHash;
+  rotatedAt: string;
+  actor: string;
+}
+
+export interface RotateAuthUserPasswordResult {
+  credentialVersion: number;
+  revokedSessionCount: number;
+}
+
+export interface LoginFailurePolicy {
+  maxFailures: number;
+  failureWindowMs: number;
+  lockDurationMs: number;
+}
+
+export interface LoginFailureLockResult {
+  locked: boolean;
+  retryAfterSeconds: number;
+  failureCount: number;
+  newlyLocked: boolean;
+}
+
+interface LoginFailureRecord {
+  failureCount: number;
+  windowStartedAt: string;
+  lockedUntil: string | null;
+  updatedAt: string;
 }
 
 export interface TransitionScheduleJobCommand {
@@ -206,7 +254,8 @@ export interface ScheduleJobTransitionResult {
 export { ScheduleJobIdempotencyConflictError };
 export type { CreateScheduleJobCommand, CreateScheduleJobResult };
 
-export type PublishScheduleRunResult = PublishedScheduleResponse | "not_publishable" | null;
+export type PublishScheduleRunResult = PublishedScheduleResponse | "publication_conflict" | "not_publishable" | null;
+export type ScheduleRollbackResult = ScheduleRollbackResponse | "publication_conflict";
 
 export class ReferenceIntegrityError extends Error {
   constructor(readonly issues: string[]) {
@@ -228,13 +277,20 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   private outboxEvents: Array<Record<string, unknown>> = [];
   private authUsers = new Map<string, AuthUserRecord>();
   private authSessions = new Map<string, AuthSessionRecord>();
+  private loginFailures = new Map<string, LoginFailureRecord>();
   private teacherAudienceScopes = new Map<string, string>();
   private studentGroupAudienceScopes = new Map<string, Set<string>>();
   private auditEvents: AuditEventSummary[] = [];
+  private readonly auditEventCreatedSequences = new Map<string, number>();
+  private nextAuditEventCreatedSequence = 0;
   private constraintProfiles = new Map<string, ConstraintProfileRecord>();
   private batch = structuredClone(demoBatch);
   private publishedRunId: string | null = null;
+  private readonly runCreatedSequences = new Map<string, number>();
+  private nextRunCreatedSequence = 0;
   private scheduleInput = structuredClone(demoScheduleInput);
+  private readonly scheduleJobCreatedSequences = new Map<string, number>();
+  private nextScheduleJobCreatedSequence = 0;
 
   constructor(options: { authUsers?: AuthUserRecord[] } = {}) {
     for (const user of options.authUsers ?? []) {
@@ -268,7 +324,12 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   async checkReadiness(): Promise<void> {}
 
   async getDashboard(): Promise<DashboardResponse> {
-    const latestRun = Array.from(this.runs.values()).at(-1)?.run ?? null;
+    const latestRun = Array.from(this.runs.values())
+      .map((item) => item.run)
+      .sort((left, right) => (
+        this.runCreatedSequences.get(right.id)! - this.runCreatedSequences.get(left.id)!
+      ))
+      .at(0) ?? null;
     return {
       batch: this.batch,
       metrics: {
@@ -547,7 +608,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       scoringContractVersion: result.score.scoring_contract_version,
     };
     const response = { run, result };
-    this.runs.set(id, response);
+    this.storeRun(response);
     this.recordAuditEvent("schedule_run.created", "schedule_run", id, {
       status: result.statistics.status,
       score: result.score.total_score,
@@ -562,7 +623,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       .map((item) => item.run)
       .filter((run) => !query.status || run.status === query.status)
       .sort((left, right) => (
-        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+        this.runCreatedSequences.get(right.id)! - this.runCreatedSequences.get(left.id)!
       ));
     const total = runs.length;
     return {
@@ -593,7 +654,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     const events = [...this.auditEvents]
       .filter((event) => matchesAuditFilter(event, filter))
       .sort((left, right) => (
-        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+        this.auditEventCreatedSequences.get(right.id)! - this.auditEventCreatedSequences.get(left.id)!
       ));
     const total = events.length;
     return {
@@ -909,7 +970,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       conflictCount: current.conflicts.length,
       assignmentCount: current.assignments.length,
     };
-    this.runs.set(runId, { run, result });
+    this.storeRun({ run, result });
     this.publishedRunId = runId;
     this.batch = {
       ...this.batch,
@@ -1032,6 +1093,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       updatedAt: now,
     };
     this.scheduleJobs.set(job.id, job);
+    this.scheduleJobCreatedSequences.set(job.id, ++this.nextScheduleJobCreatedSequence);
     this.scheduleJobRequests.set(job.id, structuredClone(requestSnapshot));
     this.recordScheduleJobEvent(job, "schedule_job.queued", { status: job.status });
     return { job, created: true };
@@ -1049,7 +1111,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
         && (!query.from || Date.parse(job.createdAt) >= Date.parse(query.from))
         && (!query.to || Date.parse(job.createdAt) <= Date.parse(query.to)))
       .sort((left, right) => (
-        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+        this.scheduleJobCreatedSequences.get(right.id)! - this.scheduleJobCreatedSequences.get(left.id)!
       ));
     const total = filtered.length;
     const offset = (query.page - 1) * query.pageSize;
@@ -1438,7 +1500,10 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     if ([...this.authUsers.values()].some((user) => user.username === command.username)) {
       throw new Error(`Auth user ${command.username} already exists.`);
     }
-    const user = structuredClone(command);
+    const user: AuthUserRecord = {
+      ...structuredClone(command),
+      credentialVersion: command.credentialVersion ?? 1,
+    };
     this.authUsers.set(user.id, user);
     return structuredClone(user);
   }
@@ -1457,7 +1522,11 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return user ? structuredClone(user) : null;
   }
 
-  async createAuthSession(command: CreateAuthSessionCommand): Promise<AuthSessionRecord> {
+  async createAuthSession(command: CreateAuthSessionCommand): Promise<AuthSessionRecord | null> {
+    const user = this.authUsers.get(command.userId);
+    if (!user || user.credentialVersion !== command.credentialVersion) {
+      return null;
+    }
     const session: AuthSessionRecord = {
       ...structuredClone(command),
       revokedAt: null,
@@ -1484,6 +1553,75 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     }
     this.authSessions.set(id, { ...session, revokedAt });
     return true;
+  }
+
+  async rotateAuthUserPassword(
+    command: RotateAuthUserPasswordCommand,
+  ): Promise<RotateAuthUserPasswordResult | null> {
+    const user = this.authUsers.get(command.userId);
+    if (!user) {
+      return null;
+    }
+
+    const credentialVersion = user.credentialVersion + 1;
+    let revokedSessionCount = 0;
+    for (const [sessionId, session] of this.authSessions) {
+      if (session.userId !== user.id || session.revokedAt) {
+        continue;
+      }
+      this.authSessions.set(sessionId, { ...session, revokedAt: command.rotatedAt });
+      revokedSessionCount += 1;
+    }
+    this.authUsers.set(user.id, {
+      ...user,
+      password: structuredClone(command.password),
+      credentialVersion,
+    });
+    this.recordAuditEvent("auth.password_rotated", "auth_user", user.id, {
+      credentialVersion,
+      revokedSessionCount,
+    }, command.actor);
+    return { credentialVersion, revokedSessionCount };
+  }
+
+  async getLoginFailureLock(
+    keyDigest: string,
+    attemptedAt: string,
+  ): Promise<LoginFailureLockResult> {
+    return toLoginFailureLockResult(this.loginFailures.get(keyDigest) ?? null, new Date(attemptedAt));
+  }
+
+  async recordLoginFailure(
+    keyDigest: string,
+    attemptedAt: string,
+    policy: LoginFailurePolicy,
+  ): Promise<LoginFailureLockResult> {
+    const now = new Date(attemptedAt);
+    const current = this.loginFailures.get(keyDigest) ?? null;
+    const currentLock = toLoginFailureLockResult(current, now);
+    if (currentLock.locked) {
+      return currentLock;
+    }
+
+    const windowExpired = !current
+      || now.getTime() - new Date(current.windowStartedAt).getTime() >= policy.failureWindowMs;
+    const failureCount = windowExpired ? 1 : current.failureCount + 1;
+    const newlyLocked = failureCount >= policy.maxFailures;
+    const lockedUntil = newlyLocked
+      ? new Date(now.getTime() + policy.lockDurationMs)
+      : null;
+    const next: LoginFailureRecord = {
+      failureCount,
+      windowStartedAt: windowExpired ? attemptedAt : current.windowStartedAt,
+      lockedUntil: lockedUntil?.toISOString() ?? null,
+      updatedAt: attemptedAt,
+    };
+    this.loginFailures.set(keyDigest, next);
+    return toLoginFailureLockResult(next, now, newlyLocked);
+  }
+
+  async clearLoginFailures(keyDigest: string): Promise<void> {
+    this.loginFailures.delete(keyDigest);
   }
 
   async getAudienceScope(userId: string): Promise<AudienceScope | "invalid" | null> {
@@ -1616,7 +1754,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     actor = "system",
   ) {
     const context = getCurrentAuthContext();
-    this.auditEvents.push({
+    const event = {
       id: `audit-${randomUUID()}`,
       actor: context?.user.username ?? actor,
       actorUserId: context?.user.id ?? null,
@@ -1626,7 +1764,14 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       entityId,
       payload,
       createdAt: new Date().toISOString(),
-    });
+    };
+    this.auditEvents.push(event);
+    this.auditEventCreatedSequences.set(event.id, ++this.nextAuditEventCreatedSequence);
+  }
+
+  private storeRun(response: ScheduleRunResponse) {
+    this.runs.set(response.run.id, response);
+    this.runCreatedSequences.set(response.run.id, ++this.nextRunCreatedSequence);
   }
 }
 
@@ -1838,6 +1983,9 @@ function buildDraftAssignmentChanges(
   };
 }
 
+const DRAFT_SUGGESTION_LIMIT = 8;
+const DRAFT_SUGGESTION_FALLBACK_CANDIDATE_BUDGET = 256;
+
 export function buildDraftAdjustmentSuggestions(
   scheduleInput: ReferenceDataResponse["scheduleInput"],
   detail: ScheduleDraftDetailResponse,
@@ -1851,77 +1999,178 @@ export function buildDraftAdjustmentSuggestions(
     return null;
   }
 
-  const slots = task.allowed_slot_ids.length > 0
-    ? scheduleInput.time_slots.filter((slot) => task.allowed_slot_ids.includes(slot.id))
-    : scheduleInput.time_slots;
-  const teacherGroups = buildTeacherGroups(
-    scheduleInput.teachers.map((teacher) => teacher.id),
-    task.invigilator_count,
-  );
+  const allowedSlotIds = new Set(task.allowed_slot_ids);
+  const slots = scheduleInput.time_slots
+    .filter((slot) => allowedSlotIds.size === 0 || allowedSlotIds.has(slot.id))
+    .slice()
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const allRooms = scheduleInput.rooms
+    .slice()
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const compatibleRooms = allRooms
+    .filter((room) => (
+      room.capacity >= task.expected_count
+      && room.room_type === task.required_room_type
+      && task.required_equipment_tags.every((tag) => room.equipment_tags.includes(tag))
+    ));
+  const tasks = new Map(scheduleInput.exam_tasks.map((item) => [item.id, item]));
+  const requiredTeacherCount = Math.max(1, task.invigilator_count);
+  const allTeacherIds = scheduleInput.teachers.map((teacher) => teacher.id);
+  const occupiedRoomSlots = new Set<string>();
+  const occupiedTeacherSlots = new Set<string>();
+  const occupiedGroupSlots = new Set<string>();
+  for (const [index, assignment] of detail.assignments.entries()) {
+    if (index === currentIndex) {
+      continue;
+    }
+    occupiedRoomSlots.add(`${assignment.room_id}|${assignment.time_slot_id}`);
+    for (const teacherId of assignment.teacher_ids) {
+      occupiedTeacherSlots.add(`${teacherId}|${assignment.time_slot_id}`);
+    }
+    const assignedTask = tasks.get(assignment.exam_task_id);
+    for (const groupId of assignedTask?.student_group_ids ?? []) {
+      occupiedGroupSlots.add(`${groupId}|${assignment.time_slot_id}`);
+    }
+  }
+
   const suggestions: ScheduleDraftAdjustmentSuggestionsResponse["suggestions"] = [];
   const seen = new Set<string>();
+  const appendSuggestion = (
+    room: ReferenceDataResponse["scheduleInput"]["rooms"][number],
+    slot: ReferenceDataResponse["scheduleInput"]["time_slots"][number],
+    teacherIds: string[],
+  ) => {
+    const assignment = {
+      exam_task_id: examTaskId,
+      room_id: room.id,
+      time_slot_id: slot.id,
+      teacher_ids: teacherIds,
+    };
+    const key = assignmentKey(assignment);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
 
-  for (const room of scheduleInput.rooms) {
+    const assignments = [...detail.assignments];
+    assignments[currentIndex] = assignment;
+    const conflicts = validateDraftAssignments(scheduleInput, assignments);
+    const hardConflictCount = conflicts.filter((conflict) => conflict.severity === "error").length;
+    suggestions.push({
+      assignment,
+      hardConflictCount,
+      score: scoreDraft(conflicts),
+      reasons: buildSuggestionReasons(conflicts, room.name, slot.id),
+    });
+    suggestions.sort(compareDraftAdjustmentSuggestions);
+    if (suggestions.length > DRAFT_SUGGESTION_LIMIT) {
+      suggestions.pop();
+    }
+    return true;
+  };
+
+  for (const slot of slots) {
+    if (task.student_group_ids.some((groupId) => (
+      occupiedGroupSlots.has(`${groupId}|${slot.id}`)
+    ))) {
+      continue;
+    }
+    const availableTeacherIds = scheduleInput.teachers
+      .filter((teacher) => (
+        !teacher.unavailable_slot_ids.includes(slot.id)
+        && !occupiedTeacherSlots.has(`${teacher.id}|${slot.id}`)
+      ))
+      .map((teacher) => teacher.id);
+    if (availableTeacherIds.length < requiredTeacherCount) {
+      continue;
+    }
+
+    for (const room of compatibleRooms) {
+      if (occupiedRoomSlots.has(`${room.id}|${slot.id}`)) {
+        continue;
+      }
+      const completed = visitTeacherGroups(
+        availableTeacherIds,
+        requiredTeacherCount,
+        (candidateTeacherIds) => {
+          appendSuggestion(room, slot, candidateTeacherIds);
+          return suggestions.length >= DRAFT_SUGGESTION_LIMIT;
+        },
+      );
+      if (completed) {
+        break;
+      }
+    }
+    if (suggestions.length >= DRAFT_SUGGESTION_LIMIT) {
+      break;
+    }
+  }
+
+  if (
+    suggestions.length < DRAFT_SUGGESTION_LIMIT
+    && allTeacherIds.length >= requiredTeacherCount
+  ) {
+    let fallbackCandidateCount = 0;
+    fallback:
     for (const slot of slots) {
-      for (const teacherIds of teacherGroups) {
-        const assignment = {
-          exam_task_id: examTaskId,
-          room_id: room.id,
-          time_slot_id: slot.id,
-          teacher_ids: teacherIds,
-        };
-        const key = assignmentKey(assignment);
-        if (seen.has(key)) {
-          continue;
+      for (const room of allRooms) {
+        const completed = visitTeacherGroups(
+          allTeacherIds,
+          requiredTeacherCount,
+          (candidateTeacherIds) => {
+            if (appendSuggestion(room, slot, candidateTeacherIds)) {
+              fallbackCandidateCount += 1;
+            }
+            return fallbackCandidateCount >= DRAFT_SUGGESTION_FALLBACK_CANDIDATE_BUDGET;
+          },
+        );
+        if (completed) {
+          break fallback;
         }
-        seen.add(key);
-
-        const assignments = [...detail.assignments];
-        assignments[currentIndex] = assignment;
-        const conflicts = validateDraftAssignments(scheduleInput, assignments);
-        const hardConflictCount = conflicts.filter((conflict) => conflict.severity === "error").length;
-        suggestions.push({
-          assignment,
-          hardConflictCount,
-          score: scoreDraft(conflicts),
-          reasons: buildSuggestionReasons(conflicts, room.name, slot.id),
-        });
       }
     }
   }
 
-  suggestions.sort((left, right) => (
-    left.hardConflictCount - right.hardConflictCount
-    || right.score - left.score
-    || left.assignment.time_slot_id.localeCompare(right.assignment.time_slot_id)
-    || left.assignment.room_id.localeCompare(right.assignment.room_id)
-  ));
-
   return {
     draft: detail.draft,
     examTaskId,
-    suggestions: suggestions.slice(0, 8),
+    suggestions,
   };
 }
 
-function buildTeacherGroups(teacherIds: string[], requiredCount: number): string[][] {
-  if (requiredCount <= 1) {
-    return teacherIds.map((teacherId) => [teacherId]);
-  }
-  const groups: string[][] = [];
-  const visit = (start: number, selected: string[]) => {
-    if (selected.length === requiredCount) {
-      groups.push([...selected]);
-      return;
+function visitTeacherGroups(
+  teacherIds: string[],
+  requiredCount: number,
+  visitGroup: (teacherIds: string[]) => boolean,
+) {
+  const targetCount = Math.max(1, requiredCount);
+  const selected: string[] = [];
+  const visit = (start: number): boolean => {
+    if (selected.length === targetCount) {
+      return visitGroup([...selected]);
     }
-    for (let index = start; index < teacherIds.length; index += 1) {
+    const remaining = targetCount - selected.length;
+    for (let index = start; index <= teacherIds.length - remaining; index += 1) {
       selected.push(teacherIds[index]);
-      visit(index + 1, selected);
+      if (visit(index + 1)) {
+        selected.pop();
+        return true;
+      }
       selected.pop();
     }
+    return false;
   };
-  visit(0, []);
-  return groups;
+  return visit(0);
+}
+
+function compareDraftAdjustmentSuggestions(
+  left: ScheduleDraftAdjustmentSuggestionsResponse["suggestions"][number],
+  right: ScheduleDraftAdjustmentSuggestionsResponse["suggestions"][number],
+) {
+  return left.hardConflictCount - right.hardConflictCount
+    || right.score - left.score
+    || left.assignment.time_slot_id.localeCompare(right.assignment.time_slot_id)
+    || left.assignment.room_id.localeCompare(right.assignment.room_id);
 }
 
 function buildSuggestionReasons(
@@ -2184,5 +2433,21 @@ function buildConflict(
     affected_ids: affectedIds,
     message,
     suggestion,
+  };
+}
+
+function toLoginFailureLockResult(
+  record: LoginFailureRecord | null,
+  now: Date,
+  newlyLocked = false,
+): LoginFailureLockResult {
+  const remainingMs = record?.lockedUntil
+    ? new Date(record.lockedUntil).getTime() - now.getTime()
+    : 0;
+  return {
+    locked: remainingMs > 0,
+    retryAfterSeconds: remainingMs > 0 ? Math.max(1, Math.ceil(remainingMs / 1000)) : 0,
+    failureCount: record?.failureCount ?? 0,
+    newlyLocked,
   };
 }

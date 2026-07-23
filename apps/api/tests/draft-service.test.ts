@@ -60,7 +60,12 @@ describe("draft service", () => {
   it("preserves publish and discard state transitions", async () => {
     const first = await createDraftFixture();
     const published = await first.service.publish(first.draftId);
-    assert.ok(published && published !== "conflict" && published !== "not_publishable");
+    assert.ok(
+      published
+      && published !== "conflict"
+      && published !== "publication_conflict"
+      && published !== "not_publishable",
+    );
     assert.equal(published.draft.status, "published");
 
     const second = await createDraftFixture();
@@ -72,7 +77,12 @@ describe("draft service", () => {
   it("does not validate, lock, or unlock terminal drafts", async () => {
     const { service, draftId } = await createDraftFixture();
     const published = await service.publish(draftId);
-    assert.ok(published && published !== "conflict" && published !== "not_publishable");
+    assert.ok(
+      published
+      && published !== "conflict"
+      && published !== "publication_conflict"
+      && published !== "not_publishable",
+    );
 
     assert.equal(await service.validate(draftId), "not_editable");
     assert.equal(

@@ -483,6 +483,31 @@ export interface PublishedScheduleResponse {
   result: ScheduleResult;
 }
 
+export const publicPublishedScheduleBatchSchema = examBatchSummarySchema.pick({
+  name: true,
+  startDate: true,
+  endDate: true,
+}).strict();
+
+export const publicPublishedScheduleEntrySchema = z.object({
+  courseName: z.string().min(1).nullable(),
+  studentGroupNames: z.array(z.string().min(1)),
+  roomName: z.string().min(1).nullable(),
+  date: z.string().min(1).nullable(),
+  startTime: z.string().min(1).nullable(),
+  endTime: z.string().min(1).nullable(),
+}).strict();
+
+export const publicPublishedScheduleSchema = z.object({
+  contractVersion: z.literal(1),
+  batch: publicPublishedScheduleBatchSchema,
+  entries: z.array(publicPublishedScheduleEntrySchema),
+}).strict();
+
+export type PublicPublishedScheduleBatch = z.infer<typeof publicPublishedScheduleBatchSchema>;
+export type PublicPublishedScheduleEntry = z.infer<typeof publicPublishedScheduleEntrySchema>;
+export type PublicPublishedScheduleResponse = z.infer<typeof publicPublishedScheduleSchema>;
+
 export interface ScheduleRollbackResponse {
   batch: ExamBatchSummary;
   previousRun: ScheduleRunSummary | null;
@@ -885,6 +910,25 @@ export interface PublishedScheduleNotificationsResponse {
   run: ScheduleRunSummary;
   notifications: PublishedScheduleNotification[];
 }
+
+export const publicPublishedScheduleNotificationSchema = z.object({
+  studentGroupName: z.string().min(1),
+  assignmentCount: z.number().int().nonnegative(),
+  message: z.string().min(1),
+}).strict();
+
+export const publicPublishedScheduleNotificationsSchema = z.object({
+  contractVersion: z.literal(1),
+  batch: publicPublishedScheduleBatchSchema,
+  notifications: z.array(publicPublishedScheduleNotificationSchema),
+}).strict();
+
+export type PublicPublishedScheduleNotification = z.infer<
+  typeof publicPublishedScheduleNotificationSchema
+>;
+export type PublicPublishedScheduleNotificationsResponse = z.infer<
+  typeof publicPublishedScheduleNotificationsSchema
+>;
 
 export interface TeacherUnavailableSlotsResponse {
   teacher: Teacher;

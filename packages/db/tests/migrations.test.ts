@@ -49,6 +49,7 @@ describe("database migration checks", () => {
     assert.ok(result.checkedTables.includes("roles"));
     assert.ok(result.checkedTables.includes("user_roles"));
     assert.ok(result.checkedTables.includes("sessions"));
+    assert.ok(result.checkedTables.includes("auth_login_attempts"));
     assert.ok(result.checkedTables.includes("user_teacher_scopes"));
     assert.ok(result.checkedTables.includes("user_student_group_scopes"));
     assert.deepEqual(result.missingConstraints, []);
@@ -61,11 +62,14 @@ describe("database migration checks", () => {
     assert.ok(result.checkedConstraints.includes("draft_exam_invigilators.teacher_foreign_key"));
     assert.ok(result.checkedConstraints.includes("teacher_unavailable_slots.primary_key"));
     assert.ok(result.checkedConstraints.includes("schedule_jobs.idempotency_key_unique"));
+    assert.ok(result.checkedConstraints.includes("schedule_jobs.created_sequence_unique"));
     assert.ok(result.checkedConstraints.includes("schedule_job_attempts.job_foreign_key"));
     assert.ok(result.checkedConstraints.includes("schedule_job_events.job_foreign_key"));
     assert.ok(result.checkedConstraints.includes("schedule_jobs.request_snapshot_check"));
     assert.ok(result.checkedConstraints.includes("schedule_job_attempts.status_check"));
     assert.ok(result.checkedConstraints.includes("schedule_job_events.sequence_unique"));
+    assert.ok(result.checkedConstraints.includes("schedule_runs.created_sequence_unique"));
+    assert.ok(result.checkedConstraints.includes("audit_events.created_sequence_unique"));
     assert.ok(result.checkedConstraints.includes("outbox_events.event_foreign_key"));
     assert.ok(result.checkedConstraints.includes("constraint_profiles.current_version_foreign_key"));
     assert.ok(result.checkedConstraints.includes("constraint_profile_versions.profile_version_unique"));
@@ -76,6 +80,7 @@ describe("database migration checks", () => {
     assert.ok(result.checkedConstraints.includes("users.username_unique"));
     assert.ok(result.checkedConstraints.includes("user_roles.primary_key"));
     assert.ok(result.checkedConstraints.includes("sessions.token_digest_unique"));
+    assert.ok(result.checkedConstraints.includes("auth_login_attempts.failure_count_check"));
     assert.ok(result.checkedConstraints.includes("user_teacher_scopes.user_primary_key"));
     assert.ok(result.checkedConstraints.includes("user_teacher_scopes.teacher_unique"));
     assert.ok(result.checkedConstraints.includes("user_student_group_scopes.primary_key"));
@@ -86,6 +91,49 @@ describe("database migration checks", () => {
       "failed",
       "cancelled",
       "timed_out",
+    ]);
+  });
+
+  it("declares strict generated creation sequences for runs, audits, and jobs", async () => {
+    assert.ok(client);
+    await runMigrations(client);
+    const sequences = await client.pool.query<{
+      tableName: string;
+      isIdentity: string;
+      identityGeneration: string | null;
+      isNullable: string;
+    }>(`
+      SELECT
+        table_name AS "tableName",
+        is_identity AS "isIdentity",
+        identity_generation AS "identityGeneration",
+        is_nullable AS "isNullable"
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name IN ('schedule_runs', 'audit_events', 'schedule_jobs')
+        AND column_name = 'created_sequence'
+      ORDER BY table_name
+    `);
+
+    assert.deepEqual(sequences.rows, [
+      {
+        tableName: "audit_events",
+        isIdentity: "YES",
+        identityGeneration: "ALWAYS",
+        isNullable: "NO",
+      },
+      {
+        tableName: "schedule_jobs",
+        isIdentity: "YES",
+        identityGeneration: "ALWAYS",
+        isNullable: "NO",
+      },
+      {
+        tableName: "schedule_runs",
+        isIdentity: "YES",
+        identityGeneration: "ALWAYS",
+        isNullable: "NO",
+      },
     ]);
   });
 
@@ -123,9 +171,18 @@ describe("database migration checks", () => {
       JOIN users AS app_user ON app_user.id = scope.user_id
       ORDER BY app_user.username, scope.student_group_id
     `);
+    const publicationVersion = await client.pool.query<{ publicationVersion: number }>(`
+      SELECT publication_version AS "publicationVersion"
+      FROM exam_batches
+      WHERE id = 'batch-2026-spring-final'
+    `);
 
     assert.deepEqual(firstRun.map((migration) => migration.id), [
       "0014_user_audience_scopes",
+      "0015_batch_publication_version",
+      "0016_auth_login_attempts",
+      "0017_auth_credential_versions",
+      "0018_creation_sequences",
     ]);
     assert.deepEqual(secondRun, []);
     assert.deepEqual(teacherScopes.rows, [{ username: "teacher", teacherId: "t-zhang" }]);
@@ -133,6 +190,7 @@ describe("database migration checks", () => {
       username: "student",
       studentGroupId: "g-cs-2301",
     }]);
+    assert.equal(publicationVersion.rows[0]?.publicationVersion, 0);
 
     await assert.rejects(client.pool.query(`
       INSERT INTO user_teacher_scopes (user_id, teacher_id)
@@ -181,6 +239,10 @@ describe("database migration checks", () => {
       "0012_reliable_schedule_jobs",
       "0013_constraint_profiles",
       "0014_user_audience_scopes",
+      "0015_batch_publication_version",
+      "0016_auth_login_attempts",
+      "0017_auth_credential_versions",
+      "0018_creation_sequences",
     ]);
     assert.deepEqual(secondRun, []);
     assert.equal(statusResult.rows[0]?.status, "succeeded");
@@ -241,6 +303,10 @@ describe("database migration checks", () => {
       "0012_reliable_schedule_jobs",
       "0013_constraint_profiles",
       "0014_user_audience_scopes",
+      "0015_batch_publication_version",
+      "0016_auth_login_attempts",
+      "0017_auth_credential_versions",
+      "0018_creation_sequences",
     ]);
     assert.deepEqual(secondRun, []);
     assert.deepEqual(jobs.rows.map((job) => ({
@@ -291,6 +357,12 @@ describe("database migration checks", () => {
         'run-before-profiles', 'batch-2026-spring-final', 'feasible', 100,
         '{"total_score":100,"soft_penalty_items":[]}'::jsonb,
         0, 0, 1, '{"status":"feasible"}'::jsonb, '{}'::jsonb
+      );
+      INSERT INTO audit_events (
+        id, actor, actor_user_id, actor_roles, action, entity_type, entity_id, payload, created_at
+      ) VALUES (
+        'audit-before-profiles', 'system', NULL, '[]'::jsonb,
+        'legacy.sequence.created', 'schedule_run', 'run-before-profiles', '{}'::jsonb, now()
       )
     `);
 
@@ -347,12 +419,39 @@ describe("database migration checks", () => {
       FROM schedule_runs
       WHERE id = 'run-before-profiles'
     `);
+    const legacySequences = await client.pool.query<{
+      tableName: string;
+      createdSequence: string;
+    }>(`
+      SELECT 'audit_events' AS "tableName", created_sequence::text AS "createdSequence"
+      FROM audit_events
+      WHERE id = 'audit-before-profiles'
+      UNION ALL
+      SELECT 'schedule_jobs' AS "tableName", created_sequence::text AS "createdSequence"
+      FROM schedule_jobs
+      WHERE id = 'job-before-profiles'
+      UNION ALL
+      SELECT 'schedule_runs' AS "tableName", created_sequence::text AS "createdSequence"
+      FROM schedule_runs
+      WHERE id = 'run-before-profiles'
+      ORDER BY "tableName"
+    `);
 
     assert.deepEqual(firstRun.map((migration) => migration.id), [
       "0013_constraint_profiles",
       "0014_user_audience_scopes",
+      "0015_batch_publication_version",
+      "0016_auth_login_attempts",
+      "0017_auth_credential_versions",
+      "0018_creation_sequences",
     ]);
     assert.deepEqual(secondRun, []);
+    assert.deepEqual(legacySequences.rows.map((row) => row.tableName), [
+      "audit_events",
+      "schedule_jobs",
+      "schedule_runs",
+    ]);
+    assert.ok(legacySequences.rows.every((row) => BigInt(row.createdSequence) > 0n));
     assert.equal(defaultProfile.rows.length, 1);
     assert.deepEqual(defaultProfile.rows[0], {
       profileId: "constraint-profile-default",

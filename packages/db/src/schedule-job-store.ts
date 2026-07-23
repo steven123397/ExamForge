@@ -140,7 +140,7 @@ export class ScheduleJobStore implements OutboxDeliveryRepository {
       .select()
       .from(scheduleJobs)
       .where(where)
-      .orderBy(desc(scheduleJobs.createdAt), desc(scheduleJobs.id))
+        .orderBy(desc(scheduleJobs.createdSequence))
       .limit(query.pageSize)
       .offset((query.page - 1) * query.pageSize),
       this.client.db

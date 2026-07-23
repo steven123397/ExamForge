@@ -4,6 +4,8 @@ import {
   audienceScopeErrorCodeSchema,
   audienceScopeSchema,
   currentPublishedScheduleSchema,
+  publicPublishedScheduleNotificationsSchema,
+  publicPublishedScheduleSchema,
 } from "../src/index.js";
 
 const teacher = {
@@ -104,6 +106,49 @@ describe("current audience contracts", () => {
     assert.throws(() => currentPublishedScheduleSchema.parse({
       ...teacherSchedule,
       audience: { kind: "student", studentGroups },
+    }));
+  });
+
+  it("rejects operational fields from versioned anonymous publication DTOs", () => {
+    const published = publicPublishedScheduleSchema.parse({
+      contractVersion: 1,
+      batch: {
+        name: batch.name,
+        startDate: batch.startDate,
+        endDate: batch.endDate,
+      },
+      entries: [{
+        courseName: "数据结构",
+        studentGroupNames: ["计算机 2301"],
+        roomName: "明德楼 101",
+        date: "2026-06-29",
+        startTime: "09:00",
+        endTime: "11:00",
+      }],
+    });
+    const notifications = publicPublishedScheduleNotificationsSchema.parse({
+      contractVersion: 1,
+      batch: published.batch,
+      notifications: [{
+        studentGroupName: "计算机 2301",
+        assignmentCount: 1,
+        message: "计算机 2301 的 1 场考试安排已发布，请及时查看最新考试时间和考场。",
+      }],
+    });
+
+    assert.equal(published.contractVersion, 1);
+    assert.equal(notifications.notifications[0]?.studentGroupName, "计算机 2301");
+    assert.throws(() => publicPublishedScheduleSchema.parse({
+      ...published,
+      run,
+    }));
+    assert.throws(() => publicPublishedScheduleSchema.parse({
+      ...published,
+      entries: [{ ...published.entries[0], room_id: "r-101" }],
+    }));
+    assert.throws(() => publicPublishedScheduleNotificationsSchema.parse({
+      ...notifications,
+      notifications: [{ ...notifications.notifications[0], studentGroupId: "g-cs-2301" }],
     }));
   });
 });

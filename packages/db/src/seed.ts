@@ -1,11 +1,10 @@
 import { demoBatch, demoScheduleInput } from "@examforge/shared";
 import { pathToFileURL } from "node:url";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createDbClient, type ExamForgeDbClient } from "./client.js";
 import {
   courses,
   departments,
-  examBatches,
   examTaskStudentGroups,
   examTasks,
   rooms,
@@ -40,13 +39,19 @@ export async function seedDemoData(client: ExamForgeDbClient): Promise<void> {
   await client.db.transaction(async (tx) => {
     await tx.insert(departments).values(collectDepartments()).onConflictDoNothing();
 
-    await tx
-      .insert(examBatches)
-      .values({
-        ...demoBatch,
-        constraintProfile: demoScheduleInput.constraint_profile,
-      })
-      .onConflictDoNothing();
+    await tx.execute(sql`
+      INSERT INTO exam_batches (
+        id, name, status, start_date, end_date, constraint_profile
+      ) VALUES (
+        ${demoBatch.id},
+        ${demoBatch.name},
+        ${demoBatch.status},
+        ${demoBatch.startDate},
+        ${demoBatch.endDate},
+        ${JSON.stringify(demoScheduleInput.constraint_profile)}::jsonb
+      )
+      ON CONFLICT (id) DO NOTHING
+    `);
 
     await tx
       .insert(studentGroups)

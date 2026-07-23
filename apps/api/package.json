@@ -11,6 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --import tsx tests/*.test.ts",
     "test:postgres": "node --test --import tsx tests/postgres/postgres-integration.test.ts",
+    "rotate-account": "node dist/src/auth/rotate-account.js",
     "start": "node dist/server.js"
   },
   "dependencies": {

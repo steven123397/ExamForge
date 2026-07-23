@@ -2,8 +2,97 @@ import type {
   PublishedScheduleAudienceResponse,
   PublishedScheduleNotificationsResponse,
   PublishedScheduleResponse,
+  PublicPublishedScheduleNotificationsResponse,
+  PublicPublishedScheduleResponse,
   ReferenceDataResponse,
 } from "@examforge/shared";
+import {
+  publicPublishedScheduleNotificationsSchema,
+  publicPublishedScheduleSchema,
+} from "@examforge/shared";
+
+export function buildPublicPublishedSchedule(
+  referenceData: ReferenceDataResponse,
+  published: PublishedScheduleResponse,
+): PublicPublishedScheduleResponse {
+  const { scheduleInput } = referenceData;
+  const courses = new Map(scheduleInput.courses.map((course) => [course.id, course]));
+  const groups = new Map(scheduleInput.student_groups.map((group) => [group.id, group]));
+  const rooms = new Map(scheduleInput.rooms.map((room) => [room.id, room]));
+  const slots = new Map(scheduleInput.time_slots.map((slot) => [slot.id, slot]));
+  const tasks = new Map(scheduleInput.exam_tasks.map((task) => [task.id, task]));
+  const entries = published.result.assignments
+    .map((assignment) => {
+      const task = tasks.get(assignment.exam_task_id);
+      const slot = slots.get(assignment.time_slot_id);
+      return {
+        taskId: assignment.exam_task_id,
+        entry: {
+          courseName: task ? toPublicText(courses.get(task.course_id)?.name) : null,
+          studentGroupNames: task
+            ? task.student_group_ids
+              .map((groupId) => toPublicText(groups.get(groupId)?.name))
+              .filter((name): name is string => name !== null)
+              .sort((left, right) => left.localeCompare(right))
+            : [],
+          roomName: toPublicText(rooms.get(assignment.room_id)?.name),
+          date: toPublicText(slot?.date),
+          startTime: toPublicText(slot?.start_time),
+          endTime: toPublicText(slot?.end_time),
+        },
+      };
+    })
+    .sort((left, right) => (
+      (left.entry.date ?? "").localeCompare(right.entry.date ?? "")
+      || (left.entry.startTime ?? "").localeCompare(right.entry.startTime ?? "")
+      || (left.entry.courseName ?? "").localeCompare(right.entry.courseName ?? "")
+      || left.taskId.localeCompare(right.taskId)
+    ))
+    .map(({ entry }) => entry);
+
+  return publicPublishedScheduleSchema.parse({
+    contractVersion: 1,
+    batch: toPublicBatch(published),
+    entries,
+  });
+}
+
+export function buildPublicPublishedScheduleNotifications(
+  referenceData: ReferenceDataResponse,
+  published: PublishedScheduleResponse,
+): PublicPublishedScheduleNotificationsResponse {
+  const groups = new Map(referenceData.scheduleInput.student_groups.map((group) => [group.id, group]));
+  const tasks = new Map(referenceData.scheduleInput.exam_tasks.map((task) => [task.id, task]));
+  const counts = new Map<string, { name: string; assignmentCount: number }>();
+  for (const assignment of published.result.assignments) {
+    const task = tasks.get(assignment.exam_task_id);
+    for (const groupId of task?.student_group_ids ?? []) {
+      const group = groups.get(groupId);
+      const groupName = toPublicText(group?.name);
+      if (!groupName) {
+        continue;
+      }
+      const count = counts.get(groupId);
+      counts.set(groupId, {
+        name: groupName,
+        assignmentCount: (count?.assignmentCount ?? 0) + 1,
+      });
+    }
+  }
+  return publicPublishedScheduleNotificationsSchema.parse({
+    contractVersion: 1,
+    batch: toPublicBatch(published),
+    notifications: [...counts.entries()]
+      .sort(([leftId, left], [rightId, right]) => (
+        left.name.localeCompare(right.name) || leftId.localeCompare(rightId)
+      ))
+      .map(([, notification]) => ({
+        studentGroupName: notification.name,
+        assignmentCount: notification.assignmentCount,
+        message: `${notification.name} 的 ${notification.assignmentCount} 场考试安排已发布，请及时查看最新考试时间和考场。`,
+      })),
+  });
+}
 
 export function buildPublishedScheduleAudience(
   referenceData: ReferenceDataResponse,
@@ -110,6 +199,18 @@ export function buildPublishedScheduleCsv(
     ]);
   }
   return rows.map((row) => row.join(",")).join("\n");
+}
+
+function toPublicBatch(published: PublishedScheduleResponse) {
+  return {
+    name: published.batch.name,
+    startDate: published.batch.startDate,
+    endDate: published.batch.endDate,
+  };
+}
+
+function toPublicText(value: string | undefined) {
+  return value?.trim() ? value : null;
 }
 
 function csvCell(value: string) {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import {
   criticalMigrationTables,
   draftScheduledExams,
@@ -14,7 +14,7 @@ import {
 } from "@examforge/shared";
 import { createApp as createProductionApp, type AppOptions } from "../src/app.js";
 import { InMemoryPlatformRepository, type PlatformRepository } from "../src/repository.js";
-import { hashSessionToken } from "../src/auth/security.js";
+import { hashLoginAttemptKey, hashSessionToken } from "../src/auth/security.js";
 import {
   SchedulerClientError,
   type SchedulerClient,
@@ -58,6 +58,7 @@ function seedRepositorySessions(repository: PlatformRepository) {
       expiresAt: "2099-07-12T00:00:00.000Z",
       userAgent: "ExamForge test fixture",
       ipAddress: "127.0.0.1",
+      credentialVersion: 1,
     });
   }
 }
@@ -283,7 +284,7 @@ describe("ExamForge API", () => {
     const response = await app.inject({
       method: "GET",
       url: "/api/dashboard",
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
 
     assert.equal(response.statusCode, 200);
@@ -310,7 +311,7 @@ describe("ExamForge API", () => {
     const readResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-runs/${created.run.id}`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
 
     assert.equal(readResponse.statusCode, 200);
@@ -559,44 +560,170 @@ describe("ExamForge API", () => {
     await app.close();
   });
 
-  it("protects internal reads with session authentication", async () => {
+  it("temporarily locks repeated failed logins without allowing a correct password to bypass it", async () => {
     const app = createApp({ scheduler: new FakeScheduler() });
-    const operatorOnlyPaths = new Set([
-      "/api/schedule-jobs",
-      "/api/schedule-jobs/missing-job",
-    ]);
-    const internalPaths = [
-      "/api/dashboard",
-      "/api/reference-data",
-      "/api/schedule-jobs",
-      "/api/schedule-jobs/missing-job",
-      "/api/schedule-runs",
-      "/api/schedule-runs/missing-run",
-      "/api/schedule-runs/compare?baseId=missing-a&targetId=missing-b",
-      "/api/schedule-drafts",
-      "/api/schedule-drafts/missing-draft",
-      "/api/schedule-drafts/missing-draft/compare",
-      "/api/schedule-drafts/missing-draft/assignments/missing-exam/suggestions",
-      "/api/audit-events",
+    const login = (password: string) => app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: "http://localhost:3000" },
+      remoteAddress: "203.0.113.17",
+      payload: {
+        username: "operator",
+        password,
+      },
+    });
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      assert.equal((await login("wrong-password")).statusCode, 401);
+    }
+
+    const locked = await login("wrong-password");
+    assert.equal(locked.statusCode, 429);
+    assert.equal(locked.json().error, "login_temporarily_locked");
+    assert.ok(Number(locked.headers["retry-after"]) > 0);
+
+    const bypassAttempt = await login("operator-password");
+    assert.equal(bypassAttempt.statusCode, 429);
+    assert.equal(bypassAttempt.json().error, "login_temporarily_locked");
+
+    await app.close();
+  });
+
+  it("uses forwarded login sources only from a loopback reverse proxy", async () => {
+    const repository = new InMemoryPlatformRepository({ authUsers: testAuthUsers });
+    const app = createApp({ repository, scheduler: new FakeScheduler() });
+    const forwardedSource = "203.0.113.23";
+
+    const forwarded = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: {
+        origin: "http://localhost:3000",
+        "x-forwarded-for": forwardedSource,
+      },
+      remoteAddress: "127.0.0.1",
+      payload: { username: "operator", password: "wrong-password" },
+    });
+    assert.equal(forwarded.statusCode, 401);
+    assert.equal(
+      (await repository.getLoginFailureLock(
+        hashLoginAttemptKey(forwardedSource, "operator"),
+        new Date().toISOString(),
+      )).failureCount,
+      1,
+    );
+
+    const untrusted = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: {
+        origin: "http://localhost:3000",
+        "x-forwarded-for": forwardedSource,
+      },
+      remoteAddress: "198.51.100.24",
+      payload: { username: "operator", password: "wrong-password" },
+    });
+    assert.equal(untrusted.statusCode, 401);
+    assert.equal(
+      (await repository.getLoginFailureLock(
+        hashLoginAttemptKey(forwardedSource, "operator"),
+        new Date().toISOString(),
+      )).failureCount,
+      1,
+    );
+    assert.equal(
+      (await repository.getLoginFailureLock(
+        hashLoginAttemptKey("198.51.100.24", "operator"),
+        new Date().toISOString(),
+      )).failureCount,
+      1,
+    );
+
+    await app.close();
+  });
+
+  it("shares a login lock across equivalent normalized usernames", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+    const login = (username: string) => app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: "http://localhost:3000" },
+      remoteAddress: "203.0.113.25",
+      payload: { username, password: "wrong-password" },
+    });
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      assert.equal((await login("  ＯＰＥＲＡＴＯＲ  ")).statusCode, 401);
+    }
+    assert.equal((await login("operator")).statusCode, 429);
+
+    await app.close();
+  });
+
+  it("enforces server-side roles for operational reads", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+    const operationalReads = [
+      { path: "/api/dashboard", allowedRoles: ["admin", "operator"] },
+      { path: "/api/reference-data", allowedRoles: ["admin", "operator"] },
+      { path: "/api/constraint-profiles", allowedRoles: ["admin", "operator"] },
+      { path: "/api/constraint-profiles/constraint-profile-default", allowedRoles: ["admin", "operator"] },
+      { path: "/api/schedule-jobs", allowedRoles: ["admin", "operator"] },
+      { path: "/api/schedule-jobs/missing-job", allowedRoles: ["admin", "operator"] },
+      { path: "/api/schedule-runs", allowedRoles: ["admin", "operator"] },
+      { path: "/api/schedule-runs/missing-run", allowedRoles: ["admin", "operator"] },
+      {
+        path: "/api/schedule-runs/compare?baseId=missing-a&targetId=missing-b",
+        allowedRoles: ["admin", "operator"],
+      },
+      { path: "/api/schedule-drafts", allowedRoles: ["admin", "operator"] },
+      { path: "/api/schedule-drafts/missing-draft", allowedRoles: ["admin", "operator"] },
+      {
+        path: "/api/schedule-drafts/missing-draft/compare",
+        allowedRoles: ["admin", "operator"],
+      },
+      {
+        path: "/api/schedule-drafts/missing-draft/assignments/missing-exam/suggestions",
+        allowedRoles: ["admin", "operator"],
+      },
+      { path: "/api/audit-events", allowedRoles: ["admin"] },
+      {
+        path: "/api/published-schedule/teachers/t-zhang",
+        allowedRoles: ["admin", "operator"],
+      },
+      {
+        path: "/api/published-schedule/student-groups/g-cs-2301",
+        allowedRoles: ["admin", "operator"],
+      },
+      { path: "/api/published-schedule/operations", allowedRoles: ["admin", "operator"] },
     ];
 
-    for (const path of internalPaths) {
+    for (const { path, allowedRoles } of operationalReads) {
       for (const headers of [undefined, { authorization: "Bearer forged-token" }]) {
         const response = await app.inject({ method: "GET", url: path, headers });
         assert.equal(response.statusCode, 401, `${path} must reject unauthenticated reads`);
         assert.equal(response.json().error, "not_authenticated");
       }
 
-      const viewerResponse = await app.inject({
-        method: "GET",
-        url: path,
-        headers: viewerHeaders,
-      });
-      assert.notEqual(viewerResponse.statusCode, 401, `${path} must accept student authentication`);
-      if (operatorOnlyPaths.has(path)) {
-        assert.equal(viewerResponse.statusCode, 403, `${path} must reject student reads`);
-      } else {
-        assert.notEqual(viewerResponse.statusCode, 403, `${path} must allow student reads`);
+      for (const [role, headers] of [
+        ["teacher", testAuthHeaders.teacher],
+        ["student", testAuthHeaders.student],
+      ] as const) {
+        const response = await app.inject({ method: "GET", url: path, headers });
+        assert.equal(response.statusCode, 403, `${path} must reject ${role} reads`);
+        assert.equal(response.json().error, "permission_denied");
+      }
+
+      for (const [role, headers] of [
+        ["admin", adminHeaders],
+        ["operator", operatorHeaders],
+      ] as const) {
+        const response = await app.inject({ method: "GET", url: path, headers });
+        if (allowedRoles.includes(role)) {
+          assert.notEqual(response.statusCode, 401, `${path} must accept ${role} authentication`);
+          assert.notEqual(response.statusCode, 403, `${path} must allow ${role} reads`);
+        } else {
+          assert.equal(response.statusCode, 403, `${path} must reject ${role} reads`);
+        }
       }
     }
 
@@ -617,6 +744,7 @@ describe("ExamForge API", () => {
     for (const path of [
       "/api/published-schedule/teachers/t-zhang",
       "/api/published-schedule/student-groups/g-cs-2301",
+      "/api/published-schedule/operations",
     ]) {
       const anonymousResponse = await app.inject({ method: "GET", url: path });
       assert.equal(anonymousResponse.statusCode, 401);
@@ -657,7 +785,7 @@ describe("ExamForge API", () => {
     const listResponse = await app.inject({
       method: "GET",
       url: "/api/schedule-runs",
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(listResponse.statusCode, 200);
     assert.deepEqual(
@@ -668,7 +796,7 @@ describe("ExamForge API", () => {
     const auditResponse = await app.inject({
       method: "GET",
       url: "/api/audit-events",
-      headers: viewerHeaders,
+      headers: adminHeaders,
     });
     assert.equal(auditResponse.statusCode, 200);
     assert.equal(auditResponse.json().events.length, 2);
@@ -677,7 +805,7 @@ describe("ExamForge API", () => {
     const filteredAuditResponse = await app.inject({
       method: "GET",
       url: `/api/audit-events?entityType=schedule_run&entityId=${first.run.id}&actor=operator`,
-      headers: viewerHeaders,
+      headers: adminHeaders,
     });
     assert.equal(filteredAuditResponse.statusCode, 200);
     assert.deepEqual(
@@ -690,7 +818,7 @@ describe("ExamForge API", () => {
     const invalidAuditFilterResponse = await app.inject({
       method: "GET",
       url: "/api/audit-events?since=not-a-date",
-      headers: viewerHeaders,
+      headers: adminHeaders,
     });
     assert.equal(invalidAuditFilterResponse.statusCode, 400);
     assert.equal(invalidAuditFilterResponse.json().error, "invalid_audit_filter");
@@ -698,7 +826,7 @@ describe("ExamForge API", () => {
     const compareResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-runs/compare?baseId=${first.run.id}&targetId=${second.run.id}`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(compareResponse.statusCode, 200);
     assert.equal(compareResponse.json().baseRun.id, first.run.id);
@@ -706,6 +834,52 @@ describe("ExamForge API", () => {
     assert.equal(compareResponse.json().deltas.score, 1);
 
     await app.close();
+  });
+
+  it("keeps in-memory run and audit pagination in creation order when timestamps are equal", async () => {
+    mock.timers.enable({
+      apis: ["Date"],
+      now: new Date("2026-07-23T12:00:00.000Z"),
+    });
+    const app = createApp({ scheduler: new FakeScheduler() });
+    try {
+      const createdRunIds: string[] = [];
+      for (let index = 0; index < 10; index += 1) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/schedule-runs",
+          headers: operatorHeaders,
+        });
+        assert.equal(response.statusCode, 201);
+        createdRunIds.push(response.json().run.id);
+      }
+
+      const expected = [...createdRunIds].reverse();
+      const [firstRunPage, secondRunPage] = await Promise.all([1, 2].map((page) => app.inject({
+        method: "GET",
+        url: `/api/schedule-runs?page=${page}&pageSize=5`,
+        headers: operatorHeaders,
+      })));
+      assert.deepEqual(
+        [...firstRunPage.json().runs, ...secondRunPage.json().runs]
+          .map((run: { id: string }) => run.id),
+        expected,
+      );
+
+      const [firstAuditPage, secondAuditPage] = await Promise.all([1, 2].map((page) => app.inject({
+        method: "GET",
+        url: `/api/audit-events?action=schedule_run.created&page=${page}&pageSize=5`,
+        headers: adminHeaders,
+      })));
+      assert.deepEqual(
+        [...firstAuditPage.json().events, ...secondAuditPage.json().events]
+          .map((event: { entityId: string }) => event.entityId),
+        expected,
+      );
+    } finally {
+      await app.close();
+      mock.timers.reset();
+    }
   });
 
   it("filters and paginates schedule runs and audit events with stable metadata", async () => {
@@ -775,7 +949,7 @@ describe("ExamForge API", () => {
     const auditPage = await app.inject({
       method: "GET",
       url: "/api/audit-events?action=test.trace.created&traceId=trace-list-1&page=1&pageSize=1",
-      headers: operatorHeaders,
+      headers: adminHeaders,
     });
     assert.equal(auditPage.statusCode, 200);
     assert.equal(auditPage.json().events.length, 1);
@@ -787,7 +961,7 @@ describe("ExamForge API", () => {
     const emptyAuditPage = await app.inject({
       method: "GET",
       url: "/api/audit-events?action=test.trace.created&page=9&pageSize=20",
-      headers: operatorHeaders,
+      headers: adminHeaders,
     });
     assert.deepEqual(emptyAuditPage.json().events, []);
     assert.equal(emptyAuditPage.json().total, 1);
@@ -819,7 +993,16 @@ describe("ExamForge API", () => {
       url: "/api/published-schedule",
     });
     assert.equal(publishedResponse.statusCode, 200);
-    assert.equal(publishedResponse.json().run.id, created.run.id);
+    assert.equal(publishedResponse.json().contractVersion, 1);
+    assert.equal(publishedResponse.json().entries.length, 6);
+
+    const operationalResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/operations",
+      headers: operatorHeaders,
+    });
+    assert.equal(operationalResponse.statusCode, 200);
+    assert.equal(operationalResponse.json().run.id, created.run.id);
 
     const rollbackResponse = await app.inject({
       method: "POST",
@@ -834,6 +1017,107 @@ describe("ExamForge API", () => {
       url: "/api/published-schedule",
     });
     assert.equal(afterRollbackResponse.statusCode, 404);
+
+    await app.close();
+  });
+
+  it("projects anonymous published schedules and notifications without operational run data", async () => {
+    const app = createApp({ scheduler: new FakeScheduler() });
+
+    const created = (await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: operatorHeaders,
+    })).json();
+    const publishResponse = await app.inject({
+      method: "POST",
+      url: `/api/schedule-runs/${created.run.id}/publish`,
+      headers: adminHeaders,
+    });
+    assert.equal(publishResponse.statusCode, 200);
+
+    const publishedResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule",
+    });
+    assert.equal(publishedResponse.statusCode, 200);
+    const published = publishedResponse.json();
+    assert.equal(published.contractVersion, 1);
+    assert.deepEqual(Object.keys(published).sort(), ["batch", "contractVersion", "entries"]);
+    assert.deepEqual(Object.keys(published.batch).sort(), ["endDate", "name", "startDate"]);
+    assert.ok(published.entries.length > 0);
+    assert.deepEqual(Object.keys(published.entries[0]).sort(), [
+      "courseName",
+      "date",
+      "endTime",
+      "roomName",
+      "startTime",
+      "studentGroupNames",
+    ]);
+
+    const notificationsResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/notifications",
+    });
+    assert.equal(notificationsResponse.statusCode, 200);
+    const notifications = notificationsResponse.json();
+    assert.equal(notifications.contractVersion, 1);
+    assert.deepEqual(Object.keys(notifications).sort(), ["batch", "contractVersion", "notifications"]);
+    assert.ok(notifications.notifications.length > 0);
+    assert.deepEqual(Object.keys(notifications.notifications[0]).sort(), [
+      "assignmentCount",
+      "message",
+      "studentGroupName",
+    ]);
+
+    for (const response of [published, notifications]) {
+      const serialized = JSON.stringify(response);
+      for (const field of [
+        "run",
+        "result",
+        "score",
+        "conflicts",
+        "diagnostics",
+        "report",
+        "statistics",
+        "constraintProfile",
+        "exam_task_id",
+        "room_id",
+        "time_slot_id",
+        "teacher_ids",
+        "studentGroupId",
+      ]) {
+        assert.equal(serialized.includes(`\"${field}\"`), false, `${field} must not be public`);
+      }
+    }
+
+    for (const headers of [undefined, { authorization: "Bearer forged-token" }]) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/published-schedule/operations",
+        headers,
+      });
+      assert.equal(response.statusCode, 401);
+    }
+    for (const headers of [testAuthHeaders.teacher, testAuthHeaders.student]) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/published-schedule/operations",
+        headers,
+      });
+      assert.equal(response.statusCode, 403);
+      assert.equal(response.json().error, "permission_denied");
+    }
+    for (const headers of [adminHeaders, operatorHeaders]) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/published-schedule/operations",
+        headers,
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.json().run.id, created.run.id);
+      assert.ok(response.json().result.score.total_score > 0);
+    }
 
     await app.close();
   });
@@ -937,7 +1221,7 @@ describe("ExamForge API", () => {
     const referenceResponse = await app.inject({
       method: "GET",
       url: "/api/reference-data",
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     const referenceData = referenceResponse.json();
     const teacher = referenceData.scheduleInput.teachers[0];
@@ -1270,6 +1554,14 @@ describe("ExamForge API", () => {
         createAuthSession: (command) => repository.createAuthSession(command),
         findAuthSessionByTokenDigest: (digest) => repository.findAuthSessionByTokenDigest(digest),
         revokeAuthSession: (id, revokedAt) => repository.revokeAuthSession(id, revokedAt),
+        rotateAuthUserPassword: (command) => repository.rotateAuthUserPassword(command),
+        getLoginFailureLock: (keyDigest, attemptedAt) => (
+          repository.getLoginFailureLock(keyDigest, attemptedAt)
+        ),
+        recordLoginFailure: (keyDigest, attemptedAt, policy) => (
+          repository.recordLoginFailure(keyDigest, attemptedAt, policy)
+        ),
+        clearLoginFailures: (keyDigest) => repository.clearLoginFailures(keyDigest),
         getAudienceScope: (userId) => repository.getAudienceScope(userId),
         setTeacherAudienceScope: (userId, teacherId) => (
           repository.setTeacherAudienceScope(userId, teacherId)
@@ -1326,7 +1618,7 @@ describe("ExamForge API", () => {
     const referenceResponse = await app.inject({
       method: "GET",
       url: "/api/reference-data",
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     const courses = referenceResponse.json().scheduleInput.courses;
     assert.ok(courses.some((course: { id: string; name: string }) => (
@@ -1395,7 +1687,7 @@ describe("ExamForge API", () => {
     const referenceResponse = await app.inject({
       method: "GET",
       url: "/api/reference-data",
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     const slots = referenceResponse.json().scheduleInput.time_slots;
     assert.ok(slots.some((slot: { id: string; date: string }) => (
@@ -1586,7 +1878,7 @@ describe("ExamForge API", () => {
     const listResponse = await app.inject({
       method: "GET",
       url: "/api/schedule-drafts",
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(listResponse.statusCode, 200);
     assert.deepEqual(
@@ -1654,7 +1946,16 @@ describe("ExamForge API", () => {
       url: "/api/published-schedule",
     });
     assert.equal(publishedResponse.statusCode, 200);
-    assert.equal(publishedResponse.json().run.id, publishResponse.json().run.id);
+    assert.equal(publishedResponse.json().contractVersion, 1);
+    assert.equal(publishedResponse.json().entries.length, 6);
+
+    const operationalResponse = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/operations",
+      headers: operatorHeaders,
+    });
+    assert.equal(operationalResponse.statusCode, 200);
+    assert.equal(operationalResponse.json().run.id, publishResponse.json().run.id);
 
     for (const path of [
       `/api/schedule-drafts/${createdDraft.draft.id}/validate`,
@@ -1794,7 +2095,7 @@ describe("ExamForge API", () => {
     const compareResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}/compare`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(compareResponse.statusCode, 200);
     const comparison = compareResponse.json();
@@ -1835,7 +2136,7 @@ describe("ExamForge API", () => {
     const auditResponse = await app.inject({
       method: "GET",
       url: "/api/audit-events",
-      headers: viewerHeaders,
+      headers: adminHeaders,
     });
     assert.equal(auditResponse.statusCode, 200);
     assert.ok(auditResponse.json().events.some((event: { action: string }) => (
@@ -1875,7 +2176,7 @@ describe("ExamForge API", () => {
     const suggestionsResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}/assignments/e-database/suggestions`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
 
     assert.equal(suggestionsResponse.statusCode, 200);
@@ -2014,6 +2315,41 @@ describe("ExamForge API", () => {
     assert.equal(invalidDate.json().error, "invalid_schedule_job_filter");
 
     await app.close();
+  });
+
+  it("keeps in-memory schedule-job pagination in creation order when timestamps are equal", async () => {
+    mock.timers.enable({
+      apis: ["Date"],
+      now: new Date("2026-07-23T12:00:00.000Z"),
+    });
+    const app = createApp({ scheduler: new FakeScheduler() });
+    try {
+      const createdJobIds: string[] = [];
+      for (let index = 0; index < 10; index += 1) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/schedule-jobs",
+          headers: { ...operatorHeaders, "idempotency-key": `same-timestamp-job-${index}` },
+        });
+        assert.equal(response.statusCode, 202);
+        createdJobIds.push(response.json().job.id);
+      }
+
+      const expected = [...createdJobIds].reverse();
+      const [firstPage, secondPage] = await Promise.all([1, 2].map((page) => app.inject({
+        method: "GET",
+        url: `/api/schedule-jobs?page=${page}&pageSize=5`,
+        headers: operatorHeaders,
+      })));
+      assert.deepEqual(
+        [...firstPage.json().jobs, ...secondPage.json().jobs]
+          .map((job: { id: string }) => job.id),
+        expected,
+      );
+    } finally {
+      await app.close();
+      mock.timers.reset();
+    }
   });
 
   it("cancels queued jobs and records cooperative cancellation for running jobs", async () => {
@@ -2328,7 +2664,7 @@ describe("ExamForge API", () => {
     const beforeResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
 
     const response = await app.inject({
@@ -2347,7 +2683,7 @@ describe("ExamForge API", () => {
     const afterResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.deepEqual(afterResponse.json(), beforeResponse.json());
 
@@ -2474,18 +2810,36 @@ describe("ExamForge API", () => {
     });
     assert.equal(unauthenticatedExportResponse.statusCode, 401);
 
-    const exportResponse = await app.inject({
-      method: "GET",
-      url: "/api/published-schedule/export.csv",
-      headers: viewerHeaders,
-    });
-    assert.equal(exportResponse.statusCode, 200);
-    assert.match(exportResponse.headers["content-type"] as string, /text\/csv/);
-    assert.match(exportResponse.body, /course,time_slot,room,teachers/);
+    for (const [role, headers] of [
+      ["teacher", testAuthHeaders.teacher],
+      ["student", viewerHeaders],
+    ] as const) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/published-schedule/export.csv",
+        headers,
+      });
+      assert.equal(response.statusCode, 403, `CSV export must reject ${role}`);
+      assert.equal(response.json().error, "permission_denied");
+    }
+
+    for (const [role, headers] of [
+      ["admin", adminHeaders],
+      ["operator", operatorHeaders],
+    ] as const) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/published-schedule/export.csv",
+        headers,
+      });
+      assert.equal(response.statusCode, 200, `CSV export must allow ${role}`);
+      assert.match(response.headers["content-type"] as string, /text\/csv/);
+      assert.match(response.body, /course,time_slot,room,teachers/);
+    }
 
     const auditResponse = await app.inject({
       method: "GET",
-      url: `/api/audit-events?entityType=schedule_run&entityId=${created.run.id}&actor=student`,
+      url: `/api/audit-events?entityType=schedule_run&entityId=${created.run.id}&actor=operator`,
       headers: adminHeaders,
     });
     assert.equal(auditResponse.statusCode, 200);

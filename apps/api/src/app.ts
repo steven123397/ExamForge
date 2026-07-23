@@ -83,11 +83,13 @@ const anonymousReadRoutes = new Set([
   "/api/published-schedule",
   "/api/published-schedule/notifications",
 ]);
+const operationalReadRoles: UserRole[] = ["admin", "operator"];
 
 const requestAuthContexts = new WeakMap<FastifyRequest, AuthContext>();
 
 export function createApp(options: AppOptions = {}) {
   const app = Fastify({
+    trustProxy: "loopback",
     logger: {
       level: process.env.LOG_LEVEL ?? "info",
     },
@@ -251,6 +253,15 @@ export function createApp(options: AppOptions = {}) {
         message: "This account is disabled.",
       });
     }
+    if (result.status === "temporarily_locked") {
+      return reply
+        .code(429)
+        .header("retry-after", result.retryAfterSeconds.toString())
+        .send({
+          error: "login_temporarily_locked",
+          message: "Login is temporarily locked. Try again later.",
+        });
+    }
     return reply
       .header("set-cookie", serializeSessionCookie(
         result.token,
@@ -323,9 +334,19 @@ export function createApp(options: AppOptions = {}) {
     await initializeConfiguredAuthUsers(repository);
   });
 
-  app.get("/api/dashboard", async () => repository.getDashboard());
+  app.get("/api/dashboard", async (request, reply) => {
+    if (!requireRole(request, reply, operationalReadRoles)) {
+      return reply;
+    }
+    return repository.getDashboard();
+  });
 
-  app.get("/api/reference-data", async () => repository.getReferenceData());
+  app.get("/api/reference-data", async (request, reply) => {
+    if (!requireRole(request, reply, operationalReadRoles)) {
+      return reply;
+    }
+    return repository.getReferenceData();
+  });
 
   app.get("/api/constraint-profiles", async (request, reply) => {
     if (!requireRole(request, reply, ["admin", "operator"])) {
@@ -778,6 +799,9 @@ export function createApp(options: AppOptions = {}) {
   );
 
   app.get<{ Querystring: Record<string, unknown> }>("/api/schedule-runs", async (request, reply) => {
+    if (!requireRole(request, reply, operationalReadRoles)) {
+      return reply;
+    }
     const parsed = scheduleRunListQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -806,9 +830,17 @@ export function createApp(options: AppOptions = {}) {
     },
   );
 
-  app.get("/api/schedule-drafts", async () => draftService.list());
+  app.get("/api/schedule-drafts", async (request, reply) => {
+    if (!requireRole(request, reply, operationalReadRoles)) {
+      return reply;
+    }
+    return draftService.list();
+  });
 
   app.get<{ Params: { id: string } }>("/api/schedule-drafts/:id", async (request, reply) => {
+    if (!requireRole(request, reply, operationalReadRoles)) {
+      return reply;
+    }
     const draft = await draftService.get(request.params.id);
     if (!draft) {
       return reply.code(404).send({
@@ -912,6 +944,9 @@ export function createApp(options: AppOptions = {}) {
   );
 
   app.get<{ Params: { id: string } }>("/api/schedule-drafts/:id/compare", async (request, reply) => {
+    if (!requireRole(request, reply, operationalReadRoles)) {
+      return reply;
+    }
     const comparison = await draftService.compare(request.params.id);
     if (!comparison) {
       return reply.code(404).send({
@@ -925,6 +960,9 @@ export function createApp(options: AppOptions = {}) {
   app.get<{ Params: { id: string; examTaskId: string } }>(
     "/api/schedule-drafts/:id/assignments/:examTaskId/suggestions",
     async (request, reply) => {
+      if (!requireRole(request, reply, operationalReadRoles)) {
+        return reply;
+      }
       const suggestions = await draftService.suggestAssignment(
         request.params.id,
         request.params.examTaskId,
@@ -1027,6 +1065,12 @@ export function createApp(options: AppOptions = {}) {
           message: "Schedule draft has hard conflicts and cannot be published.",
         });
       }
+      if (published === "publication_conflict") {
+        return reply.code(409).send({
+          error: "schedule_draft_publication_conflict",
+          message: "The publication state changed. Refresh the page and try again.",
+        });
+      }
       if (published === "not_publishable") {
         return reply.code(409).send({
           error: "schedule_draft_not_publishable",
@@ -1066,6 +1110,9 @@ export function createApp(options: AppOptions = {}) {
       targetId?: string;
     };
   }>("/api/schedule-runs/compare", async (request, reply) => {
+    if (!requireRole(request, reply, operationalReadRoles)) {
+      return reply;
+    }
     const { baseId, targetId } = request.query;
     if (!baseId || !targetId) {
       return reply.code(400).send({
@@ -1086,6 +1133,9 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.get<{ Querystring: Record<string, unknown> }>("/api/audit-events", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin"])) {
+      return reply;
+    }
     try {
       return await repository.listAuditEvents(parseAuditEventFilter(request.query));
     } catch (error) {
@@ -1119,11 +1169,31 @@ export function createApp(options: AppOptions = {}) {
           message: "Only complete, feasible schedule runs without hard conflicts can be published.",
         });
       }
+      if (published === "publication_conflict") {
+        return reply.code(409).send({
+          error: "schedule_run_publication_conflict",
+          message: "The publication state changed. Refresh the page and try again.",
+        });
+      }
       return published;
     },
   );
 
   app.get("/api/published-schedule", async (_request, reply) => {
+    const published = await publicationService.getPublicPublishedSchedule();
+    if (!published) {
+      return reply.code(404).send({
+        error: "published_schedule_not_found",
+        message: "No schedule has been published.",
+      });
+    }
+    return published;
+  });
+
+  app.get("/api/published-schedule/operations", async (request, reply) => {
+    if (!requireRole(request, reply, operationalReadRoles)) {
+      return reply;
+    }
     const published = await publicationService.getPublishedSchedule();
     if (!published) {
       return reply.code(404).send({
@@ -1135,7 +1205,7 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.get("/api/published-schedule/export.csv", async (request, reply) => {
-    if (!requireRole(request, reply, ["admin", "operator", "teacher", "student"])) {
+    if (!requireRole(request, reply, operationalReadRoles)) {
       return reply;
     }
     const context = getRequestAuthContext(request);
@@ -1152,7 +1222,7 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.get("/api/published-schedule/notifications", async (_request, reply) => {
-    const notifications = await publicationService.getNotifications();
+    const notifications = await publicationService.getPublicNotifications();
     if (!notifications) {
       return reply.code(404).send({
         error: "published_schedule_not_found",
@@ -1215,10 +1285,20 @@ export function createApp(options: AppOptions = {}) {
     if (!requireRole(request, reply, ["admin"])) {
       return reply;
     }
-    return publicationService.rollback();
+    const rollback = await publicationService.rollback();
+    if (rollback === "publication_conflict") {
+      return reply.code(409).send({
+        error: "published_schedule_publication_conflict",
+        message: "The publication state changed. Refresh the page and try again.",
+      });
+    }
+    return rollback;
   });
 
   app.get<{ Params: { id: string } }>("/api/schedule-runs/:id", async (request, reply) => {
+    if (!requireRole(request, reply, operationalReadRoles)) {
+      return reply;
+    }
     const response = await repository.getScheduleRun(request.params.id);
     if (!response) {
       return reply.code(404).send({

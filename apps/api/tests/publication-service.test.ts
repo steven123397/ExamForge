@@ -43,6 +43,9 @@ describe("publication service", () => {
     );
 
     const rolledBack = await service.rollback();
+    if (rolledBack === "publication_conflict") {
+      assert.fail("in-memory rollback must not conflict");
+    }
     assert.ok(rolledBack.previousRun);
     assert.equal((await service.getPublishedSchedule()), null);
     assert.deepEqual(

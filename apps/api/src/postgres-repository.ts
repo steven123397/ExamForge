@@ -1,4 +1,5 @@
 import {
+  authLoginAttempts,
   auditEvents,
   conflictRecords,
   constraintProfiles,
@@ -104,14 +105,25 @@ import {
   type AuthUserRecord,
   type CreateAuthSessionCommand,
   type CreateAuthUserCommand,
+  type LoginFailureLockResult,
+  type LoginFailurePolicy,
   type PlatformRepository,
   type PublishScheduleRunResult,
+  type RotateAuthUserPasswordCommand,
+  type RotateAuthUserPasswordResult,
   type ScheduleRunPersistenceContext,
   type ScheduleJobTransitionResult,
   type TransitionScheduleJobCommand,
 } from "./repository.js";
 
 const scheduleDraftLockNamespace = 20_260_711;
+
+class PublicationConflictError extends Error {
+  constructor() {
+    super("Schedule publication state changed.");
+    this.name = "PublicationConflictError";
+  }
+}
 
 type BatchRow = typeof examBatches.$inferSelect;
 type RunRow = typeof scheduleRuns.$inferSelect;
@@ -125,6 +137,7 @@ type ExamTaskRow = typeof examTasks.$inferSelect;
 type DraftRow = typeof scheduleDrafts.$inferSelect;
 type DraftChangeEventRow = typeof draftChangeEvents.$inferSelect;
 type UserRow = typeof users.$inferSelect;
+type LoginAttemptRow = typeof authLoginAttempts.$inferSelect;
 type ConstraintProfileRow = typeof constraintProfiles.$inferSelect;
 type ConstraintProfileVersionRow = typeof constraintProfileVersions.$inferSelect;
 
@@ -830,7 +843,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         .select()
         .from(scheduleRuns)
         .where(where)
-        .orderBy(desc(scheduleRuns.createdAt), desc(scheduleRuns.id))
+        .orderBy(desc(scheduleRuns.createdSequence))
         .limit(query.pageSize)
         .offset((query.page - 1) * query.pageSize),
       this.client.db
@@ -1347,13 +1360,15 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return detail;
   }
 
-  async publishScheduleDraft(id: string): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {
+  async publishScheduleDraft(
+    id: string,
+  ): Promise<ScheduleDraftPublishResponse | "conflict" | "publication_conflict" | "not_publishable" | null> {
     return this.withScheduleDraftLock(id, (repository) => repository.publishScheduleDraftUnlocked(id));
   }
 
   private async publishScheduleDraftUnlocked(
     id: string,
-  ): Promise<ScheduleDraftPublishResponse | "conflict" | "not_publishable" | null> {
+  ): Promise<ScheduleDraftPublishResponse | "conflict" | "publication_conflict" | "not_publishable" | null> {
     const existing = await this.getScheduleDraft(id);
     if (!existing) {
       return null;
@@ -1361,6 +1376,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     if (existing.draft.status === "published" || existing.draft.status === "discarded") {
       return "not_publishable";
     }
+    const expectedBatch = await this.getActiveBatch();
     const current = await this.validateScheduleDraftUnlocked(id);
     if (!current) {
       return null;
@@ -1371,7 +1387,6 @@ export class PostgresPlatformRepository implements PlatformRepository {
     if (current.conflicts.some((conflict) => conflict.severity === "error")) {
       return "conflict";
     }
-    const batch = await this.getActiveBatch();
     const runId = `run-${randomUUID()}`;
     const createdAt = new Date();
     const result = buildDraftScheduleResult(current);
@@ -1385,95 +1400,99 @@ export class PostgresPlatformRepository implements PlatformRepository {
       assignmentCount: current.assignments.length,
     };
 
-    const publishedDraft = await this.client.db.transaction(async (tx) => {
-      const strategy = await resolveDefaultConstraintProfile(tx);
-      const [claimedDraft] = await tx.update(scheduleDrafts)
-        .set({
-          status: "published",
-          updatedAt: createdAt,
-        })
-        .where(and(
-          eq(scheduleDrafts.id, id),
-          inArray(scheduleDrafts.status, ["editing", "validated", "blocked"]),
-        ))
-        .returning();
-      if (!claimedDraft) {
-        return null;
-      }
-      await tx.insert(scheduleRuns).values({
-        id: runId,
-        batchId: batch.id,
-        status: run.status,
-        score: run.score,
-        scoreBreakdown: result.score,
-        conflictCount: run.conflictCount,
-        assignmentCount: run.assignmentCount,
-        elapsedMs: run.elapsedMs,
-        statistics: result.statistics,
-        report: result.report ?? {},
-        constraintProfileVersionId: strategy.versionId,
-        constraintProfileSnapshot: strategy.snapshot,
-        schedulerVersion: "0.1.0",
-        scoringContractVersion: result.score.scoring_contract_version,
-        normalizedScore: result.score.normalized_score,
-        createdAt,
-      });
-      if (current.assignments.length > 0) {
-        const scheduledExamRows = current.assignments.map((assignment, index) => ({
-          id: `${runId}-exam-${index + 1}`,
-          runId,
-          examTaskId: assignment.exam_task_id,
-          roomId: assignment.room_id,
-          timeSlotId: assignment.time_slot_id,
-        }));
-        await tx.insert(scheduledExams).values(scheduledExamRows);
-        const invigilatorRows = scheduledExamRows.flatMap((row, index) => (
-          current.assignments[index].teacher_ids.map((teacherId, teacherIndex) => ({
-            scheduledExamId: row.id,
-            position: teacherIndex + 1,
-            teacherId,
-          }))
-        ));
-        if (invigilatorRows.length > 0) {
-          await tx.insert(scheduledExamInvigilators).values(invigilatorRows);
+    let publishedDraft: { batch: BatchRow; draft: DraftRow } | "not_publishable";
+    try {
+      publishedDraft = await this.client.db.transaction(async (tx) => {
+        const batch = await this.getActiveBatchForUpdate(tx);
+        if (this.hasPublicationConflict(expectedBatch, batch)) {
+          throw new PublicationConflictError();
         }
-      }
-      await tx.update(examBatches)
-        .set({
-          status: "published",
-          publishedRunId: runId,
-        })
-        .where(eq(examBatches.id, batch.id));
-      await tx.insert(auditEvents).values({
-        id: `audit-${randomUUID()}`,
-        ...this.auditActorValues("system"),
-        action: "schedule_draft.published",
-        entityType: "schedule_draft",
-        entityId: id,
-        payload: {
+        const strategy = await resolveDefaultConstraintProfile(tx);
+        const [claimedDraft] = await tx.update(scheduleDrafts)
+          .set({
+            status: "published",
+            updatedAt: createdAt,
+          })
+          .where(and(
+            eq(scheduleDrafts.id, id),
+            inArray(scheduleDrafts.status, ["editing", "validated", "blocked"]),
+          ))
+          .returning();
+        if (!claimedDraft) {
+          return "not_publishable" as const;
+        }
+        await tx.insert(scheduleRuns).values({
+          id: runId,
+          batchId: batch.id,
+          status: run.status,
+          score: run.score,
+          scoreBreakdown: result.score,
+          conflictCount: run.conflictCount,
+          assignmentCount: run.assignmentCount,
+          elapsedMs: run.elapsedMs,
+          statistics: result.statistics,
+          report: result.report ?? {},
+          constraintProfileVersionId: strategy.versionId,
+          constraintProfileSnapshot: strategy.snapshot,
+          schedulerVersion: "0.1.0",
+          scoringContractVersion: result.score.scoring_contract_version,
+          normalizedScore: result.score.normalized_score,
+          createdAt,
+        });
+        if (current.assignments.length > 0) {
+          const scheduledExamRows = current.assignments.map((assignment, index) => ({
+            id: `${runId}-exam-${index + 1}`,
+            runId,
+            examTaskId: assignment.exam_task_id,
+            roomId: assignment.room_id,
+            timeSlotId: assignment.time_slot_id,
+          }));
+          await tx.insert(scheduledExams).values(scheduledExamRows);
+          const invigilatorRows = scheduledExamRows.flatMap((row, index) => (
+            current.assignments[index].teacher_ids.map((teacherId, teacherIndex) => ({
+              scheduledExamId: row.id,
+              position: teacherIndex + 1,
+              teacherId,
+            }))
+          ));
+          if (invigilatorRows.length > 0) {
+            await tx.insert(scheduledExamInvigilators).values(invigilatorRows);
+          }
+        }
+        const [updatedBatch] = await tx.update(examBatches)
+          .set({
+            status: "published",
+            publishedRunId: runId,
+            publicationVersion: sql`${examBatches.publicationVersion} + 1`,
+          })
+          .where(and(
+            eq(examBatches.id, batch.id),
+            eq(examBatches.publicationVersion, expectedBatch.publicationVersion),
+          ))
+          .returning();
+        if (!updatedBatch) {
+          throw new PublicationConflictError();
+        }
+        await this.insertAuditEvent(tx, "schedule_draft.published", "schedule_draft", id, {
           runId,
           sourceRunId: current.draft.sourceRunId,
           score: current.draft.score,
-        },
+        });
+        return { batch: updatedBatch, draft: claimedDraft };
       });
-      return claimedDraft;
-    });
-    if (!publishedDraft) {
-      return "not_publishable";
+    } catch (error) {
+      if (error instanceof PublicationConflictError) {
+        return "publication_conflict";
+      }
+      throw error;
+    }
+    if (publishedDraft === "not_publishable") {
+      return publishedDraft;
     }
 
-    const updatedBatch = {
-      ...batch,
-      status: "published" as const,
-      publishedRunId: runId,
-    };
     return {
-      batch: this.toBatchSummary(updatedBatch),
-      draft: {
-        ...current.draft,
-        status: "published",
-        updatedAt: createdAt.toISOString(),
-      },
+      batch: this.toBatchSummary(publishedDraft.batch),
+      draft: this.toDraftSummary(publishedDraft.draft),
       run,
       result,
     };
@@ -1548,7 +1567,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         .select()
         .from(auditEvents)
         .where(where)
-        .orderBy(desc(auditEvents.createdAt), desc(auditEvents.id))
+        .orderBy(desc(auditEvents.createdSequence))
         .limit(pageSize)
         .offset((page - 1) * pageSize),
       this.client.db
@@ -1568,9 +1587,10 @@ export class PostgresPlatformRepository implements PlatformRepository {
   }
 
   async publishScheduleRun(id: string): Promise<PublishScheduleRunResult> {
-    const [response, referenceData] = await Promise.all([
+    const [response, referenceData, expectedBatch] = await Promise.all([
       this.getScheduleRun(id),
       this.getReferenceData(),
+      this.getActiveBatch(),
     ]);
     if (!response) {
       return null;
@@ -1578,24 +1598,38 @@ export class PostgresPlatformRepository implements PlatformRepository {
     if (!isScheduleResultPublishable(referenceData.scheduleInput, response.result)) {
       return "not_publishable";
     }
-    const batch = await this.getActiveBatch();
-    const [updatedBatch] = await this.client.db
-      .update(examBatches)
-      .set({
-        status: "published",
-        publishedRunId: id,
-      })
-      .where(eq(examBatches.id, batch.id))
-      .returning();
-
-    await this.recordAuditEvent("schedule_run.published", "schedule_run", id, {
-      batchId: batch.id,
-      score: response.run.score,
-      status: response.run.status,
+    const published = await this.client.db.transaction(async (tx) => {
+      const batch = await this.getActiveBatchForUpdate(tx);
+      if (this.hasPublicationConflict(expectedBatch, batch)) {
+        return "publication_conflict" as const;
+      }
+      const [updatedBatch] = await tx.update(examBatches)
+        .set({
+          status: "published",
+          publishedRunId: id,
+          publicationVersion: sql`${examBatches.publicationVersion} + 1`,
+        })
+        .where(and(
+          eq(examBatches.id, batch.id),
+          eq(examBatches.publicationVersion, expectedBatch.publicationVersion),
+        ))
+        .returning();
+      if (!updatedBatch) {
+        return "publication_conflict" as const;
+      }
+      await this.insertAuditEvent(tx, "schedule_run.published", "schedule_run", id, {
+        batchId: batch.id,
+        score: response.run.score,
+        status: response.run.status,
+      });
+      return updatedBatch;
     });
+    if (published === "publication_conflict") {
+      return published;
+    }
 
     return {
-      batch: this.toBatchSummary(updatedBatch),
+      batch: this.toBatchSummary(published),
       run: response.run,
       result: response.result,
     };
@@ -1614,28 +1648,43 @@ export class PostgresPlatformRepository implements PlatformRepository {
     } : null;
   }
 
-  async rollbackPublishedSchedule(): Promise<ScheduleRollbackResponse> {
-    const batch = await this.getActiveBatch();
-    const previousRun = batch.publishedRunId
-      ? (await this.getScheduleRun(batch.publishedRunId))?.run ?? null
-      : null;
-    const [updatedBatch] = await this.client.db
-      .update(examBatches)
-      .set({
-        status: "ready",
-        publishedRunId: null,
-      })
-      .where(eq(examBatches.id, batch.id))
-      .returning();
-
-    await this.recordAuditEvent("schedule_run.rollback", "exam_batch", batch.id, {
-      previousRunId: previousRun?.id ?? null,
+  async rollbackPublishedSchedule(): Promise<ScheduleRollbackResponse | "publication_conflict"> {
+    const expectedBatch = await this.getActiveBatch();
+    return this.client.db.transaction(async (tx) => {
+      const batch = await this.getActiveBatchForUpdate(tx);
+      if (this.hasPublicationConflict(expectedBatch, batch)) {
+        return "publication_conflict" as const;
+      }
+      let previousRun: ScheduleRunSummary | null = null;
+      if (batch.publishedRunId) {
+        const [run] = await tx.select()
+          .from(scheduleRuns)
+          .where(eq(scheduleRuns.id, batch.publishedRunId))
+          .limit(1);
+        previousRun = run ? this.toRunSummary(run) : null;
+      }
+      const [updatedBatch] = await tx.update(examBatches)
+        .set({
+          status: "ready",
+          publishedRunId: null,
+          publicationVersion: sql`${examBatches.publicationVersion} + 1`,
+        })
+        .where(and(
+          eq(examBatches.id, batch.id),
+          eq(examBatches.publicationVersion, expectedBatch.publicationVersion),
+        ))
+        .returning();
+      if (!updatedBatch) {
+        return "publication_conflict" as const;
+      }
+      await this.insertAuditEvent(tx, "schedule_run.rollback", "exam_batch", batch.id, {
+        previousRunId: previousRun?.id ?? null,
+      });
+      return {
+        batch: this.toBatchSummary(updatedBatch),
+        previousRun,
+      };
     });
-
-    return {
-      batch: this.toBatchSummary(updatedBatch),
-      previousRun,
-    };
   }
 
   async createScheduleJob(command: CreateScheduleJobCommand): Promise<CreateScheduleJobResult> {
@@ -1717,6 +1766,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         scryptR: command.password.r,
         scryptP: command.password.p,
         scryptKeyLength: command.password.keyLength,
+        credentialVersion: command.credentialVersion ?? 1,
       });
       if (command.roles.length > 0) {
         await tx.insert(userRoles).values(command.roles.map((role) => ({
@@ -1725,7 +1775,10 @@ export class PostgresPlatformRepository implements PlatformRepository {
         })));
       }
     });
-    return structuredClone(command);
+    return {
+      ...structuredClone(command),
+      credentialVersion: command.credentialVersion ?? 1,
+    };
   }
 
   async findAuthUserByUsername(username: string): Promise<AuthUserRecord | null> {
@@ -1737,18 +1790,29 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return user ? this.loadAuthUser(user) : null;
   }
 
-  async createAuthSession(command: CreateAuthSessionCommand): Promise<AuthSessionRecord> {
-    const [session] = await this.client.db.insert(sessions).values({
-      id: command.id,
-      userId: command.userId,
-      tokenDigest: command.tokenDigest,
-      createdAt: new Date(command.createdAt),
-      expiresAt: new Date(command.expiresAt),
-      lastSeenAt: new Date(command.createdAt),
-      userAgent: command.userAgent,
-      ipAddress: command.ipAddress,
-    }).returning();
-    return this.toAuthSession(session);
+  async createAuthSession(command: CreateAuthSessionCommand): Promise<AuthSessionRecord | null> {
+    return this.client.db.transaction(async (tx) => {
+      const [user] = await tx.select({ credentialVersion: users.credentialVersion })
+        .from(users)
+        .where(eq(users.id, command.userId))
+        .limit(1)
+        .for("update");
+      if (!user || user.credentialVersion !== command.credentialVersion) {
+        return null;
+      }
+      const [session] = await tx.insert(sessions).values({
+        id: command.id,
+        userId: command.userId,
+        tokenDigest: command.tokenDigest,
+        createdAt: new Date(command.createdAt),
+        expiresAt: new Date(command.expiresAt),
+        lastSeenAt: new Date(command.createdAt),
+        userAgent: command.userAgent,
+        ipAddress: command.ipAddress,
+        credentialVersion: command.credentialVersion,
+      }).returning();
+      return this.toAuthSession(session);
+    });
   }
 
   async findAuthSessionByTokenDigest(tokenDigest: string): Promise<AuthSessionWithUser | null> {
@@ -1783,6 +1847,114 @@ export class PostgresPlatformRepository implements PlatformRepository {
       isNull(sessions.revokedAt),
     )).returning({ id: sessions.id });
     return rows.length > 0;
+  }
+
+  async rotateAuthUserPassword(
+    command: RotateAuthUserPasswordCommand,
+  ): Promise<RotateAuthUserPasswordResult | null> {
+    const rotatedAt = new Date(command.rotatedAt);
+    return this.client.db.transaction(async (tx) => {
+      const [user] = await tx.select({
+        id: users.id,
+        credentialVersion: users.credentialVersion,
+      }).from(users)
+        .where(eq(users.id, command.userId))
+        .limit(1)
+        .for("update");
+      if (!user) {
+        return null;
+      }
+
+      const credentialVersion = user.credentialVersion + 1;
+      await tx.update(users).set({
+        passwordHash: command.password.hash,
+        passwordSalt: command.password.salt,
+        scryptN: command.password.n,
+        scryptR: command.password.r,
+        scryptP: command.password.p,
+        scryptKeyLength: command.password.keyLength,
+        credentialVersion,
+        updatedAt: rotatedAt,
+      }).where(eq(users.id, user.id));
+      const revokedSessions = await tx.update(sessions).set({
+        revokedAt: rotatedAt,
+      }).where(and(
+        eq(sessions.userId, user.id),
+        isNull(sessions.revokedAt),
+      )).returning({ id: sessions.id });
+      await this.insertAuditEvent(tx, "auth.password_rotated", "auth_user", user.id, {
+        credentialVersion,
+        revokedSessionCount: revokedSessions.length,
+      }, command.actor);
+      return {
+        credentialVersion,
+        revokedSessionCount: revokedSessions.length,
+      };
+    });
+  }
+
+  async getLoginFailureLock(
+    keyDigest: string,
+    attemptedAt: string,
+  ): Promise<LoginFailureLockResult> {
+    const [attempt] = await this.client.db.select()
+      .from(authLoginAttempts)
+      .where(eq(authLoginAttempts.keyDigest, keyDigest))
+      .limit(1);
+    return toLoginFailureLockResult(attempt ?? null, new Date(attemptedAt));
+  }
+
+  async recordLoginFailure(
+    keyDigest: string,
+    attemptedAt: string,
+    policy: LoginFailurePolicy,
+  ): Promise<LoginFailureLockResult> {
+    const now = new Date(attemptedAt);
+    return this.client.db.transaction(async (tx) => {
+      await tx.insert(authLoginAttempts).values({
+        keyDigest,
+        failureCount: 0,
+        windowStartedAt: now,
+        lockedUntil: null,
+        updatedAt: now,
+      }).onConflictDoNothing();
+      const [current] = await tx.select()
+        .from(authLoginAttempts)
+        .where(eq(authLoginAttempts.keyDigest, keyDigest))
+        .limit(1)
+        .for("update");
+      if (!current) {
+        throw new Error("Login failure state could not be loaded.");
+      }
+
+      const currentLock = toLoginFailureLockResult(current, now);
+      if (currentLock.locked) {
+        return currentLock;
+      }
+
+      const windowExpired = now.getTime() - current.windowStartedAt.getTime()
+        >= policy.failureWindowMs;
+      const failureCount = windowExpired ? 1 : current.failureCount + 1;
+      const newlyLocked = failureCount >= policy.maxFailures;
+      const lockedUntil = newlyLocked
+        ? new Date(now.getTime() + policy.lockDurationMs)
+        : null;
+      const [updated] = await tx.update(authLoginAttempts).set({
+        failureCount,
+        windowStartedAt: windowExpired ? now : current.windowStartedAt,
+        lockedUntil,
+        updatedAt: now,
+      }).where(eq(authLoginAttempts.keyDigest, keyDigest)).returning();
+      if (!updated) {
+        throw new Error("Login failure state could not be updated.");
+      }
+      return toLoginFailureLockResult(updated, now, newlyLocked);
+    });
+  }
+
+  async clearLoginFailures(keyDigest: string): Promise<void> {
+    await this.client.db.delete(authLoginAttempts)
+      .where(eq(authLoginAttempts.keyDigest, keyDigest));
   }
 
   async getAudienceScope(userId: string): Promise<AudienceScope | "invalid" | null> {
@@ -1854,12 +2026,32 @@ export class PostgresPlatformRepository implements PlatformRepository {
     return batch;
   }
 
+  private async getActiveBatchForUpdate(db: ExamForgeDatabase): Promise<BatchRow> {
+    const [batch] = await db
+      .select()
+      .from(examBatches)
+      .orderBy(desc(examBatches.createdAt))
+      .limit(1)
+      .for("update");
+
+    if (!batch) {
+      throw new Error("No exam batch found. Run the database seed script first.");
+    }
+
+    return batch;
+  }
+
+  private hasPublicationConflict(expectedBatch: BatchRow, currentBatch: BatchRow) {
+    return expectedBatch.id !== currentBatch.id
+      || expectedBatch.publicationVersion !== currentBatch.publicationVersion;
+  }
+
   private async getLatestRunSummary(batchId: string): Promise<ScheduleRunSummary | null> {
     const [run] = await this.client.db
       .select()
       .from(scheduleRuns)
       .where(eq(scheduleRuns.batchId, batchId))
-      .orderBy(desc(scheduleRuns.createdAt))
+      .orderBy(desc(scheduleRuns.createdSequence))
       .limit(1);
 
     return run ? this.toRunSummary(run) : null;
@@ -2241,6 +2433,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         p: user.scryptP,
         keyLength: user.scryptKeyLength,
       },
+      credentialVersion: user.credentialVersion,
     };
   }
 
@@ -2255,6 +2448,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       revokedAt: session.revokedAt?.toISOString() ?? null,
       userAgent: session.userAgent,
       ipAddress: session.ipAddress,
+      credentialVersion: session.credentialVersion,
     };
   }
 
@@ -2281,7 +2475,18 @@ export class PostgresPlatformRepository implements PlatformRepository {
     payload: Record<string, unknown>,
     actor = "system",
   ) {
-    await this.client.db.insert(auditEvents).values({
+    await this.insertAuditEvent(this.client.db, action, entityType, entityId, payload, actor);
+  }
+
+  private async insertAuditEvent(
+    db: ExamForgeDatabase,
+    action: string,
+    entityType: string,
+    entityId: string,
+    payload: Record<string, unknown>,
+    actor = "system",
+  ) {
+    await db.insert(auditEvents).values({
       id: `audit-${randomUUID()}`,
       ...this.auditActorValues(actor),
       action,
@@ -2322,6 +2527,22 @@ function groupRelationRows<T, K extends keyof T, V extends keyof T>(
     }
   }
   return grouped;
+}
+
+function toLoginFailureLockResult(
+  record: LoginAttemptRow | null,
+  now: Date,
+  newlyLocked = false,
+): LoginFailureLockResult {
+  const remainingMs = record?.lockedUntil
+    ? record.lockedUntil.getTime() - now.getTime()
+    : 0;
+  return {
+    locked: remainingMs > 0,
+    retryAfterSeconds: remainingMs > 0 ? Math.max(1, Math.ceil(remainingMs / 1000)) : 0,
+    failureCount: record?.failureCount ?? 0,
+    newlyLocked,
+  };
 }
 
 function omitReferenceId(record: ReferenceRecord): Partial<ReferenceRecord> {

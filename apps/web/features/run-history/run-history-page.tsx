@@ -50,7 +50,7 @@ export function RunHistoryPage() {
     queryKey: queryKeys.publishedSchedule,
     queryFn: async () => {
       try {
-        return await apiClient.getPublishedSchedule();
+        return await apiClient.getOperationalPublishedSchedule();
       } catch (error) {
         if (error instanceof ApiClientError && error.status === 404) {
           return null;

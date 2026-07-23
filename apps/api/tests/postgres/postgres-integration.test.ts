@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import {
+  authLoginAttempts,
   auditEvents,
   conflictRecords,
   createDbClient,
@@ -23,10 +24,12 @@ import {
   type ExamForgeDbClient,
 } from "@examforge/db";
 import type { ScheduleInput, ScheduleResult } from "@examforge/shared";
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import { createApp } from "../../src/app.js";
+import { AccountRotationService } from "../../src/auth/account-rotation-service.js";
+import { AuthService } from "../../src/auth/auth-service.js";
 import { PostgresPlatformRepository } from "../../src/postgres-repository.js";
-import { hashSessionToken } from "../../src/auth/security.js";
+import { hashLoginAttemptKey, hashSessionToken } from "../../src/auth/security.js";
 import type { SchedulerClient, SchedulerSolveOptions } from "../../src/scheduler-client.js";
 import {
   buildCompleteScheduleResult,
@@ -84,7 +87,7 @@ describe("PostgreSQL platform integration", () => {
     const dashboardResponse = await app.inject({
       method: "GET",
       url: "/api/dashboard",
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(dashboardResponse.statusCode, 200);
     assert.equal(dashboardResponse.json().metrics.examTaskCount, 6);
@@ -137,7 +140,7 @@ describe("PostgreSQL platform integration", () => {
     const readResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-runs/${created.run.id}`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(readResponse.statusCode, 200);
     assert.equal(readResponse.json().result.assignments.length, 6);
@@ -155,6 +158,40 @@ describe("PostgreSQL platform integration", () => {
     );
     assert.equal(filteredAudit.events[0]?.actorUserId, "user-operator");
     assert.deepEqual(filteredAudit.events[0]?.actorRoles, ["operator"]);
+
+    await app.close();
+    client = null;
+  });
+
+  it("denies teacher and student PostgreSQL sessions every operational read", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+    const operationalPaths = [
+      "/api/dashboard",
+      "/api/reference-data",
+      "/api/schedule-runs",
+      "/api/schedule-runs/missing-run",
+      "/api/schedule-runs/compare?baseId=missing-a&targetId=missing-b",
+      "/api/schedule-drafts",
+      "/api/schedule-drafts/missing-draft",
+      "/api/schedule-drafts/missing-draft/compare",
+      "/api/schedule-drafts/missing-draft/assignments/missing-exam/suggestions",
+      "/api/audit-events",
+      "/api/published-schedule/operations",
+      "/api/published-schedule/export.csv",
+    ];
+
+    for (const [role, headers] of [
+      ["teacher", testAuthHeaders.teacher],
+      ["student", viewerHeaders],
+    ] as const) {
+      for (const url of operationalPaths) {
+        const response = await app.inject({ method: "GET", url, headers });
+        assert.equal(response.statusCode, 403, `${url} must reject ${role}`);
+        assert.equal(response.json().error, "permission_denied");
+      }
+    }
 
     await app.close();
     client = null;
@@ -216,6 +253,7 @@ describe("PostgreSQL platform integration", () => {
       expiresAt: "2020-01-02T00:00:00.000Z",
       userAgent: null,
       ipAddress: null,
+      credentialVersion: 1,
     });
     const expired = await app.inject({
       method: "GET",
@@ -239,6 +277,62 @@ describe("PostgreSQL platform integration", () => {
 
     await app.close();
     client = null;
+  });
+
+  it("shares login failure locks across PostgreSQL API instances and records one desensitized lock audit", async () => {
+    const firstClient = requireClient();
+    const secondClient = createDbClient(testDatabaseUrl);
+    const firstApp = createApp({
+      repository: new PostgresPlatformRepository(firstClient),
+      scheduler: new PostgresDraftScheduler(),
+    });
+    const secondApp = createApp({
+      repository: new PostgresPlatformRepository(secondClient),
+      scheduler: new PostgresDraftScheduler(),
+    });
+    const source = "203.0.113.31";
+    const login = (app: ReturnType<typeof createApp>, password: string) => app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { origin: "http://localhost:3000" },
+      remoteAddress: source,
+      payload: { username: "operator", password },
+    });
+
+    try {
+      const failures = await Promise.all(Array.from({ length: 5 }, (_, index) => (
+        login(index % 2 === 0 ? firstApp : secondApp, "wrong-password")
+      )));
+      assert.equal(failures.filter((response) => response.statusCode === 401).length, 4);
+      assert.equal(failures.filter((response) => response.statusCode === 429).length, 1);
+
+      const correctPassword = await login(secondApp, "operator-password");
+      assert.equal(correctPassword.statusCode, 429);
+      assert.ok(Number(correctPassword.headers["retry-after"]) > 0);
+
+      const keyDigest = hashLoginAttemptKey(source, "operator");
+      const [attempt] = await firstClient.db.select()
+        .from(authLoginAttempts)
+        .where(eq(authLoginAttempts.keyDigest, keyDigest));
+      assert.equal(attempt?.failureCount, 5);
+      assert.ok(attempt?.lockedUntil);
+
+      const audits = await firstClient.db.select().from(auditEvents)
+        .where(eq(auditEvents.action, "auth.login_temporarily_locked"));
+      assert.equal(audits.length, 1);
+      assert.equal(audits[0]?.actor, "system");
+      assert.equal(audits[0]?.entityId, keyDigest);
+      assert.deepEqual(audits[0]?.payload, {
+        failureCount: 5,
+        retryAfterSeconds: 900,
+      });
+      assert.equal(JSON.stringify(audits[0]).includes("wrong-password"), false);
+      assert.equal(JSON.stringify(audits[0]).includes(source), false);
+    } finally {
+      await firstApp.close();
+      await secondApp.close();
+      client = null;
+    }
   });
 
   it("filters and paginates PostgreSQL schedule runs and audit events", async () => {
@@ -283,9 +377,7 @@ describe("PostgreSQL platform integration", () => {
     assert.equal(secondPage.runs.length, 1);
     const expectedFeasible = created
       .filter((run) => run.status === "feasible")
-      .sort((left, right) => (
-        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
-      ))
+      .reverse()
       .map((run) => run.id);
     assert.deepEqual(
       [...firstPage.runs, ...secondPage.runs].map((run) => run.id),
@@ -324,6 +416,167 @@ describe("PostgreSQL platform integration", () => {
     client = null;
   });
 
+  it("keeps PostgreSQL run, audit, and dashboard order when timestamps are equal", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const referenceData = await repository.getReferenceData();
+    const profiles = await repository.listConstraintProfiles(true);
+    const profile = profiles.find((candidate) => candidate.isDefault) ?? profiles[0];
+    const version = profile?.versions.find((candidate) => candidate.id === profile.currentVersionId);
+    assert.ok(profile && version);
+
+    const createdRunIds: string[] = [];
+    mock.timers.enable({
+      apis: ["Date"],
+      now: new Date("2026-07-23T12:00:00.000Z"),
+    });
+    try {
+      for (let index = 0; index < 10; index += 1) {
+        const response = await repository.createScheduleRun(buildScheduleResult(referenceData.scheduleInput), {
+          constraintProfileVersionId: version.id,
+          constraintProfileSnapshot: {
+            schemaVersion: 1,
+            profileId: profile.id,
+            profileVersionId: version.id,
+            versionNumber: version.versionNumber,
+            digest: version.digest,
+            config: version.config,
+          },
+          schedulerVersion: `postgres-same-timestamp-${index}`,
+        });
+        createdRunIds.push(response.run.id);
+      }
+    } finally {
+      mock.timers.reset();
+    }
+    await dbClient.pool.query(`
+      UPDATE audit_events
+      SET created_at = '2026-07-23T12:00:00.000Z'
+      WHERE action = 'schedule_run.created'
+    `);
+
+    const expected = [...createdRunIds].reverse();
+    const [firstRunPage, secondRunPage] = await Promise.all([
+      repository.listScheduleRuns({ page: 1, pageSize: 5 }),
+      repository.listScheduleRuns({ page: 2, pageSize: 5 }),
+    ]);
+    assert.deepEqual(
+      [...firstRunPage.runs, ...secondRunPage.runs].map((run) => run.id),
+      expected,
+    );
+    assert.equal((await repository.getDashboard()).latestRun?.id, expected[0]);
+
+    const [firstAuditPage, secondAuditPage] = await Promise.all([
+      repository.listAuditEvents({ action: "schedule_run.created", page: 1, pageSize: 5 }),
+      repository.listAuditEvents({ action: "schedule_run.created", page: 2, pageSize: 5 }),
+    ]);
+    assert.deepEqual(
+      [...firstAuditPage.events, ...secondAuditPage.events].map((event) => event.entityId),
+      expected,
+    );
+
+    await repository.close();
+    client = null;
+  });
+
+  it("rotates PostgreSQL credentials atomically, revokes all sessions, and rejects a stale login version", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const authService = new AuthService(repository);
+    const metadata = {
+      userAgent: "ExamForge PostgreSQL rotation test",
+      ipAddress: "203.0.113.39",
+    };
+    const first = await authService.login("operator", "operator-password", metadata);
+    const second = await authService.login("operator", "operator-password", metadata);
+    assert.equal(first.status, "authenticated");
+    assert.equal(second.status, "authenticated");
+    const beforeRotation = await repository.findAuthUserByUsername("operator");
+    assert.ok(beforeRotation);
+
+    const newPassword = "rotated-postgres-operator-password-20260723";
+    const rotation = await new AccountRotationService(
+      repository,
+      () => new Date("2026-07-23T08:30:00.000Z"),
+    ).rotate({
+      username: "operator",
+      password: newPassword,
+      actor: "maintenance:ticket-20260723",
+    });
+    assert.deepEqual(rotation, {
+      status: "rotated",
+      credentialVersion: 2,
+      revokedSessionCount: 3,
+    });
+
+    const staleSession = await repository.createAuthSession({
+      id: "stale-operator-session",
+      userId: beforeRotation.id,
+      tokenDigest: hashSessionToken("stale-operator-session"),
+      createdAt: "2026-07-23T08:30:01.000Z",
+      expiresAt: "2026-07-23T20:30:01.000Z",
+      userAgent: "stale credential test",
+      ipAddress: "203.0.113.39",
+      credentialVersion: beforeRotation.credentialVersion,
+    });
+    assert.equal(staleSession, null);
+    assert.equal(await authService.authenticate(first.token), null);
+    assert.equal(await authService.authenticate(second.token), null);
+    assert.deepEqual(
+      await authService.login("operator", "operator-password", metadata),
+      { status: "invalid_credentials" },
+    );
+    assert.equal((await authService.login("operator", newPassword, metadata)).status, "authenticated");
+
+    const [sessionRows, rotationAudits] = await Promise.all([
+      dbClient.db.select().from(sessions).where(eq(sessions.userId, beforeRotation.id)),
+      dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "auth.password_rotated")),
+    ]);
+    assert.equal(sessionRows.filter((session) => session.revokedAt !== null).length, 3);
+    assert.equal(sessionRows.filter((session) => session.credentialVersion === 2).length, 1);
+    assert.equal(rotationAudits.length, 1);
+    assert.equal(rotationAudits[0]?.actor, "maintenance:ticket-20260723");
+    assert.equal(rotationAudits[0]?.entityId, beforeRotation.id);
+    assert.deepEqual(rotationAudits[0]?.payload, {
+      credentialVersion: 2,
+      revokedSessionCount: 3,
+    });
+    assert.equal(JSON.stringify(rotationAudits[0]).includes("operator-password"), false);
+    assert.equal(JSON.stringify(rotationAudits[0]).includes(newPassword), false);
+  });
+
+  it("rolls back a PostgreSQL rotation when its audit cannot be written", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const authService = new AuthService(repository);
+    const metadata = {
+      userAgent: "ExamForge PostgreSQL atomicity test",
+      ipAddress: "203.0.113.40",
+    };
+    const original = await authService.login("operator", "operator-password", metadata);
+    assert.equal(original.status, "authenticated");
+    await dbClient.db.execute(sql`DROP TABLE audit_events`);
+
+    await assert.rejects(
+      new AccountRotationService(repository).rotate({
+        username: "operator",
+        password: "rolled-back-postgres-password-20260723",
+        actor: "maintenance:ticket-20260723",
+      }),
+    );
+
+    assert.notEqual(await authService.authenticate(original.token), null);
+    assert.equal((await authService.login("operator", "operator-password", metadata)).status, "authenticated");
+    assert.deepEqual(
+      await authService.login(
+        "operator",
+        "rolled-back-postgres-password-20260723",
+        metadata,
+      ),
+      { status: "invalid_credentials" },
+    );
+  });
+
   it("persists current audience scopes, self-service audits, and restart reads", async () => {
     const dbClient = requireClient();
     const repository = new PostgresPlatformRepository(dbClient);
@@ -334,11 +587,73 @@ describe("PostgreSQL platform integration", () => {
       url: "/api/schedule-runs",
       headers: operatorHeaders,
     })).json();
-    await app.inject({
+    const publishResponse = await app.inject({
       method: "POST",
       url: `/api/schedule-runs/${run.run.id}/publish`,
       headers: adminHeaders,
     });
+    assert.equal(publishResponse.statusCode, 200);
+
+    const publicSchedule = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule",
+    });
+    assert.equal(publicSchedule.statusCode, 200);
+    assert.deepEqual(Object.keys(publicSchedule.json()).sort(), [
+      "batch",
+      "contractVersion",
+      "entries",
+    ]);
+    const publicSerialized = JSON.stringify(publicSchedule.json());
+    for (const field of [
+      "run",
+      "result",
+      "score",
+      "conflicts",
+      "diagnostics",
+      "report",
+      "statistics",
+      "exam_task_id",
+      "room_id",
+      "time_slot_id",
+      "teacher_ids",
+    ]) {
+      assert.equal(publicSerialized.includes(`\"${field}\"`), false, `${field} must not be public`);
+    }
+
+    const publicNotifications = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/notifications",
+    });
+    assert.equal(publicNotifications.statusCode, 200);
+    assert.deepEqual(Object.keys(publicNotifications.json()).sort(), [
+      "batch",
+      "contractVersion",
+      "notifications",
+    ]);
+    assert.equal(JSON.stringify(publicNotifications.json()).includes("\"run\""), false);
+
+    const anonymousOperational = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/operations",
+    });
+    assert.equal(anonymousOperational.statusCode, 401);
+    for (const headers of [testAuthHeaders.teacher, viewerHeaders]) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/published-schedule/operations",
+        headers,
+      });
+      assert.equal(response.statusCode, 403);
+    }
+    const operationalSchedule = await app.inject({
+      method: "GET",
+      url: "/api/published-schedule/operations",
+      headers: operatorHeaders,
+    });
+    assert.equal(operationalSchedule.statusCode, 200);
+    assert.equal(operationalSchedule.json().run.id, run.run.id);
+    assert.ok(operationalSchedule.json().result.score.total_score > 0);
 
     const teacherAudience = await app.inject({
       method: "GET",
@@ -492,7 +807,7 @@ describe("PostgreSQL platform integration", () => {
     const runDetailResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-runs/${run.run.id}`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(runDetailResponse.statusCode, 200);
     const runAssignment = runDetailResponse.json().result.assignments.find(
@@ -515,7 +830,7 @@ describe("PostgreSQL platform integration", () => {
     const draftDetailResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(draftDetailResponse.statusCode, 200);
     const draftAssignment = draftDetailResponse.json().assignments.find(
@@ -526,7 +841,7 @@ describe("PostgreSQL platform integration", () => {
     const comparisonResponse = await app.inject({
       method: "GET",
       url: `/api/schedule-drafts/${draft.draft.id}/compare`,
-      headers: viewerHeaders,
+      headers: operatorHeaders,
     });
     assert.equal(comparisonResponse.statusCode, 200);
     assert.equal(comparisonResponse.json().summary.changedFromSource, 0);
@@ -737,6 +1052,235 @@ describe("PostgreSQL platform integration", () => {
 
     const draftPublishResult = await repository.publishScheduleDraft(draft.draft.id);
     assert.equal(draftPublishResult, "conflict");
+  });
+
+  it("serializes concurrent PostgreSQL run publications with one successful audit", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+    const referenceData = await repository.getReferenceData();
+    const [firstRun, secondRun] = await Promise.all([
+      repository.createScheduleRun(buildScheduleResult(referenceData.scheduleInput)),
+      repository.createScheduleRun(buildScheduleResult(referenceData.scheduleInput)),
+    ]);
+
+    const responses = await runBatchPublicationOperationsInOrder(
+      dbClient,
+      referenceData.batch.id,
+      () => app.inject({
+        method: "POST",
+        url: `/api/schedule-runs/${firstRun.run.id}/publish`,
+        headers: adminHeaders,
+      }),
+      () => app.inject({
+        method: "POST",
+        url: `/api/schedule-runs/${secondRun.run.id}/publish`,
+        headers: adminHeaders,
+      }),
+    );
+
+    assert.deepEqual(responses.map((response) => response.statusCode).sort(), [200, 409]);
+    const conflictResponse = responses.find((response) => response.statusCode === 409);
+    assert.equal(conflictResponse?.json().error, "schedule_run_publication_conflict");
+
+    const published = await repository.getPublishedSchedule();
+    assert.ok(published);
+    assert.ok([firstRun.run.id, secondRun.run.id].includes(published.run.id));
+
+    const audits = await repository.listAuditEvents({ entityType: "schedule_run", limit: 20 });
+    const publishAudits = audits.events.filter((event) => event.action === "schedule_run.published");
+    assert.equal(publishAudits.length, 1);
+    assert.equal(publishAudits[0]?.entityId, published.run.id);
+
+    await app.close();
+    client = null;
+  });
+
+  it("serializes concurrent PostgreSQL rollback and run publication", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+    const referenceData = await repository.getReferenceData();
+    const [initialRun, replacementRun] = await Promise.all([
+      repository.createScheduleRun(buildScheduleResult(referenceData.scheduleInput)),
+      repository.createScheduleRun(buildScheduleResult(referenceData.scheduleInput)),
+    ]);
+    const initialPublication = await repository.publishScheduleRun(initialRun.run.id);
+    assert.ok(initialPublication && initialPublication !== "not_publishable");
+
+    const [rollbackResponse, publishResponse] = await runBatchPublicationOperationsInOrder(
+      dbClient,
+      referenceData.batch.id,
+      () => app.inject({
+        method: "POST",
+        url: "/api/published-schedule/rollback",
+        headers: adminHeaders,
+      }),
+      () => app.inject({
+        method: "POST",
+        url: `/api/schedule-runs/${replacementRun.run.id}/publish`,
+        headers: adminHeaders,
+      }),
+    );
+
+    assert.deepEqual([rollbackResponse.statusCode, publishResponse.statusCode].sort(), [200, 409]);
+    if (rollbackResponse.statusCode === 409) {
+      assert.equal(rollbackResponse.json().error, "published_schedule_publication_conflict");
+    }
+    if (publishResponse.statusCode === 409) {
+      assert.equal(publishResponse.json().error, "schedule_run_publication_conflict");
+    }
+
+    const published = await repository.getPublishedSchedule();
+    if (rollbackResponse.statusCode === 200) {
+      assert.equal(published, null);
+    } else {
+      assert.equal(published?.run.id, replacementRun.run.id);
+    }
+
+    const audits = await repository.listAuditEvents({ limit: 50 });
+    assert.equal(
+      audits.events.filter((event) => (
+        event.action === "schedule_run.rollback" && event.entityId === referenceData.batch.id
+      )).length,
+      rollbackResponse.statusCode === 200 ? 1 : 0,
+    );
+    assert.equal(
+      audits.events.filter((event) => (
+        event.action === "schedule_run.published" && event.entityId === replacementRun.run.id
+      )).length,
+      publishResponse.statusCode === 200 ? 1 : 0,
+    );
+
+    await app.close();
+    client = null;
+  });
+
+  it("serializes concurrent PostgreSQL draft and run publication", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+    const referenceData = await repository.getReferenceData();
+    const [sourceRun, competingRun] = await Promise.all([
+      repository.createScheduleRun(buildScheduleResult(referenceData.scheduleInput)),
+      repository.createScheduleRun(buildScheduleResult(referenceData.scheduleInput)),
+    ]);
+    const draft = await repository.createScheduleDraftFromRun(sourceRun.run.id);
+    assert.ok(draft);
+
+    const [draftResponse, runResponse] = await runBatchPublicationOperationsInOrder(
+      dbClient,
+      referenceData.batch.id,
+      () => app.inject({
+        method: "POST",
+        url: `/api/schedule-drafts/${draft.draft.id}/publish`,
+        headers: adminHeaders,
+      }),
+      () => app.inject({
+        method: "POST",
+        url: `/api/schedule-runs/${competingRun.run.id}/publish`,
+        headers: adminHeaders,
+      }),
+    );
+
+    assert.deepEqual([draftResponse.statusCode, runResponse.statusCode].sort(), [200, 409]);
+    if (draftResponse.statusCode === 409) {
+      assert.equal(draftResponse.json().error, "schedule_draft_publication_conflict");
+    }
+    if (runResponse.statusCode === 409) {
+      assert.equal(runResponse.json().error, "schedule_run_publication_conflict");
+    }
+
+    const audits = await repository.listAuditEvents({ limit: 50 });
+    assert.equal(
+      audits.events.filter((event) => (
+        event.action === "schedule_draft.published" && event.entityId === draft.draft.id
+      )).length,
+      draftResponse.statusCode === 200 ? 1 : 0,
+    );
+    assert.equal(
+      audits.events.filter((event) => (
+        event.action === "schedule_run.published" && event.entityId === competingRun.run.id
+      )).length,
+      runResponse.statusCode === 200 ? 1 : 0,
+    );
+
+    await app.close();
+    client = null;
+  });
+
+  it("rolls back the PostgreSQL publication pointer when the success audit insert fails", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const referenceData = await repository.getReferenceData();
+    const run = await repository.createScheduleRun(buildScheduleResult(referenceData.scheduleInput));
+
+    await dbClient.pool.query(`
+      CREATE FUNCTION reject_schedule_run_publish_audit() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.action = 'schedule_run.published' THEN
+          RAISE EXCEPTION 'forced schedule run publication audit failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER reject_schedule_run_publish_audit_trigger
+      BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION reject_schedule_run_publish_audit();
+    `);
+
+    await assert.rejects(
+      repository.publishScheduleRun(run.run.id),
+      (error: unknown) => hasCauseMessage(error, /forced schedule run publication audit failure/),
+    );
+    assert.equal(await repository.getPublishedSchedule(), null);
+    const audits = await repository.listAuditEvents({
+      entityType: "schedule_run",
+      entityId: run.run.id,
+      limit: 20,
+    });
+    assert.equal(
+      audits.events.filter((event) => event.action === "schedule_run.published").length,
+      0,
+    );
+  });
+
+  it("rolls back the PostgreSQL rollback pointer when the rollback audit insert fails", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const referenceData = await repository.getReferenceData();
+    const run = await repository.createScheduleRun(buildScheduleResult(referenceData.scheduleInput));
+    const published = await repository.publishScheduleRun(run.run.id);
+    assert.ok(published && published !== "not_publishable");
+
+    await dbClient.pool.query(`
+      CREATE FUNCTION reject_schedule_run_rollback_audit() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.action = 'schedule_run.rollback' THEN
+          RAISE EXCEPTION 'forced schedule run rollback audit failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER reject_schedule_run_rollback_audit_trigger
+      BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION reject_schedule_run_rollback_audit();
+    `);
+
+    await assert.rejects(
+      repository.rollbackPublishedSchedule(),
+      (error: unknown) => hasCauseMessage(error, /forced schedule run rollback audit failure/),
+    );
+    assert.equal((await repository.getPublishedSchedule())?.run.id, run.run.id);
+    const audits = await repository.listAuditEvents({
+      entityType: "exam_batch",
+      entityId: referenceData.batch.id,
+      limit: 20,
+    });
+    assert.equal(
+      audits.events.filter((event) => event.action === "schedule_run.rollback").length,
+      0,
+    );
   });
 
   it("allows only one concurrent PostgreSQL draft publication", async () => {
@@ -1072,9 +1616,7 @@ describe("PostgreSQL platform integration", () => {
     assert.equal(secondPage.json().jobs.length, 1);
     const expectedIds = created
       .slice()
-      .sort((left, right) => (
-        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
-      ))
+      .reverse()
       .map((job) => job.id);
     assert.deepEqual([
       ...firstPage.json().jobs,
@@ -1117,6 +1659,43 @@ describe("PostgreSQL platform integration", () => {
     assert.deepEqual(emptyPage.json().jobs, []);
     assert.equal(emptyPage.json().total, 3);
     assert.equal(emptyPage.json().page, 99);
+
+    await app.close();
+    client = null;
+  });
+
+  it("keeps PostgreSQL schedule-job pagination in creation order when timestamps are equal", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+    const createdJobIds: string[] = [];
+    mock.timers.enable({
+      apis: ["Date"],
+      now: new Date("2026-07-23T12:00:00.000Z"),
+    });
+    try {
+      for (let index = 0; index < 10; index += 1) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/schedule-jobs",
+          headers: { ...operatorHeaders, "idempotency-key": `postgres-same-timestamp-job-${index}` },
+        });
+        assert.equal(response.statusCode, 202);
+        createdJobIds.push(response.json().job.id);
+      }
+    } finally {
+      mock.timers.reset();
+    }
+
+    const expected = [...createdJobIds].reverse();
+    const [firstPage, secondPage] = await Promise.all([
+      repository.listScheduleJobs({ page: 1, pageSize: 5 }),
+      repository.listScheduleJobs({ page: 2, pageSize: 5 }),
+    ]);
+    assert.deepEqual(
+      [...firstPage.jobs, ...secondPage.jobs].map((job) => job.id),
+      expected,
+    );
 
     await app.close();
     client = null;
@@ -1564,6 +2143,60 @@ async function closeClient() {
   } finally {
     client = null;
   }
+}
+
+function hasCauseMessage(error: unknown, pattern: RegExp) {
+  const cause = error instanceof Error
+    ? (error as Error & { cause?: unknown }).cause
+    : undefined;
+  return cause instanceof Error && pattern.test(cause.message);
+}
+
+async function runBatchPublicationOperationsInOrder<T, U>(
+  dbClient: ExamForgeDbClient,
+  batchId: string,
+  first: () => Promise<T>,
+  second: () => Promise<U>,
+) {
+  const blocker = await dbClient.pool.connect();
+  let released = false;
+  try {
+    await blocker.query("BEGIN");
+    await blocker.query("SELECT id FROM exam_batches WHERE id = $1 FOR UPDATE", [batchId]);
+    const firstResult = first();
+    await waitForBatchPublicationLockWaiters(dbClient, 1);
+    const secondResult = second();
+    await waitForBatchPublicationLockWaiters(dbClient, 2);
+    await blocker.query("COMMIT");
+    released = true;
+    return await Promise.all([firstResult, secondResult] as const);
+  } finally {
+    if (!released) {
+      await blocker.query("ROLLBACK");
+    }
+    blocker.release();
+  }
+}
+
+async function waitForBatchPublicationLockWaiters(
+  dbClient: ExamForgeDbClient,
+  expected: number,
+) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const result = await dbClient.pool.query<{ count: string }>(`
+      SELECT count(*) AS count
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND wait_event_type = 'Lock'
+        AND query LIKE '%exam_batches%'
+    `);
+    if (Number(result.rows[0]?.count ?? 0) >= expected) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${expected} PostgreSQL batch publication lock waiter(s).`);
 }
 
 async function runDraftOperationsInOrder<T, U>(

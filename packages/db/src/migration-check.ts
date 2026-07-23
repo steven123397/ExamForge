@@ -24,6 +24,7 @@ export const criticalMigrationTables = [
   "roles",
   "user_roles",
   "sessions",
+  "auth_login_attempts",
   "user_teacher_scopes",
   "user_student_group_scopes",
 ];
@@ -35,6 +36,11 @@ const criticalMigrationConstraints = [
     definition: "UNIQUE (username)",
   },
   {
+    id: "users.credential_version_check",
+    tableName: "users",
+    constraintName: "users_credential_version_check",
+  },
+  {
     id: "user_roles.primary_key",
     tableName: "user_roles",
     definition: "PRIMARY KEY (user_id, role_id)",
@@ -43,6 +49,16 @@ const criticalMigrationConstraints = [
     id: "sessions.token_digest_unique",
     tableName: "sessions",
     definition: "UNIQUE (token_digest)",
+  },
+  {
+    id: "sessions.credential_version_check",
+    tableName: "sessions",
+    constraintName: "sessions_credential_version_check",
+  },
+  {
+    id: "auth_login_attempts.failure_count_check",
+    tableName: "auth_login_attempts",
+    constraintName: "auth_login_attempts_failure_count_check",
   },
   {
     id: "user_teacher_scopes.user_primary_key",
@@ -85,6 +101,11 @@ const criticalMigrationConstraints = [
     definition: "UNIQUE (idempotency_key)",
   },
   {
+    id: "schedule_jobs.created_sequence_unique",
+    tableName: "schedule_jobs",
+    constraintName: "schedule_jobs_created_sequence_unique",
+  },
+  {
     id: "schedule_jobs.request_snapshot_check",
     tableName: "schedule_jobs",
     constraintName: "schedule_jobs_request_snapshot_check",
@@ -108,6 +129,16 @@ const criticalMigrationConstraints = [
     id: "schedule_job_events.sequence_unique",
     tableName: "schedule_job_events",
     constraintName: "schedule_job_events_sequence_unique",
+  },
+  {
+    id: "schedule_runs.created_sequence_unique",
+    tableName: "schedule_runs",
+    constraintName: "schedule_runs_created_sequence_unique",
+  },
+  {
+    id: "audit_events.created_sequence_unique",
+    tableName: "audit_events",
+    constraintName: "audit_events_created_sequence_unique",
   },
   {
     id: "outbox_events.event_foreign_key",

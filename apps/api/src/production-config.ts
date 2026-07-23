@@ -1,4 +1,5 @@
 import { getSessionCookieConfig } from "./auth/session-cookie.js";
+import { assertStrongAccountPassword } from "./auth/password-policy.js";
 import { getTrustedOrigins } from "./auth/trusted-origins.js";
 import { isProductionDeployment } from "./deployment-mode.js";
 
@@ -26,7 +27,7 @@ export function validateApiProductionEnvironment(
   getTrustedOrigins(env);
 
   for (const variable of passwordVariables) {
-    requireStrongPassword(env[variable], variable);
+    assertStrongAccountPassword(env[variable], variable, " in production");
   }
 }
 
@@ -42,17 +43,5 @@ function requiredUrl(value: string | undefined, name: string, protocols: string[
   }
   if (!protocols.includes(parsed.protocol)) {
     throw new Error(`${name} uses an unsupported protocol.`);
-  }
-}
-
-function requireStrongPassword(value: string | undefined, name: string) {
-  if (!value) {
-    throw new Error(`${name} is required in production.`);
-  }
-  if (value.length < 20) {
-    throw new Error(`${name} must contain at least 20 characters.`);
-  }
-  if (/(?:change[-_ ]?me|replace|example|placeholder|<[^>]+>)/i.test(value)) {
-    throw new Error(`${name} must not contain a placeholder value.`);
   }
 }

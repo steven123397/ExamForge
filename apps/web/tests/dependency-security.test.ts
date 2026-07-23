@@ -59,7 +59,7 @@ describe("Web dependency security", () => {
     assert.deepEqual(rootPackage.allowScripts, {
       "esbuild@0.28.1": true,
       "msgpackr-extract@3.0.4": true,
-      "sharp@0.34.5": true,
+      "sharp@0.35.0": true,
     });
     assert.equal(
       rootPackage.scripts?.["check:install-scripts"],

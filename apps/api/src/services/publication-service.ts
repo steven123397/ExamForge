@@ -5,7 +5,8 @@ import type { PlatformRepository } from "../repository.js";
 import {
   buildPublishedScheduleAudience,
   buildPublishedScheduleCsv,
-  buildPublishedScheduleNotifications,
+  buildPublicPublishedSchedule,
+  buildPublicPublishedScheduleNotifications,
 } from "./published-schedule-service.js";
 
 export type PublishedAudienceResult =
@@ -22,6 +23,16 @@ export class PublicationService {
 
   getPublishedSchedule() {
     return this.repository.getPublishedSchedule();
+  }
+
+  async getPublicPublishedSchedule() {
+    const [referenceData, published] = await Promise.all([
+      this.repository.getReferenceData(),
+      this.repository.getPublishedSchedule(),
+    ]);
+    return published
+      ? buildPublicPublishedSchedule(referenceData, published)
+      : null;
   }
 
   rollback() {
@@ -52,13 +63,13 @@ export class PublicationService {
     };
   }
 
-  async getNotifications() {
+  async getPublicNotifications() {
     const [referenceData, published] = await Promise.all([
       this.repository.getReferenceData(),
       this.repository.getPublishedSchedule(),
     ]);
     return published
-      ? buildPublishedScheduleNotifications(referenceData, published)
+      ? buildPublicPublishedScheduleNotifications(referenceData, published)
       : null;
   }
 
