@@ -138,6 +138,19 @@ jobs:
           grep -Eq 'Platforms:.*linux/amd64' <<< "$builder_info"
 
       - name: 下载生产依赖审计
+        id: release_audit_download
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-bundle/audit
+
+      - name: 等待生产依赖审计重试
+        if: ${{ steps.release_audit_download.outcome == 'failure' }}
+        run: sleep 5
+
+      - name: 重试下载生产依赖审计
+        if: ${{ steps.release_audit_download.outcome == 'failure' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-audit-${{ github.run_id }}-${{ github.run_attempt }}

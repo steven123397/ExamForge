@@ -161,6 +161,25 @@ describe("release workflow boundary", () => {
     );
   });
 
+  it("retries one transient release-audit download before release work begins", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    assert.match(
+      workflow,
+      /name:\s*下载生产依赖审计[\s\S]*?id:\s*release_audit_download[\s\S]*?continue-on-error:\s*true/,
+    );
+    assert.match(
+      workflow,
+      /name:\s*等待生产依赖审计重试[\s\S]*?steps\.release_audit_download\.outcome\s*==\s*'failure'[\s\S]*?run:\s*sleep 5/,
+    );
+    assert.match(
+      workflow,
+      /name:\s*重试下载生产依赖审计[\s\S]*?steps\.release_audit_download\.outcome\s*==\s*'failure'[\s\S]*?uses:\s*actions\/download-artifact@[a-f0-9]{40}/,
+    );
+    assert.ok(
+      workflow.indexOf("重试下载生产依赖审计") < workflow.indexOf("校验 Runner 检出与发布输入"),
+    );
+  });
+
   it("keeps quality on GitHub hosting and targets release only to the dedicated runner", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     const qualityJob = extractWorkflowJob(workflow, "quality", "release");
