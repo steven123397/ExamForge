@@ -17,6 +17,7 @@ const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)))
 const paths = {
   applyEnvironment: join(repositoryRoot, "scripts/deploy/apply-release-env.mjs"),
   bootstrap: join(repositoryRoot, "scripts/deploy/bootstrap-demo.sh"),
+  ciWorkflow: join(repositoryRoot, ".github/workflows/ci.yml"),
   deploy: join(repositoryRoot, "scripts/deploy/deploy.sh"),
   rollback: join(repositoryRoot, "scripts/deploy/rollback.sh"),
   onlineSmoke: join(repositoryRoot, "scripts/deploy/online-smoke.mjs"),
@@ -92,6 +93,44 @@ describe("production deployment contract", () => {
     assert.match(smoke, /last-event-id/);
     assert.match(smoke, /sseReconnect/);
     assert.doesNotMatch(smoke, /console\.(log|error).*password/i);
+  });
+
+  it("rebuilds local production test images from the current checkout", () => {
+    const localProduction = readFileSync(
+      join(repositoryRoot, "tests/deploy/local-production.test.sh"),
+      "utf8",
+    );
+    assert.doesNotMatch(
+      localProduction,
+      /if docker image inspect "\$tag" >\/dev\/null 2>&1; then/,
+      "local production validation must not reuse a fixed tag from an older checkout",
+    );
+    assert.match(localProduction, /docker "\$\{arguments\[@\]\}"/);
+  });
+
+  it("accepts OCI image indexes when recording local release digests", () => {
+    const localProduction = readFileSync(
+      join(repositoryRoot, "tests/deploy/local-production.test.sh"),
+      "utf8",
+    );
+    assert.match(localProduction, /application\/vnd\.docker\.distribution\.manifest\.list\.v2\+json/);
+    assert.match(localProduction, /application\/vnd\.oci\.image\.index\.v1\+json/);
+  });
+
+  it("isolates local production smoke from an inherited Compose project", () => {
+    const localProduction = readFileSync(
+      join(repositoryRoot, "tests/deploy/local-production.test.sh"),
+      "utf8",
+    );
+    const overrides = localProduction.match(
+      /COMPOSE_PROJECT_NAME="\$project_name" \\\n+ONLINE_API_BASE_URL=/g,
+    ) ?? [];
+    assert.equal(overrides.length, 3);
+  });
+
+  it("runs CI for branch pushes without applying branch range checks to tags", () => {
+    const ciWorkflow = readFileSync(paths.ciWorkflow, "utf8");
+    assert.match(ciWorkflow, /^  push:\n    branches:\n      - "\*\*"$/m);
   });
 });
 

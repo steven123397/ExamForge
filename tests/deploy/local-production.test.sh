@@ -46,10 +46,6 @@ free_port() {
 ensure_application_image() {
   local name=$1
   local tag="examforge-task3-$name:verify-fixed"
-  if docker image inspect "$tag" >/dev/null 2>&1; then
-    printf '%s\n' "$tag"
-    return
-  fi
   local dockerfile="$repository_root/apps/$name/Dockerfile"
   [[ "$name" != "scheduler" ]] || dockerfile="$repository_root/apps/scheduler/Dockerfile"
   local -a arguments=(
@@ -77,7 +73,7 @@ push_image() {
   docker push "$tagged" >/dev/null
   local digest
   digest=$(curl --fail --silent --show-error --head \
-    --header 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json' \
+    --header 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json' \
     "http://$registry_host/v2/$repository/manifests/$tag" \
     | awk -F': ' 'tolower($1) == "docker-content-digest" { gsub("\\r", "", $2); print $2 }')
   [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || fail "registry digest missing for $repository:$tag"
@@ -200,6 +196,7 @@ chmod 600 "$env_file"
   --preflight-hot-root "$hot_root" --preflight-offsite-root "$offsite_root" \
   --bootstrap-demo >/dev/null
 
+COMPOSE_PROJECT_NAME="$project_name" \
 ONLINE_API_BASE_URL="http://127.0.0.1:$api_port" \
 ONLINE_WEB_BASE_URL="http://127.0.0.1:$web_port" \
 ONLINE_COMPOSE_FILE="$compose_file" \
@@ -250,6 +247,7 @@ docker compose --env-file "$env_file" -f "$compose_file" -p "$project_name" \
 [[ "$(readlink "$state_dir/current")" == "commits/$commit_b" ]] \
   || fail "second release did not become current"
 
+COMPOSE_PROJECT_NAME="$project_name" \
 ONLINE_API_BASE_URL="http://127.0.0.1:$api_port" \
 ONLINE_WEB_BASE_URL="http://127.0.0.1:$web_port" \
 ONLINE_COMPOSE_FILE="$compose_file" \
@@ -265,6 +263,7 @@ node --env-file="$env_file" "$repository_root/scripts/deploy/online-smoke.mjs" >
 grep -Fq "EXAMFORGE_API_IMAGE=$api_ref_a" "$env_file" \
   || fail "rollback did not restore the first API digest"
 
+COMPOSE_PROJECT_NAME="$project_name" \
 ONLINE_API_BASE_URL="http://127.0.0.1:$api_port" \
 ONLINE_WEB_BASE_URL="http://127.0.0.1:$web_port" \
 ONLINE_COMPOSE_FILE="$compose_file" \
