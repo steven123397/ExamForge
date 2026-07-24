@@ -14,6 +14,7 @@ const paths = {
   backupTimer: join(repositoryRoot, "deploy/systemd/examforge-backup.timer"),
   healthService: join(repositoryRoot, "deploy/systemd/examforge-health.service"),
   healthTimer: join(repositoryRoot, "deploy/systemd/examforge-health.timer"),
+  nginxSiteTemplate: join(repositoryRoot, "deploy/nginx/examforge.conf.template"),
   nginxLogrotate: join(repositoryRoot, "deploy/logrotate/examforge-nginx"),
 };
 
@@ -89,5 +90,45 @@ describe("production operations contract", () => {
     assert.match(logrotate, /rotate 14/);
     assert.match(logrotate, /compress/);
     assert.match(logrotate, /nginx/);
+  });
+
+  it("ships an isolated nginx site template for the production domain", () => {
+    assert.ok(existsSync(paths.nginxSiteTemplate), "ExamForge nginx site template must exist");
+    const template = readFileSync(paths.nginxSiteTemplate, "utf8");
+
+    assert.match(
+      template,
+      /server \{\n\s+listen 80;\n\s+server_name examforge\.site www\.examforge\.site;[\s\S]*?return 301 https:\/\/examforge\.site\$request_uri;/,
+    );
+    assert.match(
+      template,
+      /server \{\n\s+listen 443 ssl http2;\n\s+server_name examforge\.site;/,
+    );
+    assert.match(
+      template,
+      /server \{\n\s+listen 443 ssl http2;\n\s+server_name www\.examforge\.site;[\s\S]*?return 301 https:\/\/examforge\.site\$request_uri;/,
+    );
+    const wwwHttpsServer = template.match(
+      /server \{\n\s+listen 443 ssl http2;\n\s+server_name www\.examforge\.site;[\s\S]*?\n\}/,
+    )?.[0];
+    assert.ok(wwwHttpsServer, "www HTTPS server must exist");
+    assert.doesNotMatch(wwwHttpsServer, /proxy_pass/);
+    assert.match(template, /listen\s+443\s+ssl\s+http2;/);
+    assert.match(template, /ssl_certificate\s+\/etc\/letsencrypt\/live\/examforge\.site\/fullchain\.pem;/);
+    assert.match(template, /ssl_certificate_key\s+\/etc\/letsencrypt\/live\/examforge\.site\/privkey\.pem;/);
+    assert.match(template, /access_log\s+\/var\/log\/nginx\/examforge\.access\.log/);
+    assert.match(template, /error_log\s+\/var\/log\/nginx\/examforge\.error\.log/);
+    assert.match(template, /location\s+\/api\//);
+    assert.match(template, /location\s+~\s+\^\/api\/schedule-jobs\/\[\^\/\]\+\/events\$/);
+    assert.match(template, /proxy_buffering\s+off;/);
+    assert.match(template, /proxy_read_timeout\s+3600s;/);
+    assert.match(template, /proxy_pass\s+http:\/\/127\.0\.0\.1:4000;/);
+    assert.match(template, /proxy_pass\s+http:\/\/127\.0\.0\.1:3000;/);
+    assert.match(template, /proxy_set_header\s+X-Forwarded-For\s+\$remote_addr;/);
+    assert.match(template, /proxy_set_header\s+X-Forwarded-Proto\s+https;/);
+    assert.match(template, /add_header\s+X-Frame-Options\s+"DENY"\s+always;/);
+    assert.match(template, /add_header\s+X-Content-Type-Options\s+"nosniff"\s+always;/);
+    assert.doesNotMatch(template, /default_server/);
+    assert.doesNotMatch(template, /sites-enabled\/default/);
   });
 });
