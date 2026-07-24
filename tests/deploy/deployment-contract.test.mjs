@@ -62,6 +62,125 @@ describe("production deployment contract", () => {
     assert.doesNotMatch(runner, /--privileged/);
   });
 
+  it("uses an isolated four-role credential file for online smoke", () => {
+    const runner = readFileSync(paths.onlineSmokeRunner, "utf8");
+    const smoke = readFileSync(paths.onlineSmoke, "utf8");
+
+    assert.match(runner, /--smoke-credentials-file PATH/);
+    assert.match(runner, /smoke_credentials_file_required/);
+    assert.match(runner, /load_smoke_credentials "\$smoke_credentials_file"/);
+    assert.match(runner, /ONLINE_ADMIN_PASSWORD/);
+    assert.doesNotMatch(runner, /cp --preserve=mode "\$env_file" "\$runtime_env"/);
+    assert.match(smoke, /return process\.env\[`ONLINE_\$\{name\}_PASSWORD`\];/);
+    assert.doesNotMatch(smoke, /EXAMFORGE_\$\{name\}_PASSWORD/);
+  });
+
+  it("uses .env as the single default production environment filename", () => {
+    const scripts = [
+      "scripts/deploy/backup-postgres.sh",
+      "scripts/deploy/bootstrap-demo.sh",
+      "scripts/deploy/deploy.sh",
+      "scripts/deploy/health-check.sh",
+      "scripts/deploy/online-smoke.mjs",
+      "scripts/deploy/preflight.sh",
+      "scripts/deploy/restore-postgres.sh",
+      "scripts/deploy/rollback.sh",
+      "scripts/deploy/run-online-smoke.sh",
+    ];
+
+    for (const script of scripts) {
+      const source = readFileSync(join(repositoryRoot, script), "utf8");
+      assert.doesNotMatch(source, /\.env\.production/,
+        `${script} must not use the retired default production filename`);
+    }
+  });
+
+  it("rejects non-smoke variables from the isolated credential file before Docker access", () => {
+    const directory = mkdtempSync(join(tmpdir(), "examforge-online-smoke-"));
+    const envPath = join(directory, ".env");
+    const credentialsPath = join(directory, ".online-smoke.env");
+    const credentialSecret = "must-not-appear-in-smoke-errors";
+    writeFileSync(envPath, [
+      `EXAMFORGE_API_IMAGE=registry.example.com/examforge/api@sha256:${"a".repeat(64)}`,
+      "EXAMFORGE_API_PORT=4000",
+      "EXAMFORGE_WEB_PORT=3000",
+      "EXAMFORGE_PUBLIC_ORIGIN=https://examforge.site",
+      "EXAMFORGE_ADMIN_PASSWORD=bootstrap-admin-password-20260724",
+      "EXAMFORGE_OPERATOR_PASSWORD=bootstrap-operator-password-20260724",
+      "EXAMFORGE_TEACHER_PASSWORD=bootstrap-teacher-password-20260724",
+      "EXAMFORGE_STUDENT_PASSWORD=bootstrap-student-password-20260724",
+      "POSTGRES_USER=examforge",
+      "POSTGRES_DB=examforge",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    writeFileSync(credentialsPath, [
+      `EXAMFORGE_ADMIN_PASSWORD=${credentialSecret}`,
+      "",
+    ].join("\n"), { mode: 0o600 });
+    chmodSync(envPath, 0o600);
+    chmodSync(credentialsPath, 0o600);
+
+    const result = spawnSync("bash", [
+      paths.onlineSmokeRunner,
+      "--env-file",
+      envPath,
+      "--compose-file",
+      join(repositoryRoot, "compose.production.yml"),
+      "--smoke-credentials-file",
+      credentialsPath,
+      "--skip-fault-drills",
+    ], { cwd: repositoryRoot, encoding: "utf8" });
+    const output = `${result.stdout}${result.stderr}`;
+
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /category=smoke_credentials_invalid component=online_smoke/);
+    assert.doesNotMatch(output, new RegExp(credentialSecret));
+  });
+
+  it("requires every smoke password from the dedicated file instead of inherited environment", () => {
+    const directory = mkdtempSync(join(tmpdir(), "examforge-online-smoke-"));
+    const envPath = join(directory, ".env");
+    const credentialsPath = join(directory, ".online-smoke.env");
+    const inheritedSecret = "inherited-smoke-password-must-not-be-used";
+    writeFileSync(envPath, [
+      `EXAMFORGE_API_IMAGE=registry.example.com/examforge/api@sha256:${"a".repeat(64)}`,
+      "EXAMFORGE_API_PORT=4000",
+      "EXAMFORGE_WEB_PORT=3000",
+      "EXAMFORGE_PUBLIC_ORIGIN=https://examforge.site",
+      "POSTGRES_USER=examforge",
+      "POSTGRES_DB=examforge",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    writeFileSync(credentialsPath, [
+      "ONLINE_ADMIN_PASSWORD=current-admin-password-20260724",
+      "ONLINE_OPERATOR_PASSWORD=current-operator-password-20260724",
+      "ONLINE_TEACHER_PASSWORD=current-teacher-password-20260724",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    chmodSync(envPath, 0o600);
+    chmodSync(credentialsPath, 0o600);
+
+    const result = spawnSync("bash", [
+      paths.onlineSmokeRunner,
+      "--env-file",
+      envPath,
+      "--compose-file",
+      join(repositoryRoot, "compose.production.yml"),
+      "--smoke-credentials-file",
+      credentialsPath,
+      "--skip-fault-drills",
+    ], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      env: { ...process.env, ONLINE_STUDENT_PASSWORD: inheritedSecret },
+    });
+    const output = `${result.stdout}${result.stderr}`;
+
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /category=smoke_credentials_missing component=online_smoke/);
+    assert.doesNotMatch(output, new RegExp(inheritedSecret));
+  });
+
   it("deploys only a verified release and preserves current/previous state", () => {
     const source = readFileSync(paths.deploy, "utf8");
     assert.match(source, /verify-release\.mjs/);

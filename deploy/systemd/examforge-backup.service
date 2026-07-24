@@ -5,11 +5,16 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-User=examforge
-Group=examforge
+User=ubuntu
+Group=ubuntu
 SupplementaryGroups=docker
 WorkingDirectory=/srv/apps/examforge
-ExecStart=/srv/apps/examforge/scripts/deploy/backup-postgres.sh --env-file /srv/apps/examforge/.env.production --compose-file /srv/apps/examforge/compose.production.yml
+RuntimeDirectory=examforge-backup-runtime
+RuntimeDirectoryMode=0700
+Environment=COMPOSE_PROJECT_NAME=examforge
+Environment=HOME=/run/examforge-backup-runtime
+Environment=DOCKER_CONFIG=/run/examforge-backup-runtime
+ExecStart=/srv/apps/examforge/scripts/deploy/backup-postgres.sh --env-file /srv/apps/examforge/.env --compose-file /srv/apps/examforge/compose.production.yml
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

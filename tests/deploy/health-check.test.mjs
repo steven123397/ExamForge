@@ -91,6 +91,39 @@ describe("production health fault categories", () => {
     assertFailure(result, /category=certificate_expiring component=tls/);
   });
 
+  it("falls back to the live HTTPS certificate when the local cert path is not readable", () => {
+    const fixture = createFixture();
+    const binDir = join(fixture.directory, "bin");
+    mkdirSync(binDir);
+    const opensslStub = join(binDir, "openssl");
+    writeFileSync(opensslStub, `#!/usr/bin/env bash
+set -Eeuo pipefail
+case "\${1:-}" in
+  s_client)
+    [[ " $* " == *" -connect examforge.site:443 "* ]]
+    [[ " $* " == *" -servername examforge.site "* ]]
+    printf '%s\\n' 'fixture-live-certificate'
+    ;;
+  x509)
+    cat >/dev/null
+    [[ " $* " == *" -checkend 1814400 "* ]]
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+`);
+    chmodSync(opensslStub, 0o755);
+
+    const result = runHealth(fixture, ["--only", "certificate"], {
+      PATH: `${binDir}:${process.env.PATH}`,
+    });
+    const output = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 0, output);
+    assert.match(output, /health-check ok component=tls/);
+    assert.doesNotMatch(output, new RegExp(secretValue));
+  });
+
   it("reports API readiness failure without printing credentials", () => {
     const fixture = createFixture();
     const binDir = join(fixture.directory, "bin");

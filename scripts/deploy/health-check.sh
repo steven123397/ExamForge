@@ -6,7 +6,7 @@ repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck disable=SC1091
 source "$repository_root/scripts/deploy/operations-lib.sh"
 
-env_file="$repository_root/.env.production"
+env_file="$repository_root/.env"
 compose_file="$repository_root/compose.production.yml"
 only_check="all"
 now_epoch=""
@@ -105,13 +105,40 @@ done
 check_certificate() {
   operations_require_env "EXAMFORGE_TLS_CERTIFICATE_PATH"
   operations_require_command "openssl"
-  if [[ ! -r "$EXAMFORGE_TLS_CERTIFICATE_PATH" ]]; then
+  local warning_seconds=$((certificate_warning_days * 86400))
+  if [[ -r "$EXAMFORGE_TLS_CERTIFICATE_PATH" ]]; then
+    if ! openssl x509 -checkend "$warning_seconds" -noout \
+      -in "$EXAMFORGE_TLS_CERTIFICATE_PATH" >/dev/null 2>&1; then
+      record_error "certificate_expiring" "tls"
+      return
+    fi
+    record_ok "tls"
+    return
+  fi
+  check_live_certificate "$warning_seconds"
+}
+
+check_live_certificate() {
+  local warning_seconds=$1
+  operations_require_env "EXAMFORGE_PUBLIC_ORIGIN"
+  local authority=${EXAMFORGE_PUBLIC_ORIGIN#https://}
+  if [[ "$authority" == "$EXAMFORGE_PUBLIC_ORIGIN" || -z "$authority" ]]; then
     record_error "certificate_missing" "tls"
     return
   fi
-  local warning_seconds=$((certificate_warning_days * 86400))
-  if ! openssl x509 -checkend "$warning_seconds" -noout \
-    -in "$EXAMFORGE_TLS_CERTIFICATE_PATH" >/dev/null 2>&1; then
+  authority=${authority%%/*}
+  local host=$authority
+  local port=443
+  if [[ "$authority" == *:* ]]; then
+    host=${authority%:*}
+    port=${authority##*:}
+  fi
+  if [[ -z "$host" || -z "$port" || ! "$port" =~ ^[0-9]+$ ]]; then
+    record_error "certificate_missing" "tls"
+    return
+  fi
+  if ! openssl s_client -connect "$host:$port" -servername "$host" </dev/null 2>/dev/null \
+    | openssl x509 -checkend "$warning_seconds" -noout >/dev/null 2>&1; then
     record_error "certificate_expiring" "tls"
     return
   fi

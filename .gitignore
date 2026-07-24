@@ -6,6 +6,7 @@ venv/
 .worktrees
 .worktrees/
 .codegraph/
+docs/temp/
 
 node_modules/
 .next/
@@ -22,5 +23,6 @@ test-results/
 .env
 .env.production
 .env.production.*
+.online-smoke.env
 !.env.example
 !.env.production.example

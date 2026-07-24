@@ -171,10 +171,10 @@ npm run test:e2e:demo
 在服务器上准备环境文件后先执行只读预检：
 
 ```bash
-cp .env.production.example .env.production
+cp .env.production.example .env
 # 替换全部占位符和镜像 digest，不要把真实文件提交到 Git
-chmod 600 .env.production
-./scripts/deploy/preflight.sh --env-file .env.production --read-only
+chmod 600 .env
+./scripts/deploy/preflight.sh --env-file .env --read-only
 ```
 
 预检会检查环境文件 owner/权限、强密码、精确 HTTPS Origin、Secure Cookie、绝对数据与备份目录、目录 UID/GID、磁盘、内存、端口和镜像可访问性。生产 API 也会在监听端口前执行同一类必需配置检查。正式发布工作流尚未运行、TCR 尚无本轮 digest 时，示例文件中的占位符会被预检拒绝，不应直接执行生产 Compose `up`。
@@ -201,7 +201,7 @@ node scripts/release/verify-release.mjs release-manifest.json --verify-files
 
 ```bash
 ./scripts/deploy/backup-postgres.sh \
-  --env-file .env.production \
+  --env-file .env \
   --compose-file compose.production.yml
 ```
 
@@ -210,15 +210,15 @@ node scripts/release/verify-release.mjs release-manifest.json --verify-files
 恢复是破坏性操作，只允许写入独立的可丢弃数据库。目标库必须以 `_disposable` 结尾，并预先写入数据库级标记：
 
 ```bash
-docker compose --env-file .env.production -f compose.production.yml \
+docker compose --env-file .env -f compose.production.yml \
   exec postgres sh -c 'createdb -U "$POSTGRES_USER" examforge_restore_disposable'
-docker compose --env-file .env.production -f compose.production.yml \
+docker compose --env-file .env -f compose.production.yml \
   exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d postgres' <<'SQL'
 COMMENT ON DATABASE examforge_restore_disposable IS 'examforge.disposable=true';
 SQL
 
 ./scripts/deploy/restore-postgres.sh \
-  --env-file .env.production \
+  --env-file .env \
   --compose-file compose.production.yml \
   --backup /srv/data/hot/examforge/backups/postgres/<backup-id>.meta \
   --target-database examforge_restore_disposable \
@@ -231,11 +231,11 @@ SQL
 
 ```bash
 ./scripts/deploy/health-check.sh \
-  --env-file .env.production \
+  --env-file .env \
   --compose-file compose.production.yml
 ```
 
-巡检覆盖证书期限、数据盘、容器 health、API/Publisher/Worker/scheduler readiness，以及本地和异机备份完整性与年龄。`deploy/systemd/` 提供每 5 分钟健康检查和每日备份模板，固定从 `/srv/apps/examforge` 的稳定运维目录读取脚本、Compose 和环境文件；`releases/current` 只保存不可变 release manifest 与供应链附件，不能作为源码或运维脚本目录。`deploy/logrotate/examforge-nginx` 约束独立 nginx 日志；这些文件需要在正式部署时由运维用户安装，目前尚未在腾讯云启用。
+巡检覆盖证书期限、数据盘、容器 health、API/Publisher/Worker/scheduler readiness，以及本地和异机备份完整性与年龄。`deploy/systemd/` 提供每 5 分钟健康检查和每日备份模板，固定从 `/srv/apps/examforge` 的稳定运维目录读取脚本、Compose 和环境文件；`releases/current` 只保存不可变 release manifest 与供应链附件，不能作为源码或运维脚本目录。`deploy/logrotate/examforge-nginx` 约束独立 nginx 日志。生产 unit 使用服务私有的 `/run` Docker 配置目录，不依赖用户 home 目录。
 
 ## 按 digest 部署与回滚
 
@@ -243,7 +243,7 @@ SQL
 
 ```bash
 ./scripts/deploy/deploy.sh \
-  --env-file .env.production \
+  --env-file .env \
   --compose-file compose.production.yml \
   --release-manifest /srv/apps/examforge/incoming/release-manifest.json \
   --state-dir /srv/apps/examforge/releases \
@@ -252,12 +252,17 @@ SQL
 
 部署只执行 pull、迁移、可选 bootstrap、Compose up 和 runtime 健康检查，不在服务器构建源码。成功后，四个应用 image 以 digest 写回 600 权限环境文件，发布 bundle 保存到 `releases/commits/<commit>`，`current` 和 `previous` 软链接原子切换。失败会停止本轮容器，并尝试恢复上一环境和服务。
 
-生产栈启动后通过已部署 API digest 提供的 Node 22 运行四角色、本人 scope、作业/SSE、策略、草稿发布和审计 smoke。默认包含主动故障演练，只应在维护窗口执行；日常无故障回归显式使用 `--skip-fault-drills`：
+生产栈启动后通过已部署 API digest 提供的 Node 22 运行四角色、本人 scope、作业/SSE、策略、草稿发布和审计 smoke。四个当前登录密码必须放在独立的 600 权限凭据文件中，不能复用 `.env` 的首次 bootstrap 值；runner 以受限解析器读取该文件，不会把 `.env` 当作 shell 脚本。默认包含主动故障演练，只应在维护窗口执行；日常无故障回归显式使用 `--skip-fault-drills`：
 
 ```bash
+cp deploy/online-smoke-credentials.env.example .online-smoke.env
+chmod 600 .online-smoke.env
+# 将四项 ONLINE_*_PASSWORD 替换为四个账户的当前密码。
+
 ./scripts/deploy/run-online-smoke.sh \
-  --env-file .env.production \
+  --env-file .env \
   --compose-file compose.production.yml \
+  --smoke-credentials-file .online-smoke.env \
   --skip-fault-drills
 ```
 
@@ -265,7 +270,7 @@ SQL
 
 ```bash
 ./scripts/deploy/rollback.sh \
-  --env-file .env.production \
+  --env-file .env \
   --compose-file compose.production.yml \
   --state-dir /srv/apps/examforge/releases
 ```
@@ -309,7 +314,7 @@ read -r -p '账户名：' rotation_username
 read -r -p '变更单或操作者标识：' rotation_actor
 read -r -s -p '新密码（至少 20 个字符，不回显）：' rotation_password
 printf '\n'
-printf '%s' "$rotation_password" | docker compose --env-file .env.production -f compose.production.yml \
+printf '%s' "$rotation_password" | docker compose --env-file .env -f compose.production.yml \
   exec -T api node dist/src/auth/rotate-account.js \
   --username "$rotation_username" \
   --confirm-username "$rotation_username" \
@@ -317,7 +322,7 @@ printf '%s' "$rotation_password" | docker compose --env-file .env.production -f 
 unset rotation_password
 ```
 
-命令只从标准输入读取新密码，拒绝密码参数和交互式 TTY 输入；目标账户必须重复确认。成功时，它在同一 PostgreSQL 事务内更新 scrypt 散列与凭据版本、撤销该账户全部旧会话，并写入不含新旧密码的 `auth.password_rotated` 审计；任一步失败都会回滚。标准输出只包含目标用户名、凭据版本和已吊销会话数量。成功后，按受控 secrets 流程把同一新值同步到权限为 600 的 `.env.production`，仅供未来空库 bootstrap 使用；该同步不改变当前数据库或会话，不能替代本命令。`--actor` 是审计标签，不替代服务器访问控制或维护授权。若轮换后需要再次变更，应使用新的强密码重新执行受控命令；不要把环境文件改回旧值并误认为已完成回滚。
+命令只从标准输入读取新密码，拒绝密码参数和交互式 TTY 输入；目标账户必须重复确认。成功时，它在同一 PostgreSQL 事务内更新 scrypt 散列与凭据版本、撤销该账户全部旧会话，并写入不含新旧密码的 `auth.password_rotated` 审计；任一步失败都会回滚。标准输出只包含目标用户名、凭据版本和已吊销会话数量。成功后，按受控 secrets 流程把同一新值同步到权限为 600 的 `.env`，仅供未来空库 bootstrap 使用；该同步不改变当前数据库或会话，不能替代本命令。若 online smoke 需要验证轮换后的账户，必须同步更新独立 `.online-smoke.env` 中对应的 `ONLINE_*_PASSWORD`。`--actor` 是审计标签，不替代服务器访问控制或维护授权。若轮换后需要再次变更，应使用新的强密码重新执行受控命令；不要把环境文件改回旧值并误认为已完成回滚。
 
 ## 核心演示链路
 

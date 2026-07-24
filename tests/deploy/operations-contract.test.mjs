@@ -72,11 +72,20 @@ describe("production operations contract", () => {
       health: paths.healthService,
     })) {
       const service = readFileSync(path, "utf8");
-      assert.match(service, /^User=examforge$/m);
+      const runtimeDirectory = `examforge-${name}-runtime`;
+      const runtimePath = `/run/${runtimeDirectory}`;
+      assert.match(service, /^User=ubuntu$/m);
       assert.match(service, /^NoNewPrivileges=true$/m);
       assert.match(service, /^ProtectSystem=strict$/m);
       assert.match(service, /^WorkingDirectory=\/srv\/apps\/examforge$/m);
+      assert.match(service, /^Environment=COMPOSE_PROJECT_NAME=examforge$/m);
+      assert.match(service, new RegExp(`^RuntimeDirectory=${runtimeDirectory}$`, "m"));
+      assert.match(service, /^RuntimeDirectoryMode=0700$/m);
+      assert.match(service, new RegExp(`^Environment=HOME=${runtimePath}$`, "m"));
+      assert.match(service, new RegExp(`^Environment=DOCKER_CONFIG=${runtimePath}$`, "m"));
       assert.match(service, new RegExp(`^ExecStart=/srv/apps/examforge/scripts/deploy/${name === "backup" ? "backup-postgres" : "health-check"}\\.sh `, "m"));
+      assert.match(service, /--env-file \/srv\/apps\/examforge\/\.env(?:\s|$)/);
+      assert.doesNotMatch(service, /\/srv\/apps\/examforge\/\.env\.production/);
       assert.doesNotMatch(service, /\/srv\/apps\/examforge\/current\//);
     }
 
@@ -88,6 +97,8 @@ describe("production operations contract", () => {
     assert.match(logrotate, /examforge\.access\.log/);
     assert.match(logrotate, /examforge\.error\.log/);
     assert.match(logrotate, /rotate 14/);
+    assert.match(logrotate, /^\s*maxsize 25M$/m);
+    assert.doesNotMatch(logrotate, /^\s*size\s+/m);
     assert.match(logrotate, /compress/);
     assert.match(logrotate, /nginx/);
   });

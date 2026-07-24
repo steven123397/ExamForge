@@ -13,6 +13,7 @@ offsite_root="$fixture_dir/offsite"
 data_dir="$hot_root/examforge"
 backup_dir="$data_dir/backups/postgres"
 env_file="$fixture_dir/.env.production"
+smoke_credentials_file="$fixture_dir/.online-smoke.env"
 compose_file="$repository_root/compose.production.yml"
 commit_a="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 commit_b="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -190,6 +191,14 @@ LOG_LEVEL=error
 EOF
 chmod 600 "$env_file"
 
+cat > "$smoke_credentials_file" <<'EOF'
+ONLINE_ADMIN_PASSWORD=local-production-admin-password-20260714
+ONLINE_OPERATOR_PASSWORD=local-production-operator-password-20260714
+ONLINE_TEACHER_PASSWORD=local-production-teacher-password-20260714
+ONLINE_STUDENT_PASSWORD=local-production-student-password-20260714
+EOF
+chmod 600 "$smoke_credentials_file"
+
 "$repository_root/scripts/deploy/deploy.sh" \
   --env-file "$env_file" --compose-file "$compose_file" \
   --release-manifest "$manifest_a" --state-dir "$state_dir" \
@@ -199,6 +208,7 @@ chmod 600 "$env_file"
 COMPOSE_PROJECT_NAME="$project_name" \
 "$repository_root/scripts/deploy/run-online-smoke.sh" \
   --env-file "$env_file" --compose-file "$compose_file" \
+  --smoke-credentials-file "$smoke_credentials_file" \
   > "$fixture_dir/fault-smoke.json" &
 smoke_pid=$!
 sample_id=0
@@ -246,6 +256,7 @@ docker compose --env-file "$env_file" -f "$compose_file" -p "$project_name" \
 COMPOSE_PROJECT_NAME="$project_name" \
 "$repository_root/scripts/deploy/run-online-smoke.sh" \
   --env-file "$env_file" --compose-file "$compose_file" \
+  --smoke-credentials-file "$smoke_credentials_file" \
   --skip-fault-drills >/dev/null
 
 "$repository_root/scripts/deploy/rollback.sh" \
@@ -259,6 +270,7 @@ grep -Fq "EXAMFORGE_API_IMAGE=$api_ref_a" "$env_file" \
 COMPOSE_PROJECT_NAME="$project_name" \
 "$repository_root/scripts/deploy/run-online-smoke.sh" \
   --env-file "$env_file" --compose-file "$compose_file" \
+  --smoke-credentials-file "$smoke_credentials_file" \
   --skip-fault-drills >/dev/null
 
 docker compose --env-file "$env_file" -f "$compose_file" -p "$project_name" \

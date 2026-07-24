@@ -1,7 +1,7 @@
 /var/log/nginx/examforge.access.log /var/log/nginx/examforge.error.log {
     daily
     rotate 14
-    size 25M
+    maxsize 25M
     missingok
     notifempty
     compress

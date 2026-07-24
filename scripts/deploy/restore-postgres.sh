@@ -7,7 +7,7 @@ repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck disable=SC1091
 source "$repository_root/scripts/deploy/operations-lib.sh"
 
-env_file="$repository_root/.env.production"
+env_file="$repository_root/.env"
 compose_file="$repository_root/compose.production.yml"
 backup_metadata=""
 target_database=""
@@ -19,7 +19,7 @@ usage() {
 Usage: scripts/deploy/restore-postgres.sh [options]
 
 Options:
-  --env-file PATH            Production environment file (default: .env.production)
+  --env-file PATH            Production environment file (default: .env)
   --compose-file PATH        Production Compose file (default: compose.production.yml)
   --backup PATH              Backup .meta file
   --target-database NAME     Existing disposable target database

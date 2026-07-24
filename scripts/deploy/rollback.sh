@@ -6,7 +6,7 @@ repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck disable=SC1091
 source "$repository_root/scripts/deploy/operations-lib.sh"
 
-env_file="$repository_root/.env.production"
+env_file="$repository_root/.env"
 compose_file="$repository_root/compose.production.yml"
 state_dir="/srv/apps/examforge/releases"
 preflight_hot_root="/srv/data/hot"

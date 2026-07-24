@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-env_file="$repository_root/.env.production"
+env_file="$repository_root/.env"
 compose_file="$repository_root/compose.production.yml"
 validate_env_only=false
 skip_image_check=false
@@ -16,7 +16,7 @@ usage() {
 Usage: scripts/deploy/preflight.sh [options]
 
 Options:
-  --env-file PATH          Production environment file (default: .env.production)
+  --env-file PATH          Production environment file (default: .env)
   --compose-file PATH      Production Compose file (default: compose.production.yml)
   --validate-env-only      Validate file permissions and values, then stop
   --skip-image-check       Skip remote digest manifest checks

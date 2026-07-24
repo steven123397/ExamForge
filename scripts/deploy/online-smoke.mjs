@@ -6,7 +6,7 @@ const apiBase = process.env.ONLINE_API_BASE_URL ?? "http://127.0.0.1:4000";
 const webBase = process.env.ONLINE_WEB_BASE_URL ?? "http://127.0.0.1:3000";
 const publicOrigin = process.env.EXAMFORGE_PUBLIC_ORIGIN;
 const composeFile = process.env.ONLINE_COMPOSE_FILE ?? "compose.production.yml";
-const composeEnvFile = process.env.ONLINE_COMPOSE_ENV_FILE ?? ".env.production";
+const composeEnvFile = process.env.ONLINE_COMPOSE_ENV_FILE ?? ".env";
 const projectName = process.env.COMPOSE_PROJECT_NAME ?? "examforge";
 const databaseUser = process.env.POSTGRES_USER ?? "examforge";
 const databaseName = process.env.POSTGRES_DB ?? "examforge";
@@ -438,7 +438,7 @@ async function timed(name, operation) {
 }
 
 function password(name) {
-  return process.env[`ONLINE_${name}_PASSWORD`] ?? process.env[`EXAMFORGE_${name}_PASSWORD`];
+  return process.env[`ONLINE_${name}_PASSWORD`];
 }
 
 function errorMessage(error) {
