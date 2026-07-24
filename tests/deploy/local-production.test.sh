@@ -197,12 +197,8 @@ chmod 600 "$env_file"
   --bootstrap-demo >/dev/null
 
 COMPOSE_PROJECT_NAME="$project_name" \
-ONLINE_API_BASE_URL="http://127.0.0.1:$api_port" \
-ONLINE_WEB_BASE_URL="http://127.0.0.1:$web_port" \
-ONLINE_COMPOSE_FILE="$compose_file" \
-ONLINE_COMPOSE_ENV_FILE="$env_file" \
-ONLINE_RUN_FAULT_DRILLS=1 \
-node --env-file="$env_file" "$repository_root/scripts/deploy/online-smoke.mjs" \
+"$repository_root/scripts/deploy/run-online-smoke.sh" \
+  --env-file "$env_file" --compose-file "$compose_file" \
   > "$fixture_dir/fault-smoke.json" &
 smoke_pid=$!
 sample_id=0
@@ -248,12 +244,9 @@ docker compose --env-file "$env_file" -f "$compose_file" -p "$project_name" \
   || fail "second release did not become current"
 
 COMPOSE_PROJECT_NAME="$project_name" \
-ONLINE_API_BASE_URL="http://127.0.0.1:$api_port" \
-ONLINE_WEB_BASE_URL="http://127.0.0.1:$web_port" \
-ONLINE_COMPOSE_FILE="$compose_file" \
-ONLINE_COMPOSE_ENV_FILE="$env_file" \
-ONLINE_RUN_FAULT_DRILLS=0 \
-node --env-file="$env_file" "$repository_root/scripts/deploy/online-smoke.mjs" >/dev/null
+"$repository_root/scripts/deploy/run-online-smoke.sh" \
+  --env-file "$env_file" --compose-file "$compose_file" \
+  --skip-fault-drills >/dev/null
 
 "$repository_root/scripts/deploy/rollback.sh" \
   --env-file "$env_file" --compose-file "$compose_file" --state-dir "$state_dir" \
@@ -264,12 +257,9 @@ grep -Fq "EXAMFORGE_API_IMAGE=$api_ref_a" "$env_file" \
   || fail "rollback did not restore the first API digest"
 
 COMPOSE_PROJECT_NAME="$project_name" \
-ONLINE_API_BASE_URL="http://127.0.0.1:$api_port" \
-ONLINE_WEB_BASE_URL="http://127.0.0.1:$web_port" \
-ONLINE_COMPOSE_FILE="$compose_file" \
-ONLINE_COMPOSE_ENV_FILE="$env_file" \
-ONLINE_RUN_FAULT_DRILLS=0 \
-node --env-file="$env_file" "$repository_root/scripts/deploy/online-smoke.mjs" >/dev/null
+"$repository_root/scripts/deploy/run-online-smoke.sh" \
+  --env-file "$env_file" --compose-file "$compose_file" \
+  --skip-fault-drills >/dev/null
 
 docker compose --env-file "$env_file" -f "$compose_file" -p "$project_name" \
   down --remove-orphans >/dev/null

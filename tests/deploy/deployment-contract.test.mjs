@@ -21,7 +21,9 @@ const paths = {
   deploy: join(repositoryRoot, "scripts/deploy/deploy.sh"),
   rollback: join(repositoryRoot, "scripts/deploy/rollback.sh"),
   onlineSmoke: join(repositoryRoot, "scripts/deploy/online-smoke.mjs"),
+  onlineSmokeRunner: join(repositoryRoot, "scripts/deploy/run-online-smoke.sh"),
   releaseManifestLibrary: join(repositoryRoot, "scripts/release/release-manifest-lib.mjs"),
+  apiDockerfile: join(repositoryRoot, "apps/api/Dockerfile"),
 };
 const commitSha = "a".repeat(40);
 
@@ -33,6 +35,30 @@ describe("production deployment contract", () => {
         assert.ok((statSync(path).mode & 0o111) !== 0, `${name} must be executable`);
       }
     }
+  });
+
+  it("runs production online smoke with the released Node 22 runtime without a Docker socket helper", () => {
+    const runner = readFileSync(paths.onlineSmokeRunner, "utf8");
+    const apiDockerfile = readFileSync(paths.apiDockerfile, "utf8");
+
+    assert.match(apiDockerfile, /^FROM node:22\.22\.2-bookworm-slim AS runtime$/m);
+    assert.match(runner, /operations_load_env_file "\$env_file"/);
+    assert.match(runner, /EXAMFORGE_API_IMAGE/);
+    assert.match(runner, /docker image inspect "\$EXAMFORGE_API_IMAGE"/);
+    assert.match(runner, /docker create --pull=never/);
+    assert.match(runner, /\/usr\/local\/bin\/node/);
+    assert.match(runner, /--env-file="\$runtime_env"/);
+    assert.match(runner, /ONLINE_API_BASE_URL=http:\/\/127\.0\.0\.1:/);
+    assert.match(runner, /ONLINE_WEB_BASE_URL=http:\/\/127\.0\.0\.1:/);
+    assert.match(runner, /ONLINE_COMPOSE_FILE=%s/);
+    assert.match(runner, /ONLINE_COMPOSE_ENV_FILE=%s/);
+    assert.match(runner, /ONLINE_RUN_FAULT_DRILLS/);
+    assert.match(runner, /--skip-fault-drills/);
+    assert.match(runner, /chmod 600 "\$runtime_env"/);
+    assert.match(runner, /trap cleanup EXIT/);
+    assert.doesNotMatch(runner, /docker run/);
+    assert.doesNotMatch(runner, /\/var\/run\/docker\.sock/);
+    assert.doesNotMatch(runner, /--privileged/);
   });
 
   it("deploys only a verified release and preserves current/previous state", () => {
@@ -123,9 +149,10 @@ describe("production deployment contract", () => {
       "utf8",
     );
     const overrides = localProduction.match(
-      /COMPOSE_PROJECT_NAME="\$project_name" \\\n+ONLINE_API_BASE_URL=/g,
+      /COMPOSE_PROJECT_NAME="\$project_name" \\\n+"\$repository_root\/scripts\/deploy\/run-online-smoke\.sh"/g,
     ) ?? [];
     assert.equal(overrides.length, 3);
+    assert.equal((localProduction.match(/--skip-fault-drills/g) ?? []).length, 2);
   });
 
   it("runs CI for branch pushes without applying branch range checks to tags", () => {

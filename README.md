@@ -252,15 +252,13 @@ SQL
 
 部署只执行 pull、迁移、可选 bootstrap、Compose up 和 runtime 健康检查，不在服务器构建源码。成功后，四个应用 image 以 digest 写回 600 权限环境文件，发布 bundle 保存到 `releases/commits/<commit>`，`current` 和 `previous` 软链接原子切换。失败会停止本轮容器，并尝试恢复上一环境和服务。
 
-生产栈启动后可运行四角色、本人 scope、作业/SSE、策略、草稿发布和审计 smoke；主动故障演练只应在维护窗口执行：
+生产栈启动后通过已部署 API digest 提供的 Node 22 运行四角色、本人 scope、作业/SSE、策略、草稿发布和审计 smoke。默认包含主动故障演练，只应在维护窗口执行；日常无故障回归显式使用 `--skip-fault-drills`：
 
 ```bash
-ONLINE_API_BASE_URL=http://127.0.0.1:4000 \
-ONLINE_WEB_BASE_URL=http://127.0.0.1:3000 \
-ONLINE_COMPOSE_FILE=compose.production.yml \
-ONLINE_COMPOSE_ENV_FILE=.env.production \
-ONLINE_RUN_FAULT_DRILLS=0 \
-node --env-file=.env.production scripts/deploy/online-smoke.mjs
+./scripts/deploy/run-online-smoke.sh \
+  --env-file .env.production \
+  --compose-file compose.production.yml \
+  --skip-fault-drills
 ```
 
 回滚只读取 `previous/release-manifest.json`，重新走相同的清单验证、拉取、迁移和健康门禁：
