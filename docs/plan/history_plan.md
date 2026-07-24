@@ -266,3 +266,12 @@
 - 全量验证：`npm run test:ci` 为 `7 passed`；仓库检查、类型检查、OpenAPI 漂移检查、生产构建、Compose 配置和 `git diff --check` 通过；shared `21 passed`、scheduling application `11 passed`、API `91 passed`、Web `21 passed`、真实 PostgreSQL/Redis Worker `14 passed`、scheduler `97 passed`。15 个迁移首次全部应用且二次应用 0，迁移测试 `9 passed`、迁移检查无缺失或不一致、正式迁移无待应用、PostgreSQL 集成测试 `21 passed`；最终 Playwright 共 35 项，为 `32 passed, 3 skipped`。
 - 清理与边界：本轮隔离 Compose 的容器、网络和卷均已删除，用户已有演示栈未修改。`npm audit` 仍有 2 个 PostCSS moderate 公告并继续归入 CR-002；CR-003 状态不变。未操作腾讯云或其他远程服务器，未实现镜像发布、生产 Compose、HTTPS、异机备份、线上监控或回滚。
 - 后续影响：下一阶段按 `docs/plan/第五版第六阶段计划.md` 先处置生产依赖安全，再建立发布物和本地生产门禁；取得目标主机、域名、镜像仓库、凭据和维护窗口授权后，才执行腾讯云正式部署与交付收尾。
+
+## 2026-07-24 第五版第六阶段：正式部署与交付收尾
+
+- 原计划：`docs/plan/第五版第六阶段计划.md`。
+- 完成提交与版本：`f12486160dcacc09c00f29b6ed63110f1f3378a9` 的 `v5.0.5` 完成正式镜像发布和服务器 digest 部署；`414fc866b5f16b589d0ef99f7ea9add863b56c35` 的 `v5.0.6` 修正 online smoke 当前密码中 `#`、`=` 等特殊字符被 Node dotenv 二次解释的问题，已提交、打注并推送。`v5.0.4` 保持在 `47e7af4`，未移动既有标签。
+- 正式部署与观察：`v5.0.5` 的工作流 `30091171562`、artifact `8595999468`、四个 TCR digest 和 release manifest 均完成校验。服务器按精确 manifest 部署，迁移无待应用，七个容器 health 与 API/Publisher/Worker/scheduler readiness 通过；正式域名 HTTPS、主域重定向、证书续期 dry-run、健康端点、切流备份恢复、systemd health/backup timer、nginx 语法及日志轮转均有验证。2026-07-24 20:26 至 20:56（CST）的部署后观察中，七个容器持续 healthy、零重启、零 OOM，公开健康端点持续为 `200`，本地/COS 备份完整性通过；部署转换瞬间健康巡检的一次失败保留为历史事实，随后巡检和全部观察样本成功。
+- 本地收尾：online smoke runner 只受限解析四个独立 `ONLINE_*_PASSWORD` 值，并直接传入隔离子进程，不再把生产 `.env` 当 shell 文件或让 Node dotenv 重新解释密码字符。`v5.0.6` 的 `npm run test:deploy` 为 `53 passed`，`npm run test:ci` 为 `9 passed`，`npm run test:release` 为 `20 passed`，`npm run test:production-local`、Bash 语法和 `git diff --check` 均通过；特殊字符密码传递已作最窄证明。
+- 归档边界：服务器仍运行 `v5.0.5`，`v5.0.6` 未启动 Runner、未生成新的 TCR digest 或 release manifest、未写入服务器。服务器没有独立 `.online-smoke.env`，因此官方 online smoke、正式域名四角色 Playwright 和真实有限开放观察未执行；没有使用、猜测或从 bootstrap 变量复制当前密码。用户于 2026-07-24 明确决定不为该小型补丁再走一次发布部署链，并接受上述三项留待下一次获准发布/维护窗口完成，归档不将其记为通过。
+- 审查与后续影响：CR-003、CR-036 保持 P3 暂缓，未混入后续版本设计或实现。第五版活动计划至此归档；未来发布须从选定源码重新生成和校验 release manifest，按精确 digest 部署后再补齐独立凭据、官方 online smoke、正式域名 Playwright 与有限开放观察。

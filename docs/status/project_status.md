@@ -2,12 +2,12 @@
 
 ## 1. 当前结论
 
-- 第五版第五阶段已于 2026-07-14 完成并归档，当前唯一活动计划为 `docs/plan/第五版第六阶段计划.md`。
+- 第五版第一至第六阶段均已归档。最终源码版本为 `v5.0.6`（`414fc86`）；该标签只修正 online smoke runner 对当前密码特殊字符的传递。按 2026-07-24 的用户决定，不为该补丁再启动 Runner、发布镜像或写入服务器，正式环境继续运行 `v5.0.5`（`f124861`）。
 - Web 已从根路由组合原型拆分为登录、管理员、排考、运行、草稿、审计、教师本人和学生本人页面；筛选、分页、对比和选中对象进入 URL，可直接访问、刷新和前进后退。
 - 教师与学生作用域由 PostgreSQL 关联和服务端会话决定。本人页面只调用 `/api/me/*`，不能通过路径、查询参数或请求体切换到其他教师或学生群体。
 - 作业、SSE、策略快照、发布资格和审计继续复用第三、第四阶段的服务端合同；页面拆分没有复制任务状态机或把 PostgreSQL 事实迁入浏览器。
 - CR-002、CR-028、CR-029、CR-030、CR-031、CR-032、CR-033、CR-034 与 CR-035 均已关闭。2026-07-17 的第五版双轨独立全量审查新增 CR-029 至 CR-036；2026-07-23 已完成角色授权、创建顺序、发布并发、登录失败防护、受控密码轮换、匿名公开 DTO 裁剪和有界草稿建议整改，当前问题明细为 P3 2 项，共 2 项、没有 P0/P1/P2。`v5.0.1` 保留为可验证历史制品，但其 `find-my-way@9.6.0` 已受高危通告影响，不得作为公开部署输入；详细审查问题只维护在 `docs/status/code_review_status.md`。
-- `v5.0.3` 的失败发布仅保留为历史诊断。`v5.0.4`（`47e7af4`）的自动 CI `30071015266` 和正式发布工作流 `30071713104` 已成功，服务器当前按其已验证 release manifest 运行，并保留 `d3e9dbd` 作为 `previous`。正式域名已完成 HTTPS 切流、首份备份恢复和主机级定时运维基线。用户已完成浏览器人工登录并确认页面可用；官方 online smoke 当前因 smoke 凭据来源仍指向首次建户变量而返回 `401`，自动正式域名 Playwright 和有限开放观察仍是未完成门槛。
+- `v5.0.3` 的失败发布仅保留为历史诊断。`v5.0.5`（`f124861`）的正式发布工作流 `30091171562` 已成功，release manifest 在本地下载和服务器 `current` 目录均通过提交及附件校验；服务器当前按该不可变 manifest 运行，`v5.0.4`（`47e7af4`）保留为 `previous`。正式域名已完成 HTTPS 切流、首份备份恢复和主机级定时运维基线，用户也已完成浏览器人工登录并确认页面可用。`v5.0.5` 已将官方 online smoke 改为只接受独立、权限受控的当前凭据文件，不再读取首次建户变量或把生产 `.env` 当 shell 文件；`v5.0.6` 进一步避免 Node dotenv 对密码特殊字符的二次解释。服务器尚未设置独立凭据文件，因此未继续尝试登录；自动正式域名四角色 Playwright 和有限开放验收均未执行，按用户决定留待后续获准的维护窗口。
 
 ## 2. 已实现内容
 
@@ -79,6 +79,7 @@
 - 恢复入口拒绝源库，只允许同时满足命令行确认、`_disposable` 名称和数据库级 `examforge.disposable=true` 标记的目标。恢复后使用生产 migrate 服务运行迁移检查，并比较关键表、本人 scope、发布版本、作业/attempt/事件序列和审计计数的脱敏摘要。
 - 新增每 5 分钟健康巡检和每日备份的 systemd 模板，以及独立 nginx access/error logrotate。健康检查以稳定类别报告证书、数据盘、容器状态、API/Publisher/Worker/scheduler readiness、本地/异机备份完整性和年龄，不输出环境文件值。systemd 模板固定从 `/srv/apps/examforge` 稳定运维目录读取脚本、Compose 和 600 环境文件，不把只含 manifest/SBOM 的 `releases/current` 当成源码目录。
 - 2026-07-24 的 `v5.0.4` 切流已安装独立 nginx 日志规则、健康巡检和每日备份 unit。两个 unit 使用 `ubuntu`、Docker 补充组和服务私有的 `/run` Docker 配置目录，在保持 `ProtectHome=true`、`PrivateTmp=true` 与 `ProtectSystem=strict` 时正常运行；健康巡检 timer 已连续自动触发两次并通过，备份 timer 已启用并安排下一次每日执行。新建的 custom-format 备份经健康检查复核热备与 COS 完整性；切流备份已在带 disposable 标记的临时库完成恢复、迁移检查和脱敏摘要比对。nginx logrotate dry-run 已确认每日轮转和 `25 MB` 提前轮转语义。
+- `v5.0.5` 的运维补丁让 `run-online-smoke.sh` 强制接收权限为 `600` 的独立凭据文件，只解析四个允许的 `ONLINE_*_PASSWORD` 当前密码，不继承调用方同名变量，也不 `source` 或复制生产 `.env`。该文件不纳入仓库；服务器未配置它时脚本应在登录前失败，不能退回或猜测首次 bootstrap 密码。
 
 ### 2.9 本地生产部署与 digest 回滚
 
@@ -110,9 +111,19 @@
 - API/Worker 镜像瘦身和 workflow 拆分已经完成本地实现与验证；正式 Runner 固定使用 `/home/liangjiaqi/actions-runner`、`_work`、名称 `examforge-release-wsl-x64` 和自定义标签 `examforge-release`。
 - 用户已于 2026-07-15 确认安装和注册 Runner。Linux x64 Runner `2.335.1` 已按官方 SHA-256 校验后安装到独立目录，仓库级注册成功；名称、`_work` 和自定义标签符合设计，未安装系统服务。工作流 `29357107371` 与 `29561565291` 均证明四标签调度、独立 `_work` 检出、代理隔离、完整供应链门禁和广州 TCR 推送路径有效；最新发布结束后凭据与临时报告完成清理，前台 Runner 以 0 退出并恢复离线。
 
+### 2.12 v5.0.5 正式部署、v5.0.6 本地收尾与稳定性观察
+
+- `f12486160dcacc09c00f29b6ed63110f1f3378a9` 的 `v5.0.5` 由正式工作流 `30091171562` 生成；四个应用镜像、SBOM、Trivy HIGH/CRITICAL 扫描、TCR digest、release manifest 和 artifact `8595999468` 均通过。发布前后的本地合同为 `npm run test:deploy` `52 passed`、`npm run test:ci` `9 passed`、`npm run test:release` `20 passed`、`npm audit --audit-level=moderate` 零漏洞、`npm run typecheck`、`npm run test:scheduler`（`97 passed`）和 `git diff --check`。
+- 服务器先校验上传 bundle 的 manifest 与附件，再以 `deploy.sh` 按精确 manifest 部署；迁移无待应用项，七项容器 health 和 API/Publisher/Worker/scheduler readiness 通过，四个应用 OCI revision 均为 `f12486160dcacc09c00f29b6ed63110f1f3378a9`。`current` 指向该提交，`previous` 保留 `47e7af4b8e437db9d31b4fdf010f76a08db7abe0`；正式域名 `/_health/api` 与 `/_health/api-ready` 均返回 `200`，`certbot renew --dry-run --cert-name examforge.site`、`nginx -t` 与 nginx logrotate dry-run 通过。
+- 2026-07-24 20:26 至 20:56（CST）的部署后稳定性观察包含基线和五次完整样本。七个容器始终为 `healthy`、重启计数为 0、OOM 为 false；两个公开健康端点均为 `200`，全量健康检查与本地/COS 备份完整性检查均通过。可用内存介于 2177 至 2209 MiB，数据盘可用空间约 19306532 KiB，nginx error log 行数始终为 12，应用服务错误关键字计数为 0。部署转换瞬间的健康巡检曾因服务重建记录一次失败；部署完成后的下一次巡检及全部观察样本均成功。
+- `v5.0.6`（`414fc866b5f16b589d0ef99f7ea9add863b56c35`）将 runner 改为把已受限解析的四个当前密码直接注入隔离子进程，不再生成由 Node `--env-file` 解析的临时文件，从而保留 `#`、`=` 等密码字符。`npm run test:deploy` 为 `53 passed`，`npm run test:ci` 为 `9 passed`，`npm run test:release` 为 `20 passed`，`npm run test:production-local`、Bash 语法和 `git diff --check` 均通过；标签与提交已推送到 `origin`，未启动 Runner、TCR 或服务器部署。
+- 服务器未存在独立 `.online-smoke.env`，故官方 online smoke 和正式域名四角色 Playwright 均未运行，也没有使用或猜测 bootstrap 密码。上述稳定性观察不代表真实有限开放流量观察。用户于 2026-07-24 明确接受这些线上项目延期，并据此归档第六阶段；归档不将缺失的线上验证记为通过。
+
 ## 3. 最新验证事实
 
-- `v5.0.4` 的 release manifest 在本地下载后与服务器 `current` 均完成提交和附件校验；正式域名 HTTP 与 `www` 均单跳重定向到主域 HTTPS，`/_health/api` 返回 `200`。Let’s Encrypt 证书覆盖主域与 `www`，有效期至 2026-10-22；指定证书的 `certbot renew --dry-run` 成功。健康和备份 timer 均为 enabled/active，健康 timer 已连续两次自动执行所有检查并通过，下一次健康与每日备份触发时间均可由 systemd 查询。用户另行完成浏览器人工登录和页面可用性验收；该人工结果不计入自动 Playwright。自动 E2E 首次尝试因错误 shell 解析 `.env` 触发登录临时锁，锁自然过期后，项目自带 online smoke 以正确解析器仍返回 `401`，说明当前自动 smoke 需要独立的当前凭据来源。
+- `v5.0.5` 的 release manifest 在本地下载后与服务器 `current` 均完成提交和附件校验；正式域名 HTTP 与 `www` 均单跳重定向到主域 HTTPS，`/_health/api` 与 `/_health/api-ready` 返回 `200`。Let’s Encrypt 证书覆盖主域与 `www`；指定证书的 `certbot renew --dry-run` 成功。健康和备份 timer 均为 enabled/active，健康巡检在部署后的成功执行已复核。用户另行完成浏览器人工登录和页面可用性验收；该人工结果不计入自动 Playwright。online smoke 现只接受独立的当前凭据文件，服务器尚未配置该文件，因此没有重新尝试登录或使用首次建户变量。
+- `v5.0.5` 部署后约 30 分钟稳定性观察中，七个容器持续健康、零重启、零 OOM，公网健康端点持续为 `200`，TLS、数据盘、runtime 和本地/COS 备份检查均通过；nginx error log 行数与服务错误计数未增长。该结果不替代正式域名四角色 Playwright 或有限开放流量观察。
+- `v5.0.6` 仅为本地源码补丁：已完成特殊字符密码的直接环境传递证明及 `53` 项部署合同、`9` 项 CI 合同、`20` 项发布合同和完整本地生产发布/回滚回归；它没有 release manifest、TCR digest、Runner 运行或服务器变更。
 - 快速与静态门禁：`npm run test:ci` 为 `9 passed`；发布专项当前为 `20 passed`，覆盖 Docker Engine builder、有界 apt 更新、逐镜像构建/推送边界、远程 digest 校验和仅重跑 release job 时的审计 artifact 交接；部署类 Node.js 合同总计 `47 passed`，覆盖 Ubuntu 宿主 Node.js 12 的发布清单解析兼容、API 重启后 `Last-Event-ID` 重连和独立 nginx site 模板合同。`npm run check:scheduler-openapi`、`npm run build`、`docker compose config --quiet` 的既有基线通过，CR-028 修复后 `npm run check:ci`、仓库级 `npm run typecheck`、Bash 语法和 `git diff --check` 重新通过。
 - 应用测试：shared `22 passed`，scheduling application `11 passed`，CR-033 的 API 命令、轮换和生产密码策略定向集为 `8 passed`（含既有登录失败限流验证），Web `24 passed`；CR-035 的完整 API 回归为 `114 passed`，其中 3 条专项覆盖高基数可应用候选、冲突说明与有界回退。CR-028 修复后隔离 PostgreSQL/Redis Worker 为 `18 passed`，新增连续 3 次不可用后第 4 次成功的恢复场景；scheduler `97 passed`，保留 1 条 Starlette/httpx 2 上游弃用警告。
 - 数据库门禁：可丢弃 PostgreSQL 16 从空库应用 19 个迁移；迁移测试为 `10 passed`，迁移检查确认顺序键等约束完整，API PostgreSQL 集成为 `32 passed`。CR-035 不引入数据库 schema 或 SQL 行为变化；该集继续覆盖既有凭据轮换、跨 API 实例失败计数、临时锁定、运行、草稿发布与回滚竞争、成功审计原子性和审计失败回滚。
@@ -142,8 +153,8 @@
 
 ## 4. 当前边界
 
-- `v5.0.4` 是当前公开基线：广州 TCR 镜像仅按 release manifest digest 部署，服务器不从源码构建；`current` 指向 `47e7af4`，`previous` 保留 `d3e9dbd` 供回滚。生产 secrets 继续仅位于 600 权限环境文件，API/Web 仍只在回环端口监听，nginx 负责唯一公网入口。
-- 腾讯云 4 核、3719 MiB 主机已完成内部迁移、业务 smoke、备份恢复、150 场基准、五类故障、SSE 重连、跨版本回滚和资源观察；在此基础上，正式域名 HTTPS、主域重定向、证书续期 dry-run、切流后备份和主机级周期巡检已完成。当前人工浏览器验收通过，但官方 online smoke、自动 Playwright 与完整有限开放观察未完成，因此不能把人工访问结果写成完整 E2E 或观察期结论。
+- `v5.0.6`（`414fc86`）是第五版最终源码版本，但没有被制作为生产 release manifest。当前公开运行基线仍为 `v5.0.5`：广州 TCR 镜像仅按该 release manifest digest 部署，服务器不从源码构建；`current` 指向 `f124861`，`previous` 保留 `47e7af4` 供回滚。生产 secrets 继续仅位于 600 权限环境文件，API/Web 仍只在回环端口监听，nginx 负责唯一公网入口。
+- 腾讯云 4 核、3719 MiB 主机已完成内部迁移、业务 smoke、备份恢复、150 场基准、五类故障、SSE 重连、跨版本回滚和资源观察；在此基础上，正式域名 HTTPS、主域重定向、证书续期 dry-run、切流后备份、主机级周期巡检和 `v5.0.5` 部署后稳定性观察已完成。当前人工浏览器验收通过；官方 online smoke 与自动 Playwright 因独立当前凭据文件尚不存在而未执行，完整有限开放观察也未完成，因此不能把人工访问或部署后稳定样本写成完整 E2E 或观察期结论。用户已接受该三项作为下一次获准发布窗口的运维跟进，而不是当前第五版归档阻塞项。
 - CR-028 已由本地真实依赖回归、`a507993` 正式制品和腾讯云 Scheduler 冷恢复共同关闭。CR-029 已由本地授权回归关闭，CR-030 已由持久化表内顺序键、内存同语义计数器与 PostgreSQL 分页回归关闭，CR-031 已由 PostgreSQL 并发与回滚回归关闭，CR-032 已由跨实例登录锁定回归关闭，CR-033 已由凭据版本、会话吊销和轮换事务回归关闭，CR-034 已由匿名公开 DTO 和角色负向回归关闭，CR-035 已由有界候选搜索与专项性能回归关闭；当前只剩 P3 的 CR-036 与 CR-003。`v5.0.0`、受通告影响的 `v5.0.1`、仅安全修复证据的 `v5.0.2` 和失败发布历史 `v5.0.3` 均不替代当前公开基线。
 - PostCSS override 是上游稳定 Next 仍精确依赖旧版本期间的临时处置；Next 依赖声明变化时必须重新审计并优先移除覆盖。CR-003 在本地 Docker 代理变化时重新评估，远程发布使用 TCR，不把本地代理带到服务器。
 - 第五版仍不包含多租户、SSO、多策略批量实验、Pareto 推荐、联合全局优化或 Kubernetes 高可用。
@@ -151,7 +162,7 @@
 
 ## 5. 下一步
 
-1. 明确自动验收凭据来源：由用户提供当前四角色 smoke 密码，或授权轮换／建立专用 smoke 账号；不得继续使用首次 bootstrap 变量冒充当前密码。
-2. 凭据就绪后运行官方 online smoke 和正式域名四角色 Playwright，保留脱敏 trace、截图和日志，明确覆盖登录回跳、运营页、作业/SSE、策略、运行、草稿、审计及教师/学生本人页。
-3. 完成有限开放观察，持续核对 CPU、内存、swap、磁盘、nginx 日志增长、备份年龄、5xx、任务失败与证书状态；任一异常先收紧流量或回滚。
-4. 观察期与自动 E2E 均通过后，归档第六阶段活动计划，并同步部署验证记录、状态、索引和计划历史。CR-036 与 CR-003 维持 P3 暂缓边界。
+1. 下一次另行获准的发布/维护窗口，应从已选择的源码提交重新生成并校验 release manifest，再按精确 digest 将 `v5.0.6` 或后续批准版本部署；不得绕过发布链直接把源码写入服务器。
+2. 届时由受控运维流程在服务器创建权限为 `600` 的独立 current-password 凭据文件，写入四个 `ONLINE_*_PASSWORD` 值；不得使用、猜测或从首次 bootstrap 环境变量复制密码。凭据就绪后运行官方 online smoke 和正式域名四角色 Playwright，保留脱敏 trace、截图和日志。
+3. 同一维护窗口或真实有限开放窗口完成 CPU、内存、swap、数据盘、nginx 日志增长、备份年龄、5xx、任务失败与证书状态观察；任一异常先收紧流量或回滚。
+4. CR-036 与 CR-003 维持 P3 暂缓边界；上述运维跟进不构成新的第五版活动计划。
