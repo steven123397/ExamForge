@@ -14,7 +14,6 @@ smoke_credentials_file=""
 fault_drills=1
 safe_path=$PATH
 temporary_dir=""
-runtime_env=""
 node_binary=""
 node_container=""
 
@@ -92,9 +91,6 @@ cleanup() {
   if [[ -n "$node_binary" && -e "$node_binary" ]]; then
     unlink "$node_binary"
   fi
-  if [[ -n "$runtime_env" && -e "$runtime_env" ]]; then
-    unlink "$runtime_env"
-  fi
   if [[ -n "$temporary_dir" && -d "$temporary_dir" ]]; then
     rmdir "$temporary_dir"
   fi
@@ -146,7 +142,7 @@ env_file=$(cd "$(dirname "$env_file")" && pwd -P)/$(basename "$env_file")
 compose_file=$(cd "$(dirname "$compose_file")" && pwd -P)/$(basename "$compose_file")
 smoke_credentials_file=$(cd "$(dirname "$smoke_credentials_file")" && pwd -P)/$(basename "$smoke_credentials_file")
 
-for command in docker mktemp chmod env unlink rmdir; do
+for command in docker mktemp chmod env unlink rmdir stat id; do
   operations_require_command "$command"
 done
 operations_load_env_file "$env_file"
@@ -180,24 +176,7 @@ docker image inspect "$EXAMFORGE_API_IMAGE" >/dev/null \
   || operations_fail "online_smoke_image_missing" "online_smoke" "deployed_api_digest_not_present"
 
 temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/examforge-online-smoke.XXXXXX")
-runtime_env="$temporary_dir/.env.online-smoke"
 node_binary="$temporary_dir/node"
-{
-  printf 'EXAMFORGE_PUBLIC_ORIGIN=%s\n' "$EXAMFORGE_PUBLIC_ORIGIN"
-  printf 'POSTGRES_USER=%s\n' "$POSTGRES_USER"
-  printf 'POSTGRES_DB=%s\n' "$POSTGRES_DB"
-  printf 'ONLINE_ADMIN_PASSWORD=%s\n' "$ONLINE_ADMIN_PASSWORD"
-  printf 'ONLINE_OPERATOR_PASSWORD=%s\n' "$ONLINE_OPERATOR_PASSWORD"
-  printf 'ONLINE_TEACHER_PASSWORD=%s\n' "$ONLINE_TEACHER_PASSWORD"
-  printf 'ONLINE_STUDENT_PASSWORD=%s\n' "$ONLINE_STUDENT_PASSWORD"
-  printf 'ONLINE_API_BASE_URL=http://127.0.0.1:%s\n' "$EXAMFORGE_API_PORT"
-  printf 'ONLINE_WEB_BASE_URL=http://127.0.0.1:%s\n' "$EXAMFORGE_WEB_PORT"
-  printf 'ONLINE_COMPOSE_FILE=%s\n' "$compose_file"
-  printf 'ONLINE_COMPOSE_ENV_FILE=%s\n' "$env_file"
-  printf 'COMPOSE_PROJECT_NAME=%s\n' "$compose_project_name"
-  printf 'ONLINE_RUN_FAULT_DRILLS=%s\n' "$fault_drills"
-} > "$runtime_env"
-chmod 600 "$runtime_env"
 
 node_container=$(docker create --pull=never --entrypoint /bin/true "$EXAMFORGE_API_IMAGE")
 docker cp "$node_container:/usr/local/bin/node" "$node_binary"
@@ -211,4 +190,19 @@ fi
 [[ "$node_version" =~ ^v22\. ]] \
   || operations_fail "online_smoke_runtime_invalid" "online_smoke" "released_node_runtime_must_be_v22"
 
-env -i "PATH=$PATH" "$node_binary" --env-file="$runtime_env" "$online_smoke"
+env -i \
+  "PATH=$PATH" \
+  "EXAMFORGE_PUBLIC_ORIGIN=$EXAMFORGE_PUBLIC_ORIGIN" \
+  "POSTGRES_USER=$POSTGRES_USER" \
+  "POSTGRES_DB=$POSTGRES_DB" \
+  "ONLINE_ADMIN_PASSWORD=$ONLINE_ADMIN_PASSWORD" \
+  "ONLINE_OPERATOR_PASSWORD=$ONLINE_OPERATOR_PASSWORD" \
+  "ONLINE_TEACHER_PASSWORD=$ONLINE_TEACHER_PASSWORD" \
+  "ONLINE_STUDENT_PASSWORD=$ONLINE_STUDENT_PASSWORD" \
+  "ONLINE_API_BASE_URL=http://127.0.0.1:$EXAMFORGE_API_PORT" \
+  "ONLINE_WEB_BASE_URL=http://127.0.0.1:$EXAMFORGE_WEB_PORT" \
+  "ONLINE_COMPOSE_FILE=$compose_file" \
+  "ONLINE_COMPOSE_ENV_FILE=$env_file" \
+  "COMPOSE_PROJECT_NAME=$compose_project_name" \
+  "ONLINE_RUN_FAULT_DRILLS=$fault_drills" \
+  "$node_binary" "$online_smoke"

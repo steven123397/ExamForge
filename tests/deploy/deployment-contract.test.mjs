@@ -48,14 +48,14 @@ describe("production deployment contract", () => {
     assert.match(runner, /docker image inspect "\$EXAMFORGE_API_IMAGE"/);
     assert.match(runner, /docker create --pull=never/);
     assert.match(runner, /\/usr\/local\/bin\/node/);
-    assert.match(runner, /--env-file="\$runtime_env"/);
+    assert.match(runner, /env -i[\s\\]+"PATH=\$PATH"/);
+    assert.match(runner, /"EXAMFORGE_PUBLIC_ORIGIN=\$EXAMFORGE_PUBLIC_ORIGIN"/);
     assert.match(runner, /ONLINE_API_BASE_URL=http:\/\/127\.0\.0\.1:/);
     assert.match(runner, /ONLINE_WEB_BASE_URL=http:\/\/127\.0\.0\.1:/);
-    assert.match(runner, /ONLINE_COMPOSE_FILE=%s/);
-    assert.match(runner, /ONLINE_COMPOSE_ENV_FILE=%s/);
+    assert.match(runner, /"ONLINE_COMPOSE_FILE=\$compose_file"/);
+    assert.match(runner, /"ONLINE_COMPOSE_ENV_FILE=\$env_file"/);
     assert.match(runner, /ONLINE_RUN_FAULT_DRILLS/);
     assert.match(runner, /--skip-fault-drills/);
-    assert.match(runner, /chmod 600 "\$runtime_env"/);
     assert.match(runner, /trap cleanup EXIT/);
     assert.doesNotMatch(runner, /docker run/);
     assert.doesNotMatch(runner, /\/var\/run\/docker\.sock/);
@@ -73,6 +73,17 @@ describe("production deployment contract", () => {
     assert.doesNotMatch(runner, /cp --preserve=mode "\$env_file" "\$runtime_env"/);
     assert.match(smoke, /return process\.env\[`ONLINE_\$\{name\}_PASSWORD`\];/);
     assert.doesNotMatch(smoke, /EXAMFORGE_\$\{name\}_PASSWORD/);
+  });
+
+  it("passes smoke passwords directly without dotenv reinterpretation", () => {
+    const runner = readFileSync(paths.onlineSmokeRunner, "utf8");
+
+    assert.match(runner, /env -i[\s\\]+"PATH=\$PATH"[\s\S]*"ONLINE_ADMIN_PASSWORD=\$ONLINE_ADMIN_PASSWORD"/);
+    assert.match(runner, /"ONLINE_OPERATOR_PASSWORD=\$ONLINE_OPERATOR_PASSWORD"/);
+    assert.match(runner, /"ONLINE_TEACHER_PASSWORD=\$ONLINE_TEACHER_PASSWORD"/);
+    assert.match(runner, /"ONLINE_STUDENT_PASSWORD=\$ONLINE_STUDENT_PASSWORD"/);
+    assert.doesNotMatch(runner, /--env-file="\$runtime_env"/);
+    assert.doesNotMatch(runner, /ONLINE_ADMIN_PASSWORD=%s/);
   });
 
   it("uses .env as the single default production environment filename", () => {
