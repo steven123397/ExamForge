@@ -18,6 +18,7 @@ const paths = {
   applyEnvironment: join(repositoryRoot, "scripts/deploy/apply-release-env.mjs"),
   bootstrap: join(repositoryRoot, "scripts/deploy/bootstrap-demo.sh"),
   ciWorkflow: join(repositoryRoot, ".github/workflows/ci.yml"),
+  releaseWorkflow: join(repositoryRoot, ".github/workflows/release-images.yml"),
   deploy: join(repositoryRoot, "scripts/deploy/deploy.sh"),
   rollback: join(repositoryRoot, "scripts/deploy/rollback.sh"),
   onlineSmoke: join(repositoryRoot, "scripts/deploy/online-smoke.mjs"),
@@ -158,6 +159,23 @@ describe("production deployment contract", () => {
   it("runs CI for branch pushes without applying branch range checks to tags", () => {
     const ciWorkflow = readFileSync(paths.ciWorkflow, "utf8");
     assert.match(ciWorkflow, /^  push:\n    branches:\n      - "\*\*"$/m);
+  });
+
+  it("keeps the quality audit artifact reachable when only the release job is rerun", () => {
+    const workflow = readFileSync(paths.releaseWorkflow, "utf8");
+    const artifactReferences = workflow.match(
+      /name: release-audit-\$\{\{ github\.run_id \}\}(?:\r?\n|$)/g,
+    ) ?? [];
+    const qualityAuditUpload = workflow.match(
+      /- name: 上传生产依赖审计[\s\S]*?(?=\n\n  release:)/,
+    )?.[0] ?? "";
+
+    assert.equal(artifactReferences.length, 3);
+    assert.match(qualityAuditUpload, /overwrite: true/);
+    assert.doesNotMatch(
+      workflow,
+      /name: release-audit-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/,
+    );
   });
 });
 

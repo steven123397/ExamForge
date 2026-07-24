@@ -102,7 +102,7 @@ workflow 不再调用 `docker/setup-buildx-action`，也不创建需要从 Docke
 
 - 校验手动输入、目标分支和完整提交。
 - 执行依赖审计、安装脚本门禁、单元/集成测试、类型检查、scheduler/OpenAPI 检查和生产构建。
-- 生成生产依赖审计 artifact，供发布 job 下载。
+- 生成生产依赖审计 artifact，供发布 job 下载。跨 job 名称只使用 `github.run_id`；不得加入全局 `github.run_attempt`，因为仅重跑 release job 也会递增该值而不会重跑已成功的质量 job。质量 job 被重跑时以 `overwrite: true` 替换同一 workflow run 的审计附件。
 - 不登录 TCR，不构建或推送正式镜像。
 
 ### 5.2 发布 job

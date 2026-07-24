@@ -7,7 +7,7 @@
 - 教师与学生作用域由 PostgreSQL 关联和服务端会话决定。本人页面只调用 `/api/me/*`，不能通过路径、查询参数或请求体切换到其他教师或学生群体。
 - 作业、SSE、策略快照、发布资格和审计继续复用第三、第四阶段的服务端合同；页面拆分没有复制任务状态机或把 PostgreSQL 事实迁入浏览器。
 - CR-002、CR-028、CR-029、CR-030、CR-031、CR-032、CR-033、CR-034 与 CR-035 均已关闭。2026-07-17 的第五版双轨独立全量审查新增 CR-029 至 CR-036；2026-07-23 已完成角色授权、创建顺序、发布并发、登录失败防护、受控密码轮换、匿名公开 DTO 裁剪和有界草稿建议整改，当前问题明细为 P3 2 项，共 2 项、没有 P0/P1/P2。`v5.0.1` 保留为可验证历史制品，但其 `find-my-way@9.6.0` 已受高危通告影响，不得公开切流；最小 `9.7.0` 锁文件修复已由 `d3e9dbd` 的自动 CI `30064612184` 与 `v5.0.2` 发布工作流 `30065312641` 完整验证。新的公开门槛不是 DNS，而是尚未以正式制品完成官方 online smoke 入口、HTTPS 和正式域名验收；详细审查问题只维护在 `docs/status/code_review_status.md`。
-- 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送。`v5.0.2` 已生成可验证 release artifact 和四个广州 TCR digest，服务器当前按 `d3e9dbd` digest 运行仅回环生产栈，`current` 指向该提交、`previous` 保留 `a507993`，七项容器 health 与服务 readiness 已通过。切流前发现服务器 Node 12 不能直接运行 Node 22 的官方 online smoke，当前工作区已新增受限 Node 22 运行入口并完成本地全链验证；它仍须随下一正式制品部署后通过官方 smoke。服务器尚未安装 ExamForge nginx site、证书、systemd/logrotate 或公开域名流量。
+- 第五版第一至第五阶段均已提交并推送；第六阶段生产发布与运维基线已由 `f741fc0` 提交并推送。`v5.0.2` 已生成可验证 release artifact 和四个广州 TCR digest，服务器当前按 `d3e9dbd` digest 运行仅回环生产栈，`current` 指向该提交、`previous` 保留 `a507993`，七项容器 health 与服务 readiness 已通过。`v5.0.3` 的 `d180585` 已补齐受限 Node 22 online smoke 入口，但其工作流 `30069424303` 的首个 release job 在 GitHub checkout 外部连接失败；仅重跑 release job 后，质量 job 已成功上传的审计 artifact 因 `github.run_attempt` 变更而不可下载。两次均停在镜像构建、TCR 登录和服务器写入之前。当前补丁将跨 job 审计 artifact 固定到 workflow run ID，并在质量 job 重跑时覆盖同 run 的旧附件；它仍须由下一正式制品重新验证。服务器尚未安装 ExamForge nginx site、证书、systemd/logrotate 或公开域名流量。
 
 ## 2. 已实现内容
 
@@ -112,7 +112,7 @@
 
 ## 3. 最新验证事实
 
-- 快速与静态门禁：`npm run test:ci` 为 `9 passed`；发布专项当前为 `19 passed`，覆盖 Docker Engine builder、有界 apt 更新、逐镜像构建/推送边界和远程 digest 校验；部署类 Node.js 合同总计 `45 passed`，新增覆盖 Ubuntu 宿主 Node.js 12 的发布清单解析兼容、API 重启后 `Last-Event-ID` 重连和独立 nginx site 模板合同。`npm run check:scheduler-openapi`、`npm run build`、`docker compose config --quiet` 的既有基线通过，CR-028 修复后 `npm run check:ci`、仓库级 `npm run typecheck`、Bash 语法和 `git diff --check` 重新通过。
+- 快速与静态门禁：`npm run test:ci` 为 `9 passed`；发布专项当前为 `20 passed`，覆盖 Docker Engine builder、有界 apt 更新、逐镜像构建/推送边界、远程 digest 校验和仅重跑 release job 时的审计 artifact 交接；部署类 Node.js 合同总计 `47 passed`，覆盖 Ubuntu 宿主 Node.js 12 的发布清单解析兼容、API 重启后 `Last-Event-ID` 重连和独立 nginx site 模板合同。`npm run check:scheduler-openapi`、`npm run build`、`docker compose config --quiet` 的既有基线通过，CR-028 修复后 `npm run check:ci`、仓库级 `npm run typecheck`、Bash 语法和 `git diff --check` 重新通过。
 - 应用测试：shared `22 passed`，scheduling application `11 passed`，CR-033 的 API 命令、轮换和生产密码策略定向集为 `8 passed`（含既有登录失败限流验证），Web `24 passed`；CR-035 的完整 API 回归为 `114 passed`，其中 3 条专项覆盖高基数可应用候选、冲突说明与有界回退。CR-028 修复后隔离 PostgreSQL/Redis Worker 为 `18 passed`，新增连续 3 次不可用后第 4 次成功的恢复场景；scheduler `97 passed`，保留 1 条 Starlette/httpx 2 上游弃用警告。
 - 数据库门禁：可丢弃 PostgreSQL 16 从空库应用 19 个迁移；迁移测试为 `10 passed`，迁移检查确认顺序键等约束完整，API PostgreSQL 集成为 `32 passed`。CR-035 不引入数据库 schema 或 SQL 行为变化；该集继续覆盖既有凭据轮换、跨 API 实例失败计数、临时锁定、运行、草稿发布与回滚竞争、成功审计原子性和审计失败回滚。
 - 浏览器门禁：任务 2 独立 Compose 从空卷重新运行六类故障 smoke 和完整 Playwright，结果为 `32 passed, 3 skipped`，共 35 项；3 项只在主 Chromium 运行的状态专项在其他视觉视口按配置跳过。四角色路由、本人作用域、草稿 pointer/keyboard 操作、运营页面、Axe 扫描、截图和溢出检查均通过。
@@ -143,7 +143,7 @@
 
 - 不可变镜像发布工作流已通过多次完整正式运行，广州 TCR 已具备 `f769725`、`a507993`、`0a2e22f` 与 `d3e9dbd` 的可验证 release artifact 和四镜像 digest；北京服务器只按清单 digest 完成新旧版本部署、回滚与恢复，本地 image ID 或部分 tag 不作为发布结论。`0a2e22f` 的 `v5.0.1` digest 因高危依赖通告仅保留历史审计价值，不得作为公开部署输入。生产 secrets 已在服务器以 600 文件建立；本地已补齐独立 nginx site 模板合同，但 nginx/HTTPS、定时运维单元和外部监控仍未安装。
 - 腾讯云 4 核、3719 MiB 主机已完成内部迁移、业务 smoke、备份恢复、150 场基准、五类故障、SSE 重连、跨版本回滚和资源观察；当前 `d3e9dbd` 栈保持回环运行，尚未安装 nginx、证书或公开流量。该历史和当前内部证据不包含正式域名、HTTPS、公网网络或有限开放流量，不能把 DNS 恢复或回环健康写成公开上线完成。
-- CR-028 已由本地真实依赖回归、`a507993` 正式制品和腾讯云 Scheduler 冷恢复共同关闭。CR-029 已由本地授权回归关闭，CR-030 已由持久化表内顺序键、内存同语义计数器与 PostgreSQL 分页回归关闭，CR-031 已由 PostgreSQL 并发与回滚回归关闭，CR-032 已由跨实例登录锁定回归关闭，CR-033 已由凭据版本、会话吊销和轮换事务回归关闭，CR-034 已由匿名公开 DTO 和角色负向回归关闭，CR-035 已由有界候选搜索与专项性能回归关闭；当前只剩 P3 的 CR-036 与 CR-003。`d603ee1` 的既有 `v5.0.0` CI 结论为失败，不得移动或重写；`v5.0.1` 是可验证历史应用制品，不再是当前公开发布基线。`v5.0.2` 已完成安全修复和发布，但不能替代下一制品在服务器执行官方 online smoke 的证据；任何 nginx、Certbot 或流量动作仍须通过对应验收门禁。
+- CR-028 已由本地真实依赖回归、`a507993` 正式制品和腾讯云 Scheduler 冷恢复共同关闭。CR-029 已由本地授权回归关闭，CR-030 已由持久化表内顺序键、内存同语义计数器与 PostgreSQL 分页回归关闭，CR-031 已由 PostgreSQL 并发与回滚回归关闭，CR-032 已由跨实例登录锁定回归关闭，CR-033 已由凭据版本、会话吊销和轮换事务回归关闭，CR-034 已由匿名公开 DTO 和角色负向回归关闭，CR-035 已由有界候选搜索与专项性能回归关闭；当前只剩 P3 的 CR-036 与 CR-003。`d603ee1` 的既有 `v5.0.0` CI 结论为失败，不得移动或重写；`v5.0.1` 是可验证历史应用制品，不再是当前公开发布基线。`v5.0.2` 已完成安全修复和发布，但不能替代下一制品在服务器执行官方 online smoke 的证据；`v5.0.3` 仅有源码 tag，尚无成功 release artifact，绝不作为部署输入。任何 nginx、Certbot 或流量动作仍须通过对应验收门禁。
 - PostCSS override 是上游稳定 Next 仍精确依赖旧版本期间的临时处置；Next 依赖声明变化时必须重新审计并优先移除覆盖。CR-003 在本地 Docker 代理变化时重新评估，远程发布使用 TCR，不把本地代理带到服务器。
 - 第五版仍不包含多租户、SSO、多策略批量实验、Pareto 推荐、联合全局优化或 Kubernetes 高可用。
 - 运行中取消仍是协作式尽力语义，不承诺强制终止已进入 OR-Tools 的线程，也不保留被强杀求解的中间最优解。
