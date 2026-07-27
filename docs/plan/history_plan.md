@@ -275,3 +275,13 @@
 - 本地收尾：online smoke runner 只受限解析四个独立 `ONLINE_*_PASSWORD` 值，并直接传入隔离子进程，不再把生产 `.env` 当 shell 文件或让 Node dotenv 重新解释密码字符。`v5.0.6` 的 `npm run test:deploy` 为 `53 passed`，`npm run test:ci` 为 `9 passed`，`npm run test:release` 为 `20 passed`，`npm run test:production-local`、Bash 语法和 `git diff --check` 均通过；特殊字符密码传递已作最窄证明。
 - 归档边界：服务器仍运行 `v5.0.5`，`v5.0.6` 未启动 Runner、未生成新的 TCR digest 或 release manifest、未写入服务器。服务器没有独立 `.online-smoke.env`，因此官方 online smoke、正式域名四角色 Playwright 和真实有限开放观察未执行；没有使用、猜测或从 bootstrap 变量复制当前密码。用户于 2026-07-24 明确决定不为该小型补丁再走一次发布部署链，并接受上述三项留待下一次获准发布/维护窗口完成，归档不将其记为通过。
 - 审查与后续影响：CR-003、CR-036 保持 P3 暂缓，未混入后续版本设计或实现。第五版活动计划至此归档；未来发布须从选定源码重新生成和校验 release manifest，按精确 digest 部署后再补齐独立凭据、官方 online smoke、正式域名 Playwright 与有限开放观察。
+
+## 2026-07-27 第六版第一阶段：参与者数据诚实性与合同
+
+- 原计划：`docs/plan/第六版第一阶段计划.md`。
+- 完成提交：第六版第一阶段实现和验证内容整理为 `.worktrees/v6-participant-contracts`、分支 `v6/participant-contracts` 的独立阶段提交；本阶段不合并 `main`、不打标签、不发布或写入服务器。基线为 `9ff3f705c076ffbaea2e0ab3b5b743f0091a8fbc`。
+- 完成内容：新增 `0019_participant_data.sql`、批次参与者状态／版本／digest／seal 时间、脱敏学生与报名表、原子导入、RBAC、健康摘要、seal/reopen 和审计摘要；`display_code` 重复在应用层被统一拒绝，内存与 PostgreSQL 返回相同行级错误语义。`groups_only` 的人数超群体容量成为同步／异步共同硬门禁。
+- 快照与合同：同步排考和异步作业统一经过 schedule input builder，新作业写入含 `participantSnapshot` 的 v3 请求快照；v1/v2 保持兼容，enrollment 模式在第二阶段个体冲突约束实现前返回稳定拒绝。TypeScript 与 Python scheduler 的重叠边和样例 ID 规范排序统一为 Unicode 码点顺序。
+- 验证结果：`npm test`（shared `35`、scheduling application `21`、API `139`、Web `24` 项）、`npm run typecheck`、`npm run test:scheduler`（`104 passed`）、`npm run check:scheduler-openapi`、`npm run build`、`npm run check:ci`、`npm run test:ci`（`9 passed`）和 `git diff --check` 通过。可丢弃 PostgreSQL 16 中迁移测试 `12 passed`、20 个迁移首次全部应用且二次应用为 `0`、迁移检查无缺失，完整 PostgreSQL 集成为 `36 passed`；临时容器已停止。
+- 范围边界：未实现个体冲突求解、发布／回滚 stale 拦截、Web 导入中心、学生门户或 overlap-edge 持久化表；未触发 Runner、TCR、服务器或正式域名写入。
+- 后续影响：用户决定本地提交／合并／推送方式后再冻结第一阶段；第二阶段才处理个体冲突约束与参与者快照联动，不自动展开。

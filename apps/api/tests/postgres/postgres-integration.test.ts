@@ -7,8 +7,11 @@ import {
   createDbClient,
   draftExamInvigilators,
   draftScheduledExams,
+  examBatches,
+  examEnrollments,
   examTasks,
   examTaskStudentGroups,
+  students,
   runMigrations,
   outboxEvents,
   scheduleJobAttempts,
@@ -41,6 +44,17 @@ const adminHeaders = testAuthHeaders.admin;
 const operatorHeaders = testAuthHeaders.operator;
 const viewerHeaders = testAuthHeaders.student;
 const scheduleDraftLockNamespace = 20_260_711;
+
+const groupsOnlyParticipantSnapshot = {
+  schemaVersion: 1 as const,
+  batchId: "batch-2026-spring-final",
+  mode: "groups_only" as const,
+  dataVersion: 0,
+  digest: null,
+  studentCount: 0,
+  enrollmentCount: 0,
+  overlapEdgeCount: 0,
+};
 
 const testDatabaseUrl = getTestDatabaseUrl();
 let client: ExamForgeDbClient | null = null;
@@ -357,6 +371,7 @@ describe("PostgreSQL platform integration", () => {
           digest: version.digest,
           config: version.config,
         },
+        participantSnapshot: groupsOnlyParticipantSnapshot,
         schedulerVersion: `postgres-list-${index}`,
       });
       created.push(response.run);
@@ -442,6 +457,7 @@ describe("PostgreSQL platform integration", () => {
             digest: version.digest,
             config: version.config,
           },
+          participantSnapshot: groupsOnlyParticipantSnapshot,
           schedulerVersion: `postgres-same-timestamp-${index}`,
         });
         createdRunIds.push(response.run.id);
@@ -1454,15 +1470,25 @@ describe("PostgreSQL platform integration", () => {
       .select()
       .from(scheduleJobs)
       .where(eq(scheduleJobs.id, job.id));
-    assert.equal(createdRow.requestVersion, 2);
+    assert.equal(createdRow.requestVersion, 3);
     assert.ok("version" in createdRow.requestPayload);
-    assert.equal(createdRow.requestPayload.version, 2);
-    assert.deepEqual(createdRow.requestPayload.input, command.requestSnapshot.input);
+    assert.equal(createdRow.requestPayload.version, 3);
+    assert.deepEqual(createdRow.requestPayload.input, {
+      ...command.requestSnapshot.input,
+      participant_mode: "groups_only",
+      student_overlap_edges: [],
+    });
     assert.equal(
-      createdRow.requestPayload.version === 2
+      createdRow.requestPayload.version === 3
         ? createdRow.requestPayload.constraintProfile.profileVersionId
         : null,
       "constraint-profile-default-v1",
+    );
+    assert.equal(
+      createdRow.requestPayload.version === 3
+        ? createdRow.requestPayload.participantSnapshot.mode
+        : null,
+      "groups_only",
     );
     assert.equal(createdRow.constraintProfileVersionId, "constraint-profile-default-v1");
     assert.equal(createdRow.constraintProfileSnapshot.schemaVersion, 1);
@@ -1482,8 +1508,18 @@ describe("PostgreSQL platform integration", () => {
     const firstClaim = claims.find((claim) => claim.resolution === "claimed");
     assert.ok(firstClaim && firstClaim.resolution === "claimed");
     assert.equal(firstClaim.job.status, "running");
-    assert.equal(firstClaim.requestSnapshot.version, 2);
-    assert.deepEqual(firstClaim.requestSnapshot.input, command.requestSnapshot.input);
+    assert.equal(firstClaim.requestSnapshot.version, 3);
+    assert.deepEqual(firstClaim.requestSnapshot.input, {
+      ...command.requestSnapshot.input,
+      participant_mode: "groups_only",
+      student_overlap_edges: [],
+    });
+    assert.equal(
+      firstClaim.requestSnapshot.version === 3
+        ? firstClaim.requestSnapshot.participantSnapshot.mode
+        : null,
+      "groups_only",
+    );
     assert.equal(firstClaim.attempt.status, "started");
     assert.equal(firstClaim.attempt.schedulerRequestId, `${job.traceId}:attempt:1`);
 
@@ -1889,18 +1925,18 @@ describe("PostgreSQL platform integration", () => {
 
     const [jobRow] = await dbClient.db.select().from(scheduleJobs)
       .where(eq(scheduleJobs.id, job.id));
-    assert.equal(jobRow.requestVersion, 2);
+    assert.equal(jobRow.requestVersion, 3);
     assert.equal(jobRow.constraintProfileVersionId, selectedVersion.id);
     assert.equal(jobRow.constraintProfileSnapshot.schemaVersion, 1);
     assert.deepEqual(jobRow.constraintProfileSnapshot.config, selectedVersion.config);
     assert.ok("version" in jobRow.requestPayload);
-    assert.equal(jobRow.requestPayload.version, 2);
+    assert.equal(jobRow.requestPayload.version, 3);
     assert.deepEqual(jobRow.requestPayload.input.constraint_profile, selectedVersion.config);
 
     const claim = await repository.claimScheduleJob(job.id);
     assert.equal(claim.resolution, "claimed");
     assert.ok(claim.resolution === "claimed");
-    assert.equal(claim.requestSnapshot.version, 2);
+    assert.equal(claim.requestSnapshot.version, 3);
     assert.deepEqual(claim.requestSnapshot.input.constraint_profile, selectedVersion.config);
     const result = buildScheduleResult({
       ...referenceData.scheduleInput,
@@ -2106,7 +2142,407 @@ describe("PostgreSQL platform integration", () => {
     await repository.close();
     client = null;
   });
+
+  it("imports participant data atomically and rolls the whole batch back on any invalid row", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+    const referenceData = await repository.getReferenceData();
+    const [firstTask, secondTask] = referenceData.scheduleInput.exam_tasks;
+
+    const initial = await app.inject({
+      method: "GET",
+      url: "/api/participants",
+      headers: adminHeaders,
+    });
+    assert.equal(initial.statusCode, 200);
+    assert.equal(initial.json().participants.mode, "groups_only");
+    assert.equal(initial.json().participants.status, "not_required");
+    assert.equal(initial.json().participants.dataVersion, 0);
+
+    const blockedImport = await app.inject({
+      method: "POST",
+      url: "/api/participants/import",
+      headers: adminHeaders,
+      payload: { students: [{ id: "S000001" }], enrollments: [] },
+    });
+    assert.equal(blockedImport.statusCode, 409);
+    assert.equal(blockedImport.json().error, "participant_mode_invalid");
+
+    const switched = await app.inject({
+      method: "PUT",
+      url: "/api/participants/mode",
+      headers: adminHeaders,
+      payload: { mode: "enrollments" },
+    });
+    assert.equal(switched.statusCode, 200, switched.body);
+    assert.equal(switched.json().participants.status, "draft");
+    assert.equal(switched.json().participants.dataVersion, 1);
+
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/api/participants/import",
+      headers: adminHeaders,
+      payload: {
+        students: [{ id: "S000001" }, { id: "S000002" }],
+        enrollments: [
+          { exam_task_id: firstTask.id, student_id: "S000001" },
+          { exam_task_id: "exam-task-missing", student_id: "S000002" },
+        ],
+      },
+    });
+    assert.equal(rejected.statusCode, 400);
+    assert.equal(rejected.json().error, "invalid_participant_import");
+    assert.deepEqual(rejected.json().issues.map((issue: { code: string }) => issue.code), [
+      "exam_task_reference_invalid",
+    ]);
+
+    const [studentRowsAfterFailure, enrollmentRowsAfterFailure] = await Promise.all([
+      dbClient.db.select().from(students),
+      dbClient.db.select().from(examEnrollments),
+    ]);
+    assert.equal(studentRowsAfterFailure.length, 0, "a rejected import writes no students");
+    assert.equal(enrollmentRowsAfterFailure.length, 0, "a rejected import writes no enrollments");
+    const [batchAfterFailure] = await dbClient.db.select().from(examBatches);
+    assert.equal(batchAfterFailure.participantDataVersion, 1, "a rejected import burns no version");
+
+    const duplicateDisplayCode = await app.inject({
+      method: "POST",
+      url: "/api/participants/import",
+      headers: adminHeaders,
+      payload: {
+        students: [
+          { id: "S000001", display_code: "2026-CS-DUP" },
+          { id: "S000002", display_code: "2026-CS-DUP" },
+        ],
+        enrollments: [],
+      },
+    });
+    assert.equal(duplicateDisplayCode.statusCode, 400, duplicateDisplayCode.body);
+    assert.deepEqual(duplicateDisplayCode.json().issues, [{
+      index: 1,
+      path: "students.1.display_code",
+      code: "student_duplicate",
+      message: "display_code 2026-CS-DUP appears more than once in the payload",
+    }]);
+    const [batchAfterDuplicateDisplayCode] = await dbClient.db.select().from(examBatches);
+    assert.equal(
+      batchAfterDuplicateDisplayCode.participantDataVersion,
+      1,
+      "a duplicate display_code import burns no version",
+    );
+
+    const imported = await app.inject({
+      method: "POST",
+      url: "/api/participants/import",
+      headers: adminHeaders,
+      payload: buildPostgresCoveragePayload(referenceData.scheduleInput.exam_tasks.map((task) => task.id)),
+    });
+    assert.equal(imported.statusCode, 200, imported.body);
+    assert.equal(imported.json().participants.dataVersion, 2);
+    assert.equal(imported.json().participants.status, "draft");
+    assert.equal(imported.json().participants.digest, null);
+    // 6 场考试：S000002 覆盖 5 场（C(5,2)=10 条边），S000001 覆盖前 2 场（1 条边）。
+    assert.equal(imported.json().participants.overlapEdgeCount, 11);
+    assert.equal(imported.json().participants.coveredExamTaskCount, 6);
+
+    const [studentRows, enrollmentRows] = await Promise.all([
+      dbClient.db.select().from(students),
+      dbClient.db.select().from(examEnrollments),
+    ]);
+    assert.equal(studentRows.length, 2);
+    assert.equal(enrollmentRows.length, 7);
+    assert.deepEqual(
+      enrollmentRows.filter((row) => row.examTaskId === secondTask.id).map((row) => row.source),
+      ["retake"],
+    );
+
+    const teacherDenied = await app.inject({
+      method: "GET",
+      url: "/api/participants",
+      headers: testAuthHeaders.teacher,
+    });
+    assert.equal(teacherDenied.statusCode, 403);
+    const studentDenied = await app.inject({
+      method: "POST",
+      url: "/api/participants/import",
+      headers: viewerHeaders,
+      payload: { students: [], enrollments: [] },
+    });
+    assert.equal(studentDenied.statusCode, 403);
+
+    await repository.close();
+    client = null;
+  });
+
+  it("seals participant data in one transaction and invalidates it on any later change", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const app = createApp({ repository, scheduler: new PostgresDraftScheduler() });
+    const referenceData = await repository.getReferenceData();
+    const examTaskIds = referenceData.scheduleInput.exam_tasks.map((task) => task.id);
+
+    await app.inject({
+      method: "PUT",
+      url: "/api/participants/mode",
+      headers: adminHeaders,
+      payload: { mode: "enrollments" },
+    });
+
+    const partial = await app.inject({
+      method: "POST",
+      url: "/api/participants/import",
+      headers: adminHeaders,
+      payload: {
+        students: [{ id: "S000001" }],
+        enrollments: [{ exam_task_id: examTaskIds[0], student_id: "S000001" }],
+      },
+    });
+    assert.equal(partial.statusCode, 200, partial.body);
+
+    const incomplete = await app.inject({
+      method: "POST",
+      url: "/api/participants/seal",
+      headers: adminHeaders,
+    });
+    assert.equal(incomplete.statusCode, 409);
+    assert.equal(incomplete.json().error, "participant_data_incomplete");
+    const [batchAfterFailedSeal] = await dbClient.db.select().from(examBatches);
+    assert.equal(batchAfterFailedSeal.participantDataStatus, "draft");
+    assert.equal(batchAfterFailedSeal.participantDataDigest, null);
+
+    await app.inject({
+      method: "POST",
+      url: "/api/participants/import",
+      headers: adminHeaders,
+      payload: buildPostgresCoveragePayload(examTaskIds),
+    });
+    const sealed = await app.inject({
+      method: "POST",
+      url: "/api/participants/seal",
+      headers: adminHeaders,
+    });
+    assert.equal(sealed.statusCode, 200, sealed.body);
+    assert.equal(sealed.json().participants.status, "complete");
+    assert.match(sealed.json().participants.digest, /^[a-f0-9]{64}$/);
+    const sealedAt = sealed.json().participants.sealedAt;
+    assert.equal(typeof sealedAt, "string", "a successful seal exposes its persisted timestamp");
+
+    const health = await app.inject({
+      method: "GET",
+      url: "/api/participants",
+      headers: adminHeaders,
+    });
+    assert.equal(health.statusCode, 200, health.body);
+    assert.equal(
+      health.json().participants.sealedAt,
+      sealedAt,
+      "the health summary retains the seal timestamp after a fresh database read",
+    );
+
+    const [sealedBatch] = await dbClient.db.select().from(examBatches);
+    assert.equal(sealedBatch.participantDataStatus, "complete");
+    assert.equal(sealedBatch.participantDataDigest, sealed.json().participants.digest);
+    const sealedExamTasks = await dbClient.db
+      .select()
+      .from(examTasks)
+      .orderBy(asc(examTasks.id));
+    for (const task of sealedExamTasks) {
+      assert.equal(task.expectedCount, task.id === examTaskIds[0] ? 2 : 1, task.id);
+    }
+
+    const blockedEdit = await app.inject({
+      method: "PATCH",
+      url: `/api/reference-data/exam-tasks/${examTaskIds[0]}`,
+      headers: adminHeaders,
+      payload: { expected_count: 42 },
+    });
+    assert.equal(blockedEdit.statusCode, 409);
+    assert.equal(blockedEdit.json().error, "reference_integrity_violation");
+
+    const reimported = await app.inject({
+      method: "POST",
+      url: "/api/participants/import",
+      headers: adminHeaders,
+      payload: buildPostgresCoveragePayload(examTaskIds, "S000900"),
+    });
+    assert.equal(reimported.statusCode, 200, reimported.body);
+    assert.equal(reimported.json().participants.status, "draft");
+    assert.equal(reimported.json().participants.digest, null);
+    const [invalidatedBatch] = await dbClient.db.select().from(examBatches);
+    assert.equal(invalidatedBatch.participantDataStatus, "draft");
+    assert.equal(invalidatedBatch.participantDataDigest, null);
+    assert.equal(invalidatedBatch.participantDataVersion, sealedBatch.participantDataVersion + 1);
+
+    const auditRows = await dbClient.db
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.entityType, "participant_data"));
+    const actions = auditRows.map((row) => row.action).sort();
+    assert.ok(actions.includes("participant.seal"));
+    assert.ok(actions.includes("participant.seal.rejected"));
+    assert.ok(actions.includes("participant.mode.change"));
+    assert.equal(
+      JSON.stringify(auditRows.map((row) => row.payload)).includes("S000001"),
+      false,
+      "audit payloads never carry roster identifiers",
+    );
+
+    await repository.close();
+    client = null;
+  });
+
+  it("rejects groups_only scheduling when expected counts exceed group capacity", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const scheduler = new PostgresDraftScheduler();
+    const app = createApp({ repository, scheduler });
+    const referenceData = await repository.getReferenceData();
+    const firstTask = referenceData.scheduleInput.exam_tasks[0];
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/reference-data/exam-tasks/${firstTask.id}`,
+      headers: adminHeaders,
+      payload: { expected_count: 100_000 },
+    });
+    assert.equal(patched.statusCode, 200, patched.body);
+
+    for (const url of ["/api/schedule-runs", "/api/schedule-jobs"]) {
+      const response = await app.inject({
+        method: "POST",
+        url,
+        headers: adminHeaders,
+        payload: {},
+      });
+      assert.equal(response.statusCode, 409, response.body);
+      assert.equal(response.json().error, "expected_count_exceeds_group_size");
+      assert.ok(response.json().diagnostics.some((diagnostic: { code: string }) => (
+        diagnostic.code === "expected_count_exceeds_group_size"
+      )));
+    }
+
+    assert.equal(scheduler.lastInput, null, "the scheduler is never invoked for a hard diagnostic");
+    assert.equal((await dbClient.db.select().from(scheduleJobs)).length, 0);
+    assert.equal((await dbClient.db.select().from(scheduleRuns)).length, 0);
+
+    await repository.close();
+    client = null;
+  });
+
+  it("writes v3 request snapshots and refuses enrollment scheduling on real PostgreSQL", async () => {
+    const dbClient = requireClient();
+    const repository = new PostgresPlatformRepository(dbClient);
+    const scheduler = new PostgresDraftScheduler();
+    const app = createApp({ repository, scheduler });
+    const referenceData = await repository.getReferenceData();
+    const examTaskIds = referenceData.scheduleInput.exam_tasks.map((task) => task.id);
+
+    const groupsOnlyJob = await app.inject({
+      method: "POST",
+      url: "/api/schedule-jobs",
+      headers: adminHeaders,
+      payload: {},
+    });
+    assert.equal(groupsOnlyJob.statusCode, 202, groupsOnlyJob.body);
+    const [jobRow] = await dbClient.db
+      .select()
+      .from(scheduleJobs)
+      .where(eq(scheduleJobs.id, groupsOnlyJob.json().job.id));
+    assert.equal(jobRow.requestVersion, 3);
+    const storedSnapshot = jobRow.requestPayload;
+    assert.ok(storedSnapshot && !("legacy" in storedSnapshot) && storedSnapshot.version === 3);
+    if (storedSnapshot && !("legacy" in storedSnapshot) && storedSnapshot.version === 3) {
+      assert.equal(storedSnapshot.participantSnapshot.mode, "groups_only");
+      assert.equal(storedSnapshot.participantSnapshot.digest, null);
+      assert.equal(storedSnapshot.participantSnapshot.overlapEdgeCount, 0);
+      assert.equal(storedSnapshot.input.participant_mode, "groups_only");
+      assert.deepEqual(storedSnapshot.input.student_overlap_edges, []);
+    }
+
+    const syncRun = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: adminHeaders,
+      payload: {},
+    });
+    assert.equal(syncRun.statusCode, 201, syncRun.body);
+    const [runRow] = await dbClient.db
+      .select()
+      .from(scheduleRuns)
+      .where(eq(scheduleRuns.id, syncRun.json().run.id));
+    assert.equal(runRow.participantSnapshot?.mode, "groups_only");
+    assert.equal(runRow.participantSnapshot?.dataVersion, 0);
+
+    await app.inject({
+      method: "PUT",
+      url: "/api/participants/mode",
+      headers: adminHeaders,
+      payload: { mode: "enrollments" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/participants/import",
+      headers: adminHeaders,
+      payload: buildPostgresCoveragePayload(examTaskIds),
+    });
+    const sealed = await app.inject({
+      method: "POST",
+      url: "/api/participants/seal",
+      headers: adminHeaders,
+    });
+    assert.equal(sealed.json().participants.status, "complete");
+
+    const schedulerCallsBefore = scheduler.lastInput;
+    const enrollmentJob = await app.inject({
+      method: "POST",
+      url: "/api/schedule-jobs",
+      headers: adminHeaders,
+      payload: {},
+    });
+    const enrollmentRun = await app.inject({
+      method: "POST",
+      url: "/api/schedule-runs",
+      headers: adminHeaders,
+      payload: {},
+    });
+    assert.equal(enrollmentJob.statusCode, 409, enrollmentJob.body);
+    assert.equal(enrollmentJob.json().error, "enrollment_mode_not_solvable");
+    assert.equal(enrollmentRun.statusCode, 409, enrollmentRun.body);
+    assert.equal(enrollmentRun.json().error, "enrollment_mode_not_solvable");
+    assert.equal(scheduler.lastInput, schedulerCallsBefore, "no scheduler call in enrollments mode");
+
+    const jobRows = await dbClient.db.select().from(scheduleJobs);
+    const runRows = await dbClient.db.select().from(scheduleRuns);
+    assert.equal(jobRows.length, 1, "the rejected enrollment job is never persisted");
+    assert.equal(runRows.length, 1, "the rejected enrollment run is never persisted");
+
+    await repository.close();
+    client = null;
+  });
 });
+
+/** 覆盖全部考试任务的最小完整报名集合：第一场 2 人，其余每场 1 人。 */
+function buildPostgresCoveragePayload(examTaskIds: string[], extraStudentId?: string) {
+  const students: Array<Record<string, unknown>> = [{ id: "S000001" }, { id: "S000002" }];
+  const enrollments: Array<Record<string, unknown>> = [
+    { exam_task_id: examTaskIds[0], student_id: "S000001", source: "regular" },
+    { exam_task_id: examTaskIds[0], student_id: "S000002", source: "elective" },
+    { exam_task_id: examTaskIds[1], student_id: "S000001", source: "retake" },
+  ];
+  for (const examTaskId of examTaskIds.slice(2)) {
+    enrollments.push({ exam_task_id: examTaskId, student_id: "S000002", source: "regular" });
+  }
+  if (extraStudentId) {
+    students.push({ id: extraStudentId });
+    enrollments.push({
+      exam_task_id: examTaskIds[0],
+      student_id: extraStudentId,
+      source: "other",
+    });
+  }
+  return { students, enrollments };
+}
 
 function getTestDatabaseUrl() {
   const databaseUrl = process.env.TEST_DATABASE_URL ?? "";

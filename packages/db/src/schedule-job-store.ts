@@ -1,4 +1,6 @@
 import {
+  buildScheduleJobRequest,
+  ScheduleInputParticipantError,
   ScheduleJobIdempotencyConflictError,
   type ClaimScheduleJobCommand,
   type CompleteScheduleJobCommand,
@@ -28,6 +30,7 @@ import {
   type ScheduleJobListQuery,
   type ScheduleJobListResponse,
   type ScheduleJobStatus,
+  type ParticipantSnapshot,
   type ScheduleResult,
 } from "@examforge/shared";
 import { and, asc, desc, eq, gt, gte, lte, sql } from "drizzle-orm";
@@ -35,6 +38,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { createDbSession, type ExamForgeDatabase, type ExamForgeDbClient } from "./client.js";
 import { resolveConstraintProfile } from "./constraint-profile-store.js";
+import { lockBatchById, readParticipantBatchContext } from "./participant-store.js";
 import {
   auditEvents,
   conflictRecords,
@@ -50,6 +54,26 @@ import {
 type ScheduleJobRow = typeof scheduleJobs.$inferSelect;
 type ScheduleJobAttemptRow = typeof scheduleJobAttempts.$inferSelect;
 type ScheduleJobEventRow = typeof scheduleJobEvents.$inferSelect;
+
+const recoverableRequestVersions = new Set([1, 2, 3]);
+
+/** 历史 v1 / v2 作业没有参与者快照，一律解释为群体模式（设计 §8.2）。 */
+function readFrozenParticipantSnapshot(job: ScheduleJobRow): ParticipantSnapshot {
+  const payload = job.requestPayload;
+  if (payload && !("legacy" in payload) && payload.version === 3) {
+    return payload.participantSnapshot;
+  }
+  return {
+    schemaVersion: 1,
+    batchId: job.batchId ?? "",
+    mode: "groups_only",
+    dataVersion: 0,
+    digest: null,
+    studentCount: 0,
+    enrollmentCount: 0,
+    overlapEdgeCount: 0,
+  };
+}
 
 export interface TransitionScheduleJobCommand {
   to: ScheduleJobStatus;
@@ -69,17 +93,15 @@ export class ScheduleJobStore implements OutboxDeliveryRepository {
     const now = new Date();
     return this.withTransaction(async (db) => {
       const strategy = await resolveConstraintProfile(db, command.constraintProfileVersionId);
-      const requestSnapshot = scheduleJobRequestSnapshotSchema.parse({
-        version: 2,
-        input: {
-          ...structuredClone(command.requestSnapshot.input),
-          constraint_profile: structuredClone(strategy.snapshot.config),
-        },
+      // 参与者版本 CAS：锁批次行 → 读参与者事实 → 装配快照，
+      // 提交前再次确认版本未漂移（设计 §7.2）。
+      const lockedBatch = await lockBatchById(db, command.batchId);
+      const participant = await readParticipantBatchContext(db, lockedBatch);
+      const { requestSnapshot, requestDigest } = buildScheduleJobRequest({
+        referenceInput: command.requestSnapshot.input,
         constraintProfile: strategy.snapshot,
+        participant,
       });
-      const requestDigest = createHash("sha256")
-        .update(JSON.stringify(requestSnapshot))
-        .digest("hex");
       const [row] = await db.insert(scheduleJobs).values({
         id: `job-${randomUUID()}`,
         batchId: command.batchId,
@@ -113,6 +135,13 @@ export class ScheduleJobStore implements OutboxDeliveryRepository {
           throw new ScheduleJobIdempotencyConflictError(command.idempotencyKey);
         }
         return { job: toScheduleJob(existing), created: false };
+      }
+      const currentBatch = await lockBatchById(db, command.batchId);
+      if (currentBatch.participantDataVersion !== participant.state.dataVersion) {
+        throw new ScheduleInputParticipantError(
+          "participant_snapshot_stale",
+          "Participant data changed while the schedule job request was being built.",
+        );
       }
       await this.insertScheduleJobEvent(db, row, "schedule_job.queued", {
         status: row.status,
@@ -285,11 +314,9 @@ export class ScheduleJobStore implements OutboxDeliveryRepository {
     command: ClaimScheduleJobCommand = {},
   ): Promise<ScheduleJobClaimResult> {
     return this.withLockedScheduleJob<ScheduleJobClaimResult>(id, async (db, current) => {
+      // v1 / v2 / v3 都可领取；v0 的 `{legacy:true}` 快照永远不可恢复。
       const parsedSnapshot = scheduleJobRequestSnapshotSchema.safeParse(current.requestPayload);
-      if (
-        !parsedSnapshot.success
-        || (current.requestVersion !== 1 && current.requestVersion !== 2)
-      ) {
+      if (!parsedSnapshot.success || !recoverableRequestVersions.has(current.requestVersion)) {
         throw new Error(`Schedule job ${id} does not contain a recoverable request snapshot.`);
       }
       const [previousAttempt] = await db
@@ -478,12 +505,14 @@ export class ScheduleJobStore implements OutboxDeliveryRepository {
       ) {
         throw new Error(`Schedule job ${id} does not contain a current strategy snapshot.`);
       }
+      // 运行继承作业的冻结参与者快照，不回读当前报名数据（设计 §8.2）。
       const runId = await this.insertScheduleRun(
         db,
         command.result,
         current.batchId,
         current.constraintProfileVersionId,
         current.constraintProfileSnapshot,
+        readFrozenParticipantSnapshot(current),
         command.schedulerVersion ?? "unknown",
       );
       const now = new Date();
@@ -760,6 +789,7 @@ export class ScheduleJobStore implements OutboxDeliveryRepository {
       ScheduleJobRow["constraintProfileSnapshot"],
       { schemaVersion: 1 }
     >,
+    participantSnapshot: ParticipantSnapshot,
     schedulerVersion: string,
   ): Promise<string> {
     const runId = `run-${randomUUID()}`;
@@ -777,6 +807,7 @@ export class ScheduleJobStore implements OutboxDeliveryRepository {
       report: result.report ?? {},
       constraintProfileVersionId,
       constraintProfileSnapshot,
+      participantSnapshot,
       schedulerVersion,
       scoringContractVersion: result.score.scoring_contract_version,
       normalizedScore: result.score.normalized_score,

@@ -75,6 +75,22 @@ class RescheduleContextModel(ContractModel):
     movable_exam_task_ids: list[str] = Field(default_factory=list)
 
 
+class OverlapSampleParticipantModel(ContractModel):
+    student_id: str = Field(min_length=1)
+    exam_a_source: Literal["regular", "elective", "retake", "other"]
+    exam_b_source: Literal["regular", "elective", "retake", "other"]
+
+
+class StudentOverlapEdgeModel(ContractModel):
+    exam_task_id_a: str = Field(min_length=1)
+    exam_task_id_b: str = Field(min_length=1)
+    overlap_count: int = Field(gt=0)
+    sample_participants: list[OverlapSampleParticipantModel] = Field(
+        default_factory=list,
+        max_length=5,
+    )
+
+
 class ScheduleInputModel(ContractModel):
     student_groups: list[StudentGroupModel]
     teachers: list[TeacherModel]
@@ -85,6 +101,8 @@ class ScheduleInputModel(ContractModel):
     constraint_profile: ConstraintProfileModel
     fixed_assignments: list[AssignmentModel] = Field(default_factory=list)
     reschedule_context: RescheduleContextModel | None = None
+    participant_mode: Literal["groups_only", "enrollments"] = "groups_only"
+    student_overlap_edges: list[StudentOverlapEdgeModel] = Field(default_factory=list)
 
 
 class ConflictRecordModel(ContractModel):
@@ -123,6 +141,8 @@ class ScoreBreakdownModel(ContractModel):
 
 
 class ScheduleDiagnosticModel(ContractModel):
+    # 参与者相关代码与 `@examforge/shared` 保持一致；第一阶段只冻结合同，
+    # `student_exam_clash` 等个体冲突诊断由第二阶段的求解实现产生。
     code: Literal[
         "room_capacity_shortage",
         "time_slot_shortage",
@@ -132,6 +152,15 @@ class ScheduleDiagnosticModel(ContractModel):
         "invalid_reference",
         "solver_infeasible",
         "unclassified_conflict",
+        "participant_mode_invalid",
+        "participant_data_incomplete",
+        "participant_snapshot_stale",
+        "expected_count_exceeds_group_size",
+        "expected_count_lower_than_group_size",
+        "expected_count_mismatch",
+        "student_enrollment_reference_invalid",
+        "student_overlap_edge_invalid",
+        "student_exam_clash",
     ]
     severity: Literal["error", "warning"]
     resource_dimension: Literal[
@@ -142,6 +171,9 @@ class ScheduleDiagnosticModel(ContractModel):
         "student_group",
         "input",
         "solver",
+        "participant_data",
+        "student",
+        "exam_task",
     ]
     affected_ids: list[str]
     shortfall: int = Field(ge=0)

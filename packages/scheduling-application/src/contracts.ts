@@ -1,4 +1,8 @@
 import type {
+  ParticipantImportIssue,
+  ParticipantImportRequest,
+  ParticipantMode,
+  ScheduleDiagnostic,
   ScheduleInput,
   ScheduleJobAttempt,
   ScheduleJobError,
@@ -9,6 +13,7 @@ import type {
   ScheduleJobListResponse,
   ScheduleResult,
 } from "@examforge/shared";
+import type { ParticipantDataSet, ParticipantStateRecord } from "./participant-data.js";
 
 export interface CreateScheduleJobCommand {
   batchId: string;
@@ -95,6 +100,64 @@ export type ScheduleJobClaimResult =
       resolution: "not_found";
       job: null;
     };
+
+export interface ParticipantExamTaskFact {
+  id: string;
+  expectedCount: number;
+  studentGroupIds: string[];
+}
+
+/**
+ * 参与者事实的结构化读取结果。仓储只负责组装它，
+ * 边生成、人数核对和 digest 由 application 层的纯函数完成。
+ */
+export interface ParticipantBatchContext {
+  state: ParticipantStateRecord;
+  examTasks: ParticipantExamTaskFact[];
+  studentGroupSizes: Map<string, number>;
+  data: ParticipantDataSet;
+}
+
+export type ImportParticipantDataResult =
+  | {
+      resolution: "imported";
+      state: ParticipantStateRecord;
+      imported: { students: number; enrollments: number };
+    }
+  | { resolution: "invalid"; issues: ParticipantImportIssue[] }
+  | { resolution: "mode_invalid"; state: ParticipantStateRecord }
+  | { resolution: "version_conflict"; state: ParticipantStateRecord };
+
+export type SealParticipantDataResult =
+  | { resolution: "sealed"; state: ParticipantStateRecord }
+  | { resolution: "incomplete"; state: ParticipantStateRecord; diagnostics: ScheduleDiagnostic[] }
+  | { resolution: "mode_invalid"; state: ParticipantStateRecord }
+  | { resolution: "version_conflict"; state: ParticipantStateRecord };
+
+export interface SetParticipantModeCommand {
+  mode: ParticipantMode;
+  expectedVersion?: number;
+}
+
+export interface ImportParticipantDataCommand {
+  request: ParticipantImportRequest;
+  expectedVersion?: number;
+}
+
+export interface SealParticipantDataCommand {
+  expectedVersion?: number;
+  sealedAt: string;
+}
+
+export interface ParticipantDataRepository {
+  getParticipantContext(): Promise<ParticipantBatchContext>;
+  setParticipantMode(command: SetParticipantModeCommand): Promise<ParticipantStateRecord>;
+  importParticipantData(
+    command: ImportParticipantDataCommand,
+  ): Promise<ImportParticipantDataResult>;
+  sealParticipantData(command: SealParticipantDataCommand): Promise<SealParticipantDataResult>;
+  reopenParticipantData(): Promise<ParticipantStateRecord>;
+}
 
 export type ScheduleJobFailureOutcome = "retry" | "failed" | "timed_out" | "cancelled";
 

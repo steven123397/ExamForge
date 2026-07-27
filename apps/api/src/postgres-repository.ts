@@ -11,7 +11,12 @@ import {
   draftExamInvigilators,
   draftScheduledExams,
   examBatches,
+  examEnrollments,
   examTaskStudentGroups,
+  lockBatchById,
+  readParticipantBatchContext,
+  resolveActiveBatch,
+  toParticipantState,
   examTasks,
   rooms,
   resolveDefaultConstraintProfile,
@@ -23,6 +28,7 @@ import {
   scheduleRuns,
   sessions,
   studentGroups,
+  students,
   teacherUnavailableSlots,
   teachers,
   timeSlots,
@@ -48,6 +54,19 @@ import type {
   SetConstraintProfileDefaultPersistenceCommand,
   SetConstraintProfileStatusPersistenceCommand,
   ResolvedConstraintProfile,
+  ImportParticipantDataCommand,
+  ImportParticipantDataResult,
+  ParticipantBatchContext,
+  ParticipantStateRecord,
+  SealParticipantDataCommand,
+  SealParticipantDataResult,
+  SetParticipantModeCommand,
+} from "@examforge/scheduling-application";
+import {
+  buildParticipantSnapshot,
+  digestParticipantData,
+  evaluateParticipantConsistency,
+  validateParticipantImport,
 } from "@examforge/scheduling-application";
 import {
   type ConstraintProfile,
@@ -95,6 +114,7 @@ import {
   buildDraftScheduleResult,
   buildRunComparison,
   isScheduleResultPublishable,
+  assertParticipantEditableReference,
   validateDraftAssignments,
   validateReferenceDelete,
   validateReferenceRecord,
@@ -251,6 +271,8 @@ export class PostgresPlatformRepository implements PlatformRepository {
         constraint_profile: batch.constraintProfile as ConstraintProfile,
         fixed_assignments: [],
         reschedule_context: null,
+        participant_mode: batch.participantMode,
+        student_overlap_edges: [],
       },
     };
   }
@@ -478,11 +500,247 @@ export class PostgresPlatformRepository implements PlatformRepository {
     });
   }
 
+  async getParticipantContext(): Promise<ParticipantBatchContext> {
+    return this.readParticipantContext(this.client.db, await this.getActiveBatch());
+  }
+
+  async setParticipantMode(command: SetParticipantModeCommand): Promise<ParticipantStateRecord> {
+    return this.client.db.transaction(async (tx) => {
+      const batch = await this.getActiveBatchForUpdate(tx);
+      const state = toParticipantState(batch);
+      if (
+        command.expectedVersion !== undefined
+        && command.expectedVersion !== state.dataVersion
+      ) {
+        return state;
+      }
+      if (state.mode === command.mode) {
+        return state;
+      }
+      const [updated] = await tx.update(examBatches)
+        .set({
+          participantMode: command.mode,
+          participantDataStatus: command.mode === "groups_only" ? "not_required" : "draft",
+          participantDataVersion: state.dataVersion + 1,
+          participantDataDigest: null,
+          participantDataSealedAt: null,
+        })
+        .where(eq(examBatches.id, batch.id))
+        .returning();
+      return toParticipantState(updated);
+    });
+  }
+
+  async importParticipantData(
+    command: ImportParticipantDataCommand,
+  ): Promise<ImportParticipantDataResult> {
+    return this.client.db.transaction(async (tx) => {
+      const batch = await this.getActiveBatchForUpdate(tx);
+      const state = toParticipantState(batch);
+      if (state.mode !== "enrollments") {
+        return { resolution: "mode_invalid" as const, state };
+      }
+      if (
+        command.expectedVersion !== undefined
+        && command.expectedVersion !== state.dataVersion
+      ) {
+        return { resolution: "version_conflict" as const, state };
+      }
+
+      const context = await this.readParticipantContext(tx, batch);
+      const { issues, normalized } = validateParticipantImport(command.request, {
+        examTaskIds: new Set(context.examTasks.map((task) => task.id)),
+        studentGroupIds: new Set(context.studentGroupSizes.keys()),
+        existingStudentIds: new Set(context.data.students.map((student) => student.id)),
+        existingStudentDisplayCodeOwners: new Map(
+          context.data.students.flatMap((student) => (
+            student.displayCode === null ? [] : [[student.displayCode, student.id] as const]
+          )),
+        ),
+      });
+      if (issues.length > 0) {
+        return { resolution: "invalid" as const, issues };
+      }
+
+      const batchExamTaskIds = context.examTasks.map((task) => task.id);
+      if (command.request.mode === "replace" && batchExamTaskIds.length > 0) {
+        await tx.delete(examEnrollments)
+          .where(inArray(examEnrollments.examTaskId, batchExamTaskIds));
+      }
+      if (normalized.students.length > 0) {
+        await tx.insert(students)
+          .values(normalized.students.map((student) => ({
+            id: student.id,
+            displayCode: student.displayCode,
+            primaryStudentGroupId: student.primaryStudentGroupId,
+            status: student.status,
+          })))
+          .onConflictDoUpdate({
+            target: students.id,
+            set: {
+              displayCode: sql`excluded.display_code`,
+              primaryStudentGroupId: sql`excluded.primary_student_group_id`,
+              status: sql`excluded.status`,
+              updatedAt: sql`now()`,
+            },
+          });
+      }
+      if (normalized.enrollments.length > 0) {
+        await tx.insert(examEnrollments)
+          .values(normalized.enrollments.map((enrollment) => ({
+            examTaskId: enrollment.examTaskId,
+            studentId: enrollment.studentId,
+            source: enrollment.source,
+            status: enrollment.status,
+          })))
+          .onConflictDoUpdate({
+            target: [examEnrollments.examTaskId, examEnrollments.studentId],
+            set: {
+              source: sql`excluded.source`,
+              status: sql`excluded.status`,
+              updatedAt: sql`now()`,
+            },
+          });
+      }
+
+      const [updated] = await tx.update(examBatches)
+        .set({
+          participantDataStatus: "draft",
+          participantDataVersion: state.dataVersion + 1,
+          participantDataDigest: null,
+          participantDataSealedAt: null,
+        })
+        .where(eq(examBatches.id, batch.id))
+        .returning();
+
+      return {
+        resolution: "imported" as const,
+        state: toParticipantState(updated),
+        imported: {
+          students: normalized.students.length,
+          enrollments: normalized.enrollments.length,
+        },
+      };
+    });
+  }
+
+  async sealParticipantData(
+    command: SealParticipantDataCommand,
+  ): Promise<SealParticipantDataResult> {
+    return this.client.db.transaction(async (tx) => {
+      const batch = await this.getActiveBatchForUpdate(tx);
+      const state = toParticipantState(batch);
+      if (state.mode !== "enrollments") {
+        return { resolution: "mode_invalid" as const, state };
+      }
+      if (
+        command.expectedVersion !== undefined
+        && command.expectedVersion !== state.dataVersion
+      ) {
+        return { resolution: "version_conflict" as const, state };
+      }
+
+      const context = await this.readParticipantContext(tx, batch);
+      const report = evaluateParticipantConsistency({
+        ...context,
+        applyExpectedCountWriteBack: true,
+      });
+      if (report.diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
+        return {
+          resolution: "incomplete" as const,
+          state,
+          diagnostics: report.diagnostics,
+        };
+      }
+
+      for (const [examTaskId, actual] of report.enrollmentCountsByExamTask) {
+        await tx.update(examTasks)
+          .set({ expectedCount: actual })
+          .where(eq(examTasks.id, examTaskId));
+      }
+
+      const digest = digestParticipantData({
+        batchId: state.batchId,
+        mode: "enrollments",
+        dataVersion: state.dataVersion,
+        students: context.data.students,
+        enrollments: report.activeEnrollments,
+        overlapEdges: report.overlapEdges,
+      });
+      const [updated] = await tx.update(examBatches)
+        .set({
+          participantDataStatus: "complete",
+          participantDataDigest: digest,
+          participantDataSealedAt: new Date(command.sealedAt),
+        })
+        .where(and(
+          eq(examBatches.id, batch.id),
+          eq(examBatches.participantDataVersion, state.dataVersion),
+        ))
+        .returning();
+      if (!updated) {
+        return { resolution: "version_conflict" as const, state };
+      }
+      return {
+        resolution: "sealed" as const,
+        state: toParticipantState(updated),
+      };
+    });
+  }
+
+  async reopenParticipantData(): Promise<ParticipantStateRecord> {
+    return this.client.db.transaction(async (tx) => {
+      const batch = await this.getActiveBatchForUpdate(tx);
+      const state = toParticipantState(batch);
+      if (state.mode !== "enrollments") {
+        return state;
+      }
+      return this.bumpParticipantVersion(tx, batch.id, state);
+    });
+  }
+
+  private readParticipantContext(
+    db: ExamForgeDatabase,
+    batch: BatchRow,
+  ): Promise<ParticipantBatchContext> {
+    return readParticipantBatchContext(db, batch);
+  }
+
+  /** 参与者事实一旦变化，旧 seal 与 digest 立即失效。 */
+  private async bumpParticipantVersion(
+    db: ExamForgeDatabase,
+    batchId: string,
+    state: ParticipantStateRecord,
+  ): Promise<ParticipantStateRecord> {
+    const [updated] = await db.update(examBatches)
+      .set({
+        participantDataStatus: "draft",
+        participantDataVersion: state.dataVersion + 1,
+        participantDataDigest: null,
+        participantDataSealedAt: null,
+      })
+      .where(eq(examBatches.id, batchId))
+      .returning();
+    return toParticipantState(updated);
+  }
+
+  private async invalidateParticipantDataForExamTasks(): Promise<void> {
+    await this.client.db.transaction(async (tx) => {
+      const batch = await this.getActiveBatchForUpdate(tx);
+      const state = toParticipantState(batch);
+      if (state.mode !== "enrollments") {
+        return;
+      }
+      await this.bumpParticipantVersion(tx, batch.id, state);
+    });
+  }
+
   async createReferenceRecord(
     resource: ReferenceResource,
     record: ReferenceRecord,
   ): Promise<ReferenceRecord> {
     const batch = await this.getActiveBatch();
+    assertParticipantEditableReference(resource, record, batch.participantMode);
     validateReferenceRecord(resource, record, (await this.getReferenceData()).scheduleInput);
     const data = record as Record<string, unknown>;
 
@@ -574,6 +832,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
           }
           return [task];
         });
+        await this.invalidateParticipantDataForExamTasks();
         return {
           ...this.toExamTask(row),
           student_group_ids: data.student_group_ids as string[],
@@ -588,6 +847,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
     patch: Partial<ReferenceRecord>,
   ): Promise<ReferenceRecord | null> {
     const referenceData = await this.getReferenceData();
+    assertParticipantEditableReference(resource, patch, referenceData.scheduleInput.participant_mode);
     const existing = this.findReferenceRecord(referenceData, resource, id);
     if (!existing) {
       return null;
@@ -744,6 +1004,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
         break;
       case "exam-tasks":
         await this.client.db.delete(examTasks).where(eq(examTasks.id, id));
+        await this.invalidateParticipantDataForExamTasks();
         break;
     }
 
@@ -2332,6 +2593,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       assignmentCount: result.assignments.length,
       constraintProfileVersionId: context.constraintProfileVersionId,
       constraintProfileSnapshot: context.constraintProfileSnapshot,
+      participantSnapshot: context.participantSnapshot,
       schedulerVersion: context.schedulerVersion,
       scoringContractVersion: result.score.scoring_contract_version,
     };
@@ -2348,6 +2610,7 @@ export class PostgresPlatformRepository implements PlatformRepository {
       report: result.report ?? {},
       constraintProfileVersionId: context.constraintProfileVersionId,
       constraintProfileSnapshot: context.constraintProfileSnapshot,
+      participantSnapshot: context.participantSnapshot,
       schedulerVersion: context.schedulerVersion,
       scoringContractVersion: result.score.scoring_contract_version,
       normalizedScore: result.score.normalized_score,
@@ -2407,9 +2670,17 @@ export class PostgresPlatformRepository implements PlatformRepository {
     db: ExamForgeDatabase,
   ): Promise<ScheduleRunPersistenceContext> {
     const strategy = await resolveDefaultConstraintProfile(db);
+    const participant = await readParticipantBatchContext(db, await resolveActiveBatch(db));
+    const report = evaluateParticipantConsistency(participant);
     return {
       constraintProfileVersionId: strategy.versionId,
       constraintProfileSnapshot: strategy.snapshot,
+      participantSnapshot: buildParticipantSnapshot({
+        state: participant.state,
+        studentCount: participant.data.students.length,
+        enrollmentCount: report.activeEnrollments.length,
+        overlapEdgeCount: report.overlapEdges.length,
+      }),
       schedulerVersion: "unknown",
     };
   }

@@ -52,6 +52,8 @@ describe("database migration checks", () => {
     assert.ok(result.checkedTables.includes("auth_login_attempts"));
     assert.ok(result.checkedTables.includes("user_teacher_scopes"));
     assert.ok(result.checkedTables.includes("user_student_group_scopes"));
+    assert.ok(result.checkedTables.includes("students"));
+    assert.ok(result.checkedTables.includes("exam_enrollments"));
     assert.deepEqual(result.missingConstraints, []);
     assert.deepEqual(result.backfillMismatches, []);
     assert.deepEqual(result.legacyRelationColumns, []);
@@ -84,6 +86,14 @@ describe("database migration checks", () => {
     assert.ok(result.checkedConstraints.includes("user_teacher_scopes.user_primary_key"));
     assert.ok(result.checkedConstraints.includes("user_teacher_scopes.teacher_unique"));
     assert.ok(result.checkedConstraints.includes("user_student_group_scopes.primary_key"));
+    assert.ok(result.checkedConstraints.includes("students.primary_key"));
+    assert.ok(result.checkedConstraints.includes("students.display_code_unique"));
+    assert.ok(result.checkedConstraints.includes("students.primary_student_group_foreign_key"));
+    assert.ok(result.checkedConstraints.includes("exam_enrollments.primary_key"));
+    assert.ok(result.checkedConstraints.includes("exam_enrollments.exam_task_foreign_key"));
+    assert.ok(result.checkedConstraints.includes("exam_enrollments.student_foreign_key"));
+    assert.ok(result.checkedConstraints.includes("exam_batches.participant_data_digest_check"));
+    assert.ok(result.checkedConstraints.includes("exam_batches.participant_data_version_check"));
     assert.deepEqual(result.scheduleJobStatuses, [
       "queued",
       "running",
@@ -92,6 +102,137 @@ describe("database migration checks", () => {
       "cancelled",
       "timed_out",
     ]);
+  });
+
+  it("migrates fifth-version batches into groups_only participant defaults exactly once", async () => {
+    assert.ok(client);
+    await applyMigrationsThrough(client, "0018_creation_sequences");
+    await seedDemoData(client);
+    await client.pool.query(`
+      INSERT INTO exam_batches (
+        id, name, status, start_date, end_date, constraint_profile
+      ) VALUES (
+        'batch-v5-legacy', 'Fifth-version batch', 'published',
+        '2026-07-10', '2026-07-14', '{}'::jsonb
+      )
+    `);
+
+    const firstRun = await runMigrations(client);
+    const secondRun = await runMigrations(client);
+    const batches = await client.pool.query<{
+      id: string;
+      participantMode: string;
+      participantDataStatus: string;
+      participantDataVersion: number;
+      participantDataDigest: string | null;
+      participantDataSealedAt: Date | null;
+    }>(`
+      SELECT
+        id,
+        participant_mode::text AS "participantMode",
+        participant_data_status::text AS "participantDataStatus",
+        participant_data_version AS "participantDataVersion",
+        participant_data_digest AS "participantDataDigest",
+        participant_data_sealed_at AS "participantDataSealedAt"
+      FROM exam_batches
+      ORDER BY id
+    `);
+
+    assert.deepEqual(firstRun.map((migration) => migration.id), ["0019_participant_data"]);
+    assert.deepEqual(secondRun, []);
+    assert.ok(batches.rows.length >= 2);
+    for (const batch of batches.rows) {
+      assert.equal(batch.participantMode, "groups_only", batch.id);
+      assert.equal(batch.participantDataStatus, "not_required", batch.id);
+      assert.equal(batch.participantDataVersion, 0, batch.id);
+      assert.equal(batch.participantDataDigest, null, batch.id);
+      assert.equal(batch.participantDataSealedAt, null, batch.id);
+    }
+  });
+
+  it("protects anonymized participant rows with real database constraints", async () => {
+    assert.ok(client);
+    await runMigrations(client);
+    await seedDemoData(client);
+    await client.pool.query(`
+      INSERT INTO students (id, display_code, primary_student_group_id, status) VALUES
+        ('S000001', '2026-CS-0001', 'g-cs-2301', 'active'),
+        ('S000002', NULL, NULL, 'active'),
+        ('S000003', NULL, NULL, 'disabled')
+    `);
+    const examTask = await client.pool.query<{ id: string }>(
+      "SELECT id FROM exam_tasks ORDER BY id LIMIT 1",
+    );
+    const examTaskId = examTask.rows[0]?.id ?? "";
+    assert.ok(examTaskId);
+    await client.pool.query(
+      `INSERT INTO exam_enrollments (exam_task_id, student_id, source, status)
+       VALUES ($1, 'S000001', 'retake', 'active')`,
+      [examTaskId],
+    );
+
+    await assert.rejects(
+      client.pool.query(
+        `INSERT INTO exam_enrollments (exam_task_id, student_id) VALUES ($1, 'S000001')`,
+        [examTaskId],
+      ),
+      /duplicate key|exam_enrollments_pkey/i,
+    );
+    await assert.rejects(
+      client.pool.query(
+        `INSERT INTO exam_enrollments (exam_task_id, student_id) VALUES ($1, 'S-missing')`,
+        [examTaskId],
+      ),
+      /foreign key/i,
+    );
+    await assert.rejects(
+      client.pool.query(
+        "INSERT INTO exam_enrollments (exam_task_id, student_id) VALUES ('exam-missing', 'S000002')",
+      ),
+      /foreign key/i,
+    );
+    await assert.rejects(
+      client.pool.query("DELETE FROM students WHERE id = 'S000001'"),
+      /foreign key/i,
+    );
+    await assert.rejects(
+      client.pool.query(
+        "INSERT INTO students (id, display_code) VALUES ('S000004', '2026-CS-0001')",
+      ),
+      /unique|students_display_code_unique/i,
+    );
+    await assert.rejects(
+      client.pool.query(
+        "INSERT INTO students (id, primary_student_group_id) VALUES ('S000005', 'group-missing')",
+      ),
+      /foreign key/i,
+    );
+    await assert.rejects(
+      client.pool.query(`
+        UPDATE exam_batches
+        SET participant_data_digest = 'not-a-digest'
+        WHERE id = 'batch-2026-spring-final'
+      `),
+      /participant_data_digest/i,
+    );
+    await assert.rejects(
+      client.pool.query(`
+        UPDATE exam_batches
+        SET participant_data_version = -1
+        WHERE id = 'batch-2026-spring-final'
+      `),
+      /participant_data_version/i,
+    );
+
+    await client.pool.query(
+      "DELETE FROM exam_tasks WHERE id = $1",
+      [examTaskId],
+    );
+    const remaining = await client.pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM exam_enrollments WHERE exam_task_id = $1",
+      [examTaskId],
+    );
+    assert.equal(remaining.rows[0]?.count, "0", "enrollments cascade with their exam task");
   });
 
   it("declares strict generated creation sequences for runs, audits, and jobs", async () => {
@@ -183,6 +324,7 @@ describe("database migration checks", () => {
       "0016_auth_login_attempts",
       "0017_auth_credential_versions",
       "0018_creation_sequences",
+      "0019_participant_data",
     ]);
     assert.deepEqual(secondRun, []);
     assert.deepEqual(teacherScopes.rows, [{ username: "teacher", teacherId: "t-zhang" }]);
@@ -243,6 +385,7 @@ describe("database migration checks", () => {
       "0016_auth_login_attempts",
       "0017_auth_credential_versions",
       "0018_creation_sequences",
+      "0019_participant_data",
     ]);
     assert.deepEqual(secondRun, []);
     assert.equal(statusResult.rows[0]?.status, "succeeded");
@@ -307,6 +450,7 @@ describe("database migration checks", () => {
       "0016_auth_login_attempts",
       "0017_auth_credential_versions",
       "0018_creation_sequences",
+      "0019_participant_data",
     ]);
     assert.deepEqual(secondRun, []);
     assert.deepEqual(jobs.rows.map((job) => ({
@@ -444,6 +588,7 @@ describe("database migration checks", () => {
       "0016_auth_login_attempts",
       "0017_auth_credential_versions",
       "0018_creation_sequences",
+      "0019_participant_data",
     ]);
     assert.deepEqual(secondRun, []);
     assert.deepEqual(legacySequences.rows.map((row) => row.tableName), [

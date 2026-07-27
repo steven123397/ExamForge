@@ -134,4 +134,6 @@ export const demoScheduleInput: ScheduleInput = {
   },
   fixed_assignments: [],
   reschedule_context: null,
+  participant_mode: "groups_only",
+  student_overlap_edges: [],
 };

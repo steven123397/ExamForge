@@ -32,6 +32,17 @@ const viewerHeaders = testAuthHeaders.student;
 const testAuthUsers = await buildTestAuthUsers();
 const seededRepositories = new WeakSet<PlatformRepository>();
 
+const groupsOnlyParticipantSnapshot = {
+  schemaVersion: 1 as const,
+  batchId: "batch-2026-spring-final",
+  mode: "groups_only" as const,
+  dataVersion: 0,
+  digest: null,
+  studentCount: 0,
+  enrollmentCount: 0,
+  overlapEdgeCount: 0,
+};
+
 function createApp(options: AppOptions = {}) {
   const repository = options.repository ?? new InMemoryPlatformRepository({ authUsers: testAuthUsers });
   seedRepositorySessions(repository);
@@ -902,6 +913,7 @@ describe("ExamForge API", () => {
           digest: version.digest,
           config: version.config,
         },
+        participantSnapshot: groupsOnlyParticipantSnapshot,
         schedulerVersion: `test-${index}`,
       });
     }
@@ -1505,6 +1517,11 @@ describe("ExamForge API", () => {
         setDefaultConstraintProfile: (command) => (
           repository.setDefaultConstraintProfile(command)
         ),
+        getParticipantContext: () => repository.getParticipantContext(),
+        setParticipantMode: (command) => repository.setParticipantMode(command),
+        importParticipantData: (command) => repository.importParticipantData(command),
+        sealParticipantData: (command) => repository.sealParticipantData(command),
+        reopenParticipantData: () => repository.reopenParticipantData(),
         createReferenceRecord: (resource, record) => repository.createReferenceRecord(resource, record),
         updateReferenceRecord: (resource, id, patch) => repository.updateReferenceRecord(resource, id, patch),
         importReferenceRecords: (resource, records) => repository.importReferenceRecords(resource, records),

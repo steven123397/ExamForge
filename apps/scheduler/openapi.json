@@ -331,6 +331,43 @@
         "title": "NormalizedPenaltyItemModel",
         "type": "object"
       },
+      "OverlapSampleParticipantModel": {
+        "additionalProperties": false,
+        "properties": {
+          "exam_a_source": {
+            "enum": [
+              "regular",
+              "elective",
+              "retake",
+              "other"
+            ],
+            "title": "Exam A Source",
+            "type": "string"
+          },
+          "exam_b_source": {
+            "enum": [
+              "regular",
+              "elective",
+              "retake",
+              "other"
+            ],
+            "title": "Exam B Source",
+            "type": "string"
+          },
+          "student_id": {
+            "minLength": 1,
+            "title": "Student Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "student_id",
+          "exam_a_source",
+          "exam_b_source"
+        ],
+        "title": "OverlapSampleParticipantModel",
+        "type": "object"
+      },
       "RescheduleContextModel": {
         "additionalProperties": false,
         "properties": {
@@ -425,7 +462,16 @@
               "student_group_slot_conflict",
               "invalid_reference",
               "solver_infeasible",
-              "unclassified_conflict"
+              "unclassified_conflict",
+              "participant_mode_invalid",
+              "participant_data_incomplete",
+              "participant_snapshot_stale",
+              "expected_count_exceeds_group_size",
+              "expected_count_lower_than_group_size",
+              "expected_count_mismatch",
+              "student_enrollment_reference_invalid",
+              "student_overlap_edge_invalid",
+              "student_exam_clash"
             ],
             "title": "Code",
             "type": "string"
@@ -442,7 +488,10 @@
               "fixed_assignment",
               "student_group",
               "input",
-              "solver"
+              "solver",
+              "participant_data",
+              "student",
+              "exam_task"
             ],
             "title": "Resource Dimension",
             "type": "string"
@@ -504,6 +553,15 @@
             "title": "Fixed Assignments",
             "type": "array"
           },
+          "participant_mode": {
+            "default": "groups_only",
+            "enum": [
+              "groups_only",
+              "enrollments"
+            ],
+            "title": "Participant Mode",
+            "type": "string"
+          },
           "reschedule_context": {
             "anyOf": [
               {
@@ -526,6 +584,13 @@
               "$ref": "#/components/schemas/StudentGroupModel"
             },
             "title": "Student Groups",
+            "type": "array"
+          },
+          "student_overlap_edges": {
+            "items": {
+              "$ref": "#/components/schemas/StudentOverlapEdgeModel"
+            },
+            "title": "Student Overlap Edges",
             "type": "array"
           },
           "teachers": {
@@ -800,6 +865,41 @@
           "department_id"
         ],
         "title": "StudentGroupModel",
+        "type": "object"
+      },
+      "StudentOverlapEdgeModel": {
+        "additionalProperties": false,
+        "properties": {
+          "exam_task_id_a": {
+            "minLength": 1,
+            "title": "Exam Task Id A",
+            "type": "string"
+          },
+          "exam_task_id_b": {
+            "minLength": 1,
+            "title": "Exam Task Id B",
+            "type": "string"
+          },
+          "overlap_count": {
+            "exclusiveMinimum": 0.0,
+            "title": "Overlap Count",
+            "type": "integer"
+          },
+          "sample_participants": {
+            "items": {
+              "$ref": "#/components/schemas/OverlapSampleParticipantModel"
+            },
+            "maxItems": 5,
+            "title": "Sample Participants",
+            "type": "array"
+          }
+        },
+        "required": [
+          "exam_task_id_a",
+          "exam_task_id_b",
+          "overlap_count"
+        ],
+        "title": "StudentOverlapEdgeModel",
         "type": "object"
       },
       "TeacherModel": {

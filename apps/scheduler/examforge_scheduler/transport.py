@@ -8,15 +8,19 @@ from .diagnostics import build_diagnostics
 from .models import (
     ConstraintProfile,
     Course,
+    EnrollmentSource,
     ExamTask,
     ExamType,
     FixedAssignment,
+    OverlapSampleParticipant,
+    ParticipantMode,
     RescheduleContext,
     Room,
     RoomType,
     ScheduleInput,
     ScheduledExam,
     StudentGroup,
+    StudentOverlapEdge,
     Teacher,
     TimeSlot,
     validate_schedule_input,
@@ -34,6 +38,19 @@ class SchedulerValidationError(ValueError):
     def __init__(self, issues: tuple[str, ...]):
         super().__init__("Schedule input failed semantic validation.")
         self.issues = issues
+
+
+class SchedulerUnsupportedModeError(SchedulerValidationError):
+    """报名模式的个体冲突求解尚未实现，必须显式拒绝而不是退化为群体求解。"""
+
+    code = "participant_mode_unsupported"
+
+    def __init__(self, issues: tuple[str, ...]):
+        super().__init__(issues)
+        ValueError.__init__(
+            self,
+            "Scheduler does not solve enrollment participant mode yet.",
+        )
 
 
 def parse_schedule_input(payload: Mapping[str, Any]) -> ScheduleInput:
@@ -144,6 +161,29 @@ def parse_schedule_input(payload: Mapping[str, Any]) -> ScheduleInput:
                 for item in payload.get("fixed_assignments", ())
             ),
             reschedule_context=reschedule_context,
+            participant_mode=ParticipantMode(
+                payload.get("participant_mode", ParticipantMode.GROUPS_ONLY.value)
+            ),
+            student_overlap_edges=tuple(
+                StudentOverlapEdge(
+                    exam_task_id_a=item["exam_task_id_a"],
+                    exam_task_id_b=item["exam_task_id_b"],
+                    overlap_count=item["overlap_count"],
+                    sample_participants=tuple(
+                        OverlapSampleParticipant(
+                            student_id=participant["student_id"],
+                            exam_a_source=EnrollmentSource(
+                                participant["exam_a_source"]
+                            ),
+                            exam_b_source=EnrollmentSource(
+                                participant["exam_b_source"]
+                            ),
+                        )
+                        for participant in item.get("sample_participants", ())
+                    ),
+                )
+                for item in payload.get("student_overlap_edges", ())
+            ),
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise SchedulerValidationError(
@@ -153,6 +193,15 @@ def parse_schedule_input(payload: Mapping[str, Any]) -> ScheduleInput:
     issues = validate_schedule_input(schedule_input)
     if issues:
         raise SchedulerValidationError(issues)
+
+    if schedule_input.participant_mode is ParticipantMode.ENROLLMENTS:
+        raise SchedulerUnsupportedModeError(
+            (
+                "participant_mode enrollments requires individual clash constraints "
+                "that are not implemented yet; the scheduler refuses to fall back to "
+                "group-only solving.",
+            )
+        )
     return schedule_input
 
 

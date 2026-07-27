@@ -2,6 +2,7 @@
 
 ## 1. 当前结论
 
+- 第六版第一阶段“参与者数据诚实性与合同”已在本地命名工作树 `v6/participant-contracts` 完成实现、真实 PostgreSQL 验证和计划归档；本阶段只保留为独立分支成果，不合并 `main`、打标签、发布镜像或写入服务器。
 - 第五版第一至第六阶段均已归档。最终源码版本为 `v5.0.6`（`414fc86`）；该标签只修正 online smoke runner 对当前密码特殊字符的传递。按 2026-07-24 的用户决定，不为该补丁再启动 Runner、发布镜像或写入服务器，正式环境继续运行 `v5.0.5`（`f124861`）。
 - Web 已从根路由组合原型拆分为登录、管理员、排考、运行、草稿、审计、教师本人和学生本人页面；筛选、分页、对比和选中对象进入 URL，可直接访问、刷新和前进后退。
 - 教师与学生作用域由 PostgreSQL 关联和服务端会话决定。本人页面只调用 `/api/me/*`，不能通过路径、查询参数或请求体切换到其他教师或学生群体。
@@ -119,8 +120,18 @@
 - `v5.0.6`（`414fc866b5f16b589d0ef99f7ea9add863b56c35`）将 runner 改为把已受限解析的四个当前密码直接注入隔离子进程，不再生成由 Node `--env-file` 解析的临时文件，从而保留 `#`、`=` 等密码字符。`npm run test:deploy` 为 `53 passed`，`npm run test:ci` 为 `9 passed`，`npm run test:release` 为 `20 passed`，`npm run test:production-local`、Bash 语法和 `git diff --check` 均通过；标签与提交已推送到 `origin`，未启动 Runner、TCR 或服务器部署。
 - 服务器未存在独立 `.online-smoke.env`，故官方 online smoke 和正式域名四角色 Playwright 均未运行，也没有使用或猜测 bootstrap 密码。上述稳定性观察不代表真实有限开放流量观察。用户于 2026-07-24 明确接受这些线上项目延期，并据此归档第六阶段；归档不将缺失的线上验证记为通过。
 
+### 2.13 第六版第一阶段：参与者数据事实层与快照 v3
+
+- 新增 `0019_participant_data.sql`：考试批次显式保存参与者模式、数据状态、版本、digest 与 seal 时间；`students` 和 `exam_enrollments` 以主键、唯一键、外键和状态约束保存脱敏学生与报名事实。历史第五版批次迁移为 `groups_only`／`not_required`／版本 `0`／空 digest，迁移可重复执行。
+- 管理员可读取健康摘要、切换模式、原子导入、seal 与 reopen；排考员只读摘要，教师和学生不能读取名单或内部诊断。导入在 application 层先统一校验引用、重复学生／报名和 `display_code` 唯一性，任一非法行返回稳定行级错误且整批不落库。
+- seal 将有效报名、学生状态、考试人数和引用一致性收敛为版本化 SHA-256 digest；后续报名、学生启停、考试任务变更或模式切换会清空 digest 并回到 `draft`。`groups_only` 下考试人数超过关联群体容量会成为同步排考和异步作业共同拒绝的硬门禁。
+- 新增唯一 `schedule-input-builder`，同步排考与异步作业统一生成参与者快照和请求快照 v3；v1/v2 快照继续按 `groups_only` 解释，enrollment 模式在个体冲突求解落地前稳定返回 `409`，不再静默降级为群体求解。边与样例学生 ID 的规范排序明确为 Unicode 码点顺序，保证 TypeScript 与 Python scheduler 合同一致。
+- 本阶段不实现个体冲突求解、发布／回滚侧 stale 拦截、Web 导入中心、学生门户或持久化 overlap-edge 事实表；未触发 Runner、TCR、生产部署或任何服务器写入。
+
 ## 3. 最新验证事实
 
+- 2026-07-27 的第六版第一阶段全量本地验证通过：`npm test`（shared `35`、scheduling application `21`、API `139`、Web `24` 项）、`npm run typecheck`、`npm run test:scheduler`（`104 passed`，仅 1 条既有 Starlette/httpx 上游弃用警告）、`npm run check:scheduler-openapi`、`npm run build`、`npm run check:ci` 与 `npm run test:ci`（`9 passed`）均通过；`git diff --check` 无输出。
+- 可丢弃 PostgreSQL 16 证据：`npm run test:migrations` 为 `12 passed`；20 个迁移首次全部应用、二次应用为 `0`；`npm run db:check-migrations` 无缺表、缺约束或回填不一致；`npm run test:postgres` 为 `36 passed`，覆盖原子导入、`display_code` 重复拒绝、seal 时间持久化、groups_only 人数硬门禁和快照 v3。验证容器已停止，未影响已有本地或服务器栈。
 - `v5.0.5` 的 release manifest 在本地下载后与服务器 `current` 均完成提交和附件校验；正式域名 HTTP 与 `www` 均单跳重定向到主域 HTTPS，`/_health/api` 与 `/_health/api-ready` 返回 `200`。Let’s Encrypt 证书覆盖主域与 `www`；指定证书的 `certbot renew --dry-run` 成功。健康和备份 timer 均为 enabled/active，健康巡检在部署后的成功执行已复核。用户另行完成浏览器人工登录和页面可用性验收；该人工结果不计入自动 Playwright。online smoke 现只接受独立的当前凭据文件，服务器尚未配置该文件，因此没有重新尝试登录或使用首次建户变量。
 - `v5.0.5` 部署后约 30 分钟稳定性观察中，七个容器持续健康、零重启、零 OOM，公网健康端点持续为 `200`，TLS、数据盘、runtime 和本地/COS 备份检查均通过；nginx error log 行数与服务错误计数未增长。该结果不替代正式域名四角色 Playwright 或有限开放流量观察。
 - `v5.0.6` 仅为本地源码补丁：已完成特殊字符密码的直接环境传递证明及 `53` 项部署合同、`9` 项 CI 合同、`20` 项发布合同和完整本地生产发布/回滚回归；它没有 release manifest、TCR digest、Runner 运行或服务器变更。
@@ -153,6 +164,7 @@
 
 ## 4. 当前边界
 
+- 第六版第一阶段成果当前只存在于本地命名工作树，已整理为独立分支提交但尚未形成 release 输入。本阶段不把该工作树当作服务器部署来源；后续第六版发布须另行选择源码提交并重新走发布链。
 - `v5.0.6`（`414fc86`）是第五版最终源码版本，但没有被制作为生产 release manifest。当前公开运行基线仍为 `v5.0.5`：广州 TCR 镜像仅按该 release manifest digest 部署，服务器不从源码构建；`current` 指向 `f124861`，`previous` 保留 `47e7af4` 供回滚。生产 secrets 继续仅位于 600 权限环境文件，API/Web 仍只在回环端口监听，nginx 负责唯一公网入口。
 - 腾讯云 4 核、3719 MiB 主机已完成内部迁移、业务 smoke、备份恢复、150 场基准、五类故障、SSE 重连、跨版本回滚和资源观察；在此基础上，正式域名 HTTPS、主域重定向、证书续期 dry-run、切流后备份、主机级周期巡检和 `v5.0.5` 部署后稳定性观察已完成。当前人工浏览器验收通过；官方 online smoke 与自动 Playwright 因独立当前凭据文件尚不存在而未执行，完整有限开放观察也未完成，因此不能把人工访问或部署后稳定样本写成完整 E2E 或观察期结论。用户已接受该三项作为下一次获准发布窗口的运维跟进，而不是当前第五版归档阻塞项。
 - CR-028 已由本地真实依赖回归、`a507993` 正式制品和腾讯云 Scheduler 冷恢复共同关闭。CR-029 已由本地授权回归关闭，CR-030 已由持久化表内顺序键、内存同语义计数器与 PostgreSQL 分页回归关闭，CR-031 已由 PostgreSQL 并发与回滚回归关闭，CR-032 已由跨实例登录锁定回归关闭，CR-033 已由凭据版本、会话吊销和轮换事务回归关闭，CR-034 已由匿名公开 DTO 和角色负向回归关闭，CR-035 已由有界候选搜索与专项性能回归关闭；当前只剩 P3 的 CR-036 与 CR-003。`v5.0.0`、受通告影响的 `v5.0.1`、仅安全修复证据的 `v5.0.2` 和失败发布历史 `v5.0.3` 均不替代当前公开基线。
@@ -162,7 +174,7 @@
 
 ## 5. 下一步
 
-1. 下一次另行获准的发布/维护窗口，应从已选择的源码提交重新生成并校验 release manifest，再按精确 digest 将 `v5.0.6` 或后续批准版本部署；不得绕过发布链直接把源码写入服务器。
-2. 届时由受控运维流程在服务器创建权限为 `600` 的独立 current-password 凭据文件，写入四个 `ONLINE_*_PASSWORD` 值；不得使用、猜测或从首次 bootstrap 环境变量复制密码。凭据就绪后运行官方 online smoke 和正式域名四角色 Playwright，保留脱敏 trace、截图和日志。
-3. 同一维护窗口或真实有限开放窗口完成 CPU、内存、swap、数据盘、nginx 日志增长、备份年龄、5xx、任务失败与证书状态观察；任一异常先收紧流量或回滚。
+1. 本次收尾只提交并推送第六版第一阶段分支，不创建 PR 或触发 Runner、TCR、服务器部署；后续第六版第二阶段再另行安排。
+2. 后续第六版第二阶段再实现个体冲突硬约束、参与者快照 stale 拦截与相关 Web 工作流；第一阶段不自动继续扩展。
+3. 下一次另行获准的第五版发布／维护窗口，仍应从已选择的源码提交重新生成并校验 release manifest，再按精确 digest 部署；凭据就绪后再执行官方 online smoke、正式域名四角色 Playwright 与有限开放观察，不得使用或猜测首次 bootstrap 密码。
 4. CR-036 与 CR-003 维持 P3 暂缓边界；上述运维跟进不构成新的第五版活动计划。

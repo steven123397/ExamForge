@@ -71,6 +71,119 @@ export const constraintProfileSchema = z.object({
   time_limit_seconds: z.number().int().positive(),
 });
 
+export const participantModeSchema = z.enum(["groups_only", "enrollments"]);
+export const participantDataStatusSchema = z.enum(["not_required", "draft", "complete"]);
+export const studentStatusSchema = z.enum(["active", "disabled"]);
+export const enrollmentSourceSchema = z.enum(["regular", "elective", "retake", "other"]);
+export const enrollmentStatusSchema = z.enum(["active", "withdrawn"]);
+
+/**
+ * 脱敏学生只保存排考需要的标识与组织关系。
+ * `.strict()` 是刻意的：姓名、证件号、手机号、邮箱等真实个人信息一律被拒绝。
+ */
+export const studentSchema = z.object({
+  id: z.string().min(1).max(64),
+  display_code: z.string().min(1).max(64).nullable().default(null),
+  primary_student_group_id: z.string().min(1).nullable().default(null),
+  status: studentStatusSchema.default("active"),
+}).strict();
+
+export const examEnrollmentSchema = z.object({
+  exam_task_id: z.string().min(1),
+  student_id: z.string().min(1),
+  source: enrollmentSourceSchema.default("regular"),
+  status: enrollmentStatusSchema.default("active"),
+}).strict();
+
+export const overlapSampleParticipantSchema = z.object({
+  student_id: z.string().min(1),
+  exam_a_source: enrollmentSourceSchema,
+  exam_b_source: enrollmentSourceSchema,
+}).strict();
+
+export const maxOverlapSampleParticipants = 5;
+
+/**
+ * Cross-language canonical ordering for identifiers.
+ *
+ * JavaScript locale collation is environment-dependent and differs from the
+ * code-point ordering used by the Python scheduler. Compare Unicode code
+ * points explicitly so API, worker and scheduler accept the same edge order.
+ */
+export function compareCanonicalIdentifier(left: string, right: string): number {
+  let leftIndex = 0;
+  let rightIndex = 0;
+
+  while (leftIndex < left.length && rightIndex < right.length) {
+    const leftCodePoint = left.codePointAt(leftIndex)!;
+    const rightCodePoint = right.codePointAt(rightIndex)!;
+    if (leftCodePoint !== rightCodePoint) {
+      return leftCodePoint < rightCodePoint ? -1 : 1;
+    }
+    leftIndex += leftCodePoint > 0xffff ? 2 : 1;
+    rightIndex += rightCodePoint > 0xffff ? 2 : 1;
+  }
+
+  if (leftIndex < left.length) {
+    return 1;
+  }
+  if (rightIndex < right.length) {
+    return -1;
+  }
+  return 0;
+}
+
+export const studentOverlapEdgeSchema = z.object({
+  exam_task_id_a: z.string().min(1),
+  exam_task_id_b: z.string().min(1),
+  overlap_count: z.number().int().positive(),
+  sample_participants: z
+    .array(overlapSampleParticipantSchema)
+    .max(maxOverlapSampleParticipants)
+    .default([]),
+}).strict().superRefine((edge, context) => {
+  if (compareCanonicalIdentifier(edge.exam_task_id_a, edge.exam_task_id_b) >= 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["exam_task_id_b"],
+      message: "overlap edge requires exam_task_id_a < exam_task_id_b",
+    });
+  }
+
+  const seenStudentIds = new Set<string>();
+  let previousStudentId: string | null = null;
+  for (const [index, participant] of edge.sample_participants.entries()) {
+    if (seenStudentIds.has(participant.student_id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sample_participants", index, "student_id"],
+        message: `duplicate sample participant ${participant.student_id}`,
+      });
+    }
+    seenStudentIds.add(participant.student_id);
+
+    if (
+      previousStudentId !== null
+      && compareCanonicalIdentifier(previousStudentId, participant.student_id) >= 0
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sample_participants", index, "student_id"],
+        message: "sample participants must be sorted by student_id",
+      });
+    }
+    previousStudentId = participant.student_id;
+  }
+
+  if (edge.sample_participants.length > edge.overlap_count) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sample_participants"],
+      message: "sample participants cannot exceed overlap_count",
+    });
+  }
+});
+
 const sha256DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const constraintProfileVersionSchema = z.object({
@@ -106,6 +219,47 @@ export const constraintProfileSnapshotSchema = z.object({
   digest: sha256DigestSchema,
   config: constraintProfileSchema,
 }).strict();
+
+/**
+ * 参与者快照元数据。作业、运行和草稿据此追溯当时冻结的报名事实，
+ * 不回读当前报名表。`groups_only` 没有报名 digest。
+ */
+export const participantSnapshotSchema = z.object({
+  schemaVersion: z.literal(1),
+  batchId: z.string().min(1),
+  mode: participantModeSchema,
+  dataVersion: z.number().int().nonnegative(),
+  digest: sha256DigestSchema.nullable(),
+  studentCount: z.number().int().nonnegative(),
+  enrollmentCount: z.number().int().nonnegative(),
+  overlapEdgeCount: z.number().int().nonnegative(),
+}).strict().superRefine((snapshot, context) => {
+  if (snapshot.mode === "groups_only") {
+    if (snapshot.digest !== null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["digest"],
+        message: "groups_only snapshots carry no participant digest",
+      });
+    }
+    if (snapshot.enrollmentCount !== 0 || snapshot.overlapEdgeCount !== 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["enrollmentCount"],
+        message: "groups_only snapshots carry no enrollments or overlap edges",
+      });
+    }
+    return;
+  }
+
+  if (snapshot.digest === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["digest"],
+      message: "enrollments snapshots require a sealed participant digest",
+    });
+  }
+});
 
 export const fixedAssignmentSchema = z.object({
   exam_task_id: z.string(),
@@ -170,6 +324,63 @@ export const scheduleInputSchema = z.object({
   constraint_profile: constraintProfileSchema,
   fixed_assignments: z.array(fixedAssignmentSchema).default([]),
   reschedule_context: rescheduleContextSchema.nullable().default(null),
+  participant_mode: participantModeSchema.default("groups_only"),
+  student_overlap_edges: z.array(studentOverlapEdgeSchema).default([]),
+}).superRefine((input, context) => {
+  if (input.participant_mode === "groups_only" && input.student_overlap_edges.length > 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["student_overlap_edges"],
+      message: "groups_only inputs must not carry student overlap edges",
+    });
+    return;
+  }
+
+  const examTaskIds = new Set(input.exam_tasks.map((task) => task.id));
+  let previousKey: [string, string] | null = null;
+  for (const [index, edge] of input.student_overlap_edges.entries()) {
+    for (const [field, examTaskId] of [
+      ["exam_task_id_a", edge.exam_task_id_a],
+      ["exam_task_id_b", edge.exam_task_id_b],
+    ] as const) {
+      if (!examTaskIds.has(examTaskId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["student_overlap_edges", index, field],
+          message: `unknown exam_task_id ${examTaskId}`,
+        });
+      }
+    }
+
+    const key: [string, string] = [edge.exam_task_id_a, edge.exam_task_id_b];
+    if (
+      previousKey !== null
+      && previousKey[0] === key[0]
+      && previousKey[1] === key[1]
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["student_overlap_edges", index],
+        message: `duplicate overlap edge ${edge.exam_task_id_a}/${edge.exam_task_id_b}`,
+      });
+    } else if (
+      previousKey !== null
+      && (
+        compareCanonicalIdentifier(previousKey[0], key[0]) > 0
+        || (
+          compareCanonicalIdentifier(previousKey[0], key[0]) === 0
+          && compareCanonicalIdentifier(previousKey[1], key[1]) > 0
+        )
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["student_overlap_edges", index],
+        message: "overlap edges must be sorted by (exam_task_id_a, exam_task_id_b)",
+      });
+    }
+    previousKey = key;
+  }
 });
 
 export const conflictRecordSchema = z.object({
@@ -216,6 +427,15 @@ export const scheduleDiagnosticCodeSchema = z.enum([
   "invalid_reference",
   "solver_infeasible",
   "unclassified_conflict",
+  "participant_mode_invalid",
+  "participant_data_incomplete",
+  "participant_snapshot_stale",
+  "expected_count_exceeds_group_size",
+  "expected_count_lower_than_group_size",
+  "expected_count_mismatch",
+  "student_enrollment_reference_invalid",
+  "student_overlap_edge_invalid",
+  "student_exam_clash",
 ]);
 
 export const scheduleDiagnosticResourceSchema = z.enum([
@@ -226,6 +446,9 @@ export const scheduleDiagnosticResourceSchema = z.enum([
   "student_group",
   "input",
   "solver",
+  "participant_data",
+  "student",
+  "exam_task",
 ]);
 
 export const scheduleDiagnosticSchema = z.object({
@@ -299,6 +522,16 @@ export type Room = z.infer<typeof roomSchema>;
 export type TimeSlot = z.infer<typeof timeSlotSchema>;
 export type ExamTask = z.infer<typeof examTaskSchema>;
 export type ConstraintProfile = z.infer<typeof constraintProfileSchema>;
+export type ParticipantMode = z.infer<typeof participantModeSchema>;
+export type ParticipantDataStatus = z.infer<typeof participantDataStatusSchema>;
+export type StudentStatus = z.infer<typeof studentStatusSchema>;
+export type EnrollmentSource = z.infer<typeof enrollmentSourceSchema>;
+export type EnrollmentStatus = z.infer<typeof enrollmentStatusSchema>;
+export type Student = z.infer<typeof studentSchema>;
+export type ExamEnrollment = z.infer<typeof examEnrollmentSchema>;
+export type OverlapSampleParticipant = z.infer<typeof overlapSampleParticipantSchema>;
+export type StudentOverlapEdge = z.infer<typeof studentOverlapEdgeSchema>;
+export type ParticipantSnapshot = z.infer<typeof participantSnapshotSchema>;
 export type ConstraintProfileVersion = z.infer<typeof constraintProfileVersionSchema>;
 export type ConstraintProfileSnapshot = z.infer<typeof constraintProfileSnapshotSchema>;
 export type ConstraintProfileStatus = z.infer<typeof constraintProfileStatusSchema>;
@@ -334,6 +567,58 @@ export const examBatchSummarySchema = z.object({
 
 export type ExamBatchSummary = z.infer<typeof examBatchSummarySchema>;
 
+export const participantImportRequestSchema = z.object({
+  mode: z.enum(["replace", "merge"]).default("replace"),
+  students: z.array(studentSchema).max(50_000).default([]),
+  enrollments: z.array(examEnrollmentSchema).max(200_000).default([]),
+}).strict();
+
+export const participantImportIssueCodeSchema = z.enum([
+  "student_duplicate",
+  "student_reference_invalid",
+  "student_group_reference_invalid",
+  "enrollment_duplicate",
+  "exam_task_reference_invalid",
+]);
+
+export const participantImportIssueSchema = z.object({
+  index: z.number().int().nonnegative(),
+  path: z.string().min(1),
+  code: participantImportIssueCodeSchema,
+  message: z.string().min(1),
+}).strict();
+
+export const participantHealthSummarySchema = z.object({
+  batchId: z.string().min(1),
+  mode: participantModeSchema,
+  status: participantDataStatusSchema,
+  dataVersion: z.number().int().nonnegative(),
+  digest: sha256DigestSchema.nullable(),
+  sealedAt: z.string().datetime().nullable(),
+  studentCount: z.number().int().nonnegative(),
+  activeStudentCount: z.number().int().nonnegative(),
+  enrollmentCount: z.number().int().nonnegative(),
+  activeEnrollmentCount: z.number().int().nonnegative(),
+  examTaskCount: z.number().int().nonnegative(),
+  coveredExamTaskCount: z.number().int().nonnegative(),
+  overlapEdgeCount: z.number().int().nonnegative(),
+  enrollmentSourceCounts: z.record(enrollmentSourceSchema, z.number().int().nonnegative()),
+  diagnostics: z.array(scheduleDiagnosticSchema),
+}).strict();
+
+export type ParticipantImportRequest = z.infer<typeof participantImportRequestSchema>;
+export type ParticipantImportIssueCode = z.infer<typeof participantImportIssueCodeSchema>;
+export type ParticipantImportIssue = z.infer<typeof participantImportIssueSchema>;
+export type ParticipantHealthSummary = z.infer<typeof participantHealthSummarySchema>;
+
+export interface ParticipantHealthResponse {
+  participants: ParticipantHealthSummary;
+}
+
+export interface ParticipantImportResponse extends ParticipantHealthResponse {
+  imported: { students: number; enrollments: number };
+}
+
 export interface DashboardResponse {
   batch: ExamBatchSummary;
   metrics: {
@@ -358,6 +643,7 @@ export const scheduleRunSummarySchema = z.object({
   assignmentCount: z.number().int().nonnegative(),
   constraintProfileVersionId: z.string().min(1).nullable().optional(),
   constraintProfileSnapshot: constraintProfileSnapshotSchema.nullable().optional(),
+  participantSnapshot: participantSnapshotSchema.nullable().optional(),
   schedulerVersion: z.string().min(1).optional(),
   scoringContractVersion: z.number().int().nonnegative().optional(),
 }).strict();
@@ -689,6 +975,12 @@ export const scheduleJobRequestSnapshotSchema = z.discriminatedUnion("version", 
     version: z.literal(2),
     input: scheduleInputSchema,
     constraintProfile: constraintProfileSnapshotSchema,
+  }).strict(),
+  z.object({
+    version: z.literal(3),
+    input: scheduleInputSchema,
+    constraintProfile: constraintProfileSnapshotSchema,
+    participantSnapshot: participantSnapshotSchema,
   }).strict(),
 ]);
 
