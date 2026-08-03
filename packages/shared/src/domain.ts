@@ -459,7 +459,56 @@ export const scheduleDiagnosticSchema = z.object({
   shortfall: z.number().int().nonnegative(),
   message: z.string(),
   suggestion: z.string(),
-}).strict();
+}).strict().superRefine((diagnostic, context) => {
+  if (diagnostic.code === "student_exam_clash") {
+    if (diagnostic.severity !== "error") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["severity"],
+        message: "student_exam_clash must be an error",
+      });
+    }
+    if (diagnostic.resource_dimension !== "student") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["resource_dimension"],
+        message: "student_exam_clash uses the student resource dimension",
+      });
+    }
+    if (
+      diagnostic.affected_ids.length !== 3
+      || compareCanonicalIdentifier(diagnostic.affected_ids[0] ?? "", diagnostic.affected_ids[1] ?? "") >= 0
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["affected_ids"],
+        message: "student_exam_clash affected_ids are (exam_task_id_a, exam_task_id_b, time_slot_id)",
+      });
+    }
+  }
+
+  if (
+    diagnostic.code === "student_overlap_edge_invalid"
+    && (diagnostic.severity !== "error" || diagnostic.resource_dimension !== "input")
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["resource_dimension"],
+      message: "student_overlap_edge_invalid is an input error",
+    });
+  }
+
+  if (
+    diagnostic.code === "participant_snapshot_stale"
+    && (diagnostic.severity !== "error" || diagnostic.resource_dimension !== "participant_data")
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["resource_dimension"],
+      message: "participant_snapshot_stale is a participant-data error",
+    });
+  }
+});
 
 export const solverStatisticsSchema = z.object({
   status: solveStatusSchema,

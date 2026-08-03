@@ -4,7 +4,6 @@ from fastapi.testclient import TestClient
 from examforge_scheduler.generator import generate_small_dataset
 from examforge_scheduler.http_api import create_app
 from examforge_scheduler.transport import (
-    SchedulerUnsupportedModeError,
     SchedulerValidationError,
     parse_schedule_input,
     solve_payload,
@@ -53,20 +52,20 @@ def test_groups_only_payload_rejects_overlap_edges():
     assert any("groups_only" in issue for issue in captured.value.issues)
 
 
-def test_enrollment_mode_is_rejected_until_individual_constraints_exist():
+def test_enrollment_mode_is_accepted_for_individual_constraints():
     payload = _payload()
     payload["participant_mode"] = "enrollments"
     payload["student_overlap_edges"] = [_edge(payload)]
 
-    with pytest.raises(SchedulerUnsupportedModeError) as captured:
-        parse_schedule_input(payload)
+    schedule_input = parse_schedule_input(payload)
 
-    assert captured.value.code == "participant_mode_unsupported"
-    assert captured.value.category == "validation"
-    assert captured.value.retryable is False
+    assert schedule_input.participant_mode.value == "enrollments"
+    assert schedule_input.student_overlap_edges[0].exam_task_id_a < (
+        schedule_input.student_overlap_edges[0].exam_task_id_b
+    )
 
 
-def test_enrollment_mode_never_degrades_to_group_solving_over_http():
+def test_enrollment_mode_reaches_the_scheduler_over_http():
     payload = _payload()
     payload["participant_mode"] = "enrollments"
     payload["student_overlap_edges"] = [_edge(payload)]
@@ -74,10 +73,9 @@ def test_enrollment_mode_never_degrades_to_group_solving_over_http():
     with TestClient(create_app(), raise_server_exceptions=False) as client:
         response = client.post("/solve", json=payload)
 
-    assert response.status_code == 422
+    assert response.status_code == 200
     body = response.json()
-    assert body["error"]["code"] == "participant_mode_unsupported"
-    assert body["error"]["retryable"] is False
+    assert body["statistics"]["status"] in {"feasible", "infeasible"}
 
 
 def test_overlap_edges_must_be_canonical():
@@ -89,7 +87,7 @@ def test_overlap_edges_must_be_canonical():
     payload["student_overlap_edges"] = [self_loop]
     with pytest.raises(SchedulerValidationError) as captured:
         parse_schedule_input(payload)
-    assert captured.value.code == "scheduler_input_invalid"
+    assert captured.value.code == "student_overlap_edge_invalid"
 
     payload["student_overlap_edges"] = [edge, edge]
     with pytest.raises(SchedulerValidationError):
@@ -114,8 +112,9 @@ def test_overlap_edges_use_unicode_code_point_order():
         }
     ]
 
-    with pytest.raises(SchedulerUnsupportedModeError):
-        parse_schedule_input(payload)
+    schedule_input = parse_schedule_input(payload)
+
+    assert schedule_input.student_overlap_edges[0].exam_task_id_a == "\ue000"
 
 
 def test_groups_only_results_stay_identical_to_the_fifth_version():

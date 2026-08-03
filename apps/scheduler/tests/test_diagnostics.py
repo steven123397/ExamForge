@@ -72,3 +72,21 @@ def test_build_diagnostics_maps_fixed_and_invalid_reference_conflicts():
         "invalid_reference",
     ]
     assert all(item.shortfall == 1 for item in diagnostics)
+
+
+def test_non_participant_diagnostic_ids_remain_canonically_sorted():
+    schedule_input = make_schedule_input()
+    diagnostics = build_diagnostics(
+        schedule_input,
+        (
+            ConflictRecord(
+                type="room_time_conflict",
+                severity=ConflictSeverity.ERROR,
+                affected_ids=("room-1", "slot-1", "exam-b", "exam-a"),
+                message="Room conflict.",
+                suggestion="Move an exam.",
+            ),
+        ),
+    )
+
+    assert diagnostics[0].affected_ids == ("exam-a", "exam-b", "room-1", "slot-1")

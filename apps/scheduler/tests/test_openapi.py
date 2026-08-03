@@ -20,6 +20,14 @@ def test_openapi_contains_versioned_scheduler_contract():
     assert solve["responses"]["422"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ErrorResponseModel"
     }
+    diagnostic = document["components"]["schemas"]["ScheduleDiagnosticModel"]
+    assert diagnostic["properties"]["code"]["enum"][-3:] == [
+        "student_enrollment_reference_invalid",
+        "student_overlap_edge_invalid",
+        "student_exam_clash",
+    ]
+    assert "participant_data" in diagnostic["properties"]["resource_dimension"]["enum"]
+    assert "student" in diagnostic["properties"]["resource_dimension"]["enum"]
 
 
 def test_committed_openapi_matches_deterministic_generation():

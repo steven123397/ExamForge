@@ -40,17 +40,8 @@ class SchedulerValidationError(ValueError):
         self.issues = issues
 
 
-class SchedulerUnsupportedModeError(SchedulerValidationError):
-    """报名模式的个体冲突求解尚未实现，必须显式拒绝而不是退化为群体求解。"""
-
-    code = "participant_mode_unsupported"
-
-    def __init__(self, issues: tuple[str, ...]):
-        super().__init__(issues)
-        ValueError.__init__(
-            self,
-            "Scheduler does not solve enrollment participant mode yet.",
-        )
+class StudentOverlapEdgeValidationError(SchedulerValidationError):
+    code = "student_overlap_edge_invalid"
 
 
 def parse_schedule_input(payload: Mapping[str, Any]) -> ScheduleInput:
@@ -192,16 +183,9 @@ def parse_schedule_input(payload: Mapping[str, Any]) -> ScheduleInput:
 
     issues = validate_schedule_input(schedule_input)
     if issues:
+        if any(issue.startswith("student_overlap_edge") for issue in issues):
+            raise StudentOverlapEdgeValidationError(issues)
         raise SchedulerValidationError(issues)
-
-    if schedule_input.participant_mode is ParticipantMode.ENROLLMENTS:
-        raise SchedulerUnsupportedModeError(
-            (
-                "participant_mode enrollments requires individual clash constraints "
-                "that are not implemented yet; the scheduler refuses to fall back to "
-                "group-only solving.",
-            )
-        )
     return schedule_input
 
 

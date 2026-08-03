@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ContractModel(BaseModel):
@@ -141,8 +141,6 @@ class ScoreBreakdownModel(ContractModel):
 
 
 class ScheduleDiagnosticModel(ContractModel):
-    # 参与者相关代码与 `@examforge/shared` 保持一致；第一阶段只冻结合同，
-    # `student_exam_clash` 等个体冲突诊断由第二阶段的求解实现产生。
     code: Literal[
         "room_capacity_shortage",
         "time_slot_shortage",
@@ -179,6 +177,32 @@ class ScheduleDiagnosticModel(ContractModel):
     shortfall: int = Field(ge=0)
     message: str
     suggestion: str
+
+    @model_validator(mode="after")
+    def validate_participant_diagnostic_contract(self):
+        if self.code == "student_exam_clash":
+            if (
+                self.severity != "error"
+                or self.resource_dimension != "student"
+                or len(self.affected_ids) != 3
+                or self.affected_ids[0] >= self.affected_ids[1]
+            ):
+                raise ValueError(
+                    "student_exam_clash requires error/student and "
+                    "(exam_task_id_a, exam_task_id_b, time_slot_id)"
+                )
+        elif self.code == "student_overlap_edge_invalid":
+            if self.severity != "error" or self.resource_dimension != "input":
+                raise ValueError("student_overlap_edge_invalid is an input error")
+        elif self.code == "participant_snapshot_stale":
+            if (
+                self.severity != "error"
+                or self.resource_dimension != "participant_data"
+            ):
+                raise ValueError(
+                    "participant_snapshot_stale is a participant-data error"
+                )
+        return self
 
 
 class SolverStatisticsModel(ContractModel):

@@ -1,6 +1,13 @@
 from collections import defaultdict
 
-from .models import ConflictRecord, ConflictSeverity, ExamTask, Room, ScheduleInput
+from .models import (
+    ConflictRecord,
+    ConflictSeverity,
+    ExamTask,
+    ParticipantMode,
+    Room,
+    ScheduleInput,
+)
 
 
 def run_precheck(schedule_input: ScheduleInput) -> tuple[ConflictRecord, ...]:
@@ -54,7 +61,8 @@ def run_precheck(schedule_input: ScheduleInput) -> tuple[ConflictRecord, ...]:
                 )
             )
 
-    conflicts.extend(_student_group_overload_conflicts(schedule_input, slot_ids))
+    if schedule_input.participant_mode is ParticipantMode.GROUPS_ONLY:
+        conflicts.extend(_student_group_overload_conflicts(schedule_input, slot_ids))
     return tuple(conflicts)
 
 

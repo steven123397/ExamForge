@@ -6,6 +6,7 @@ import {
   participantModeSchema,
   participantSnapshotSchema,
   scheduleDiagnosticCodeSchema,
+  scheduleDiagnosticSchema,
   scheduleInputSchema,
   scheduleJobRequestSnapshotSchema,
   studentOverlapEdgeSchema,
@@ -341,5 +342,48 @@ describe("participant diagnostics", () => {
     ]) {
       assert.equal(scheduleDiagnosticCodeSchema.safeParse(code).success, true, code);
     }
+  });
+
+  it("freezes participant diagnostic severity, dimensions and identifiers", () => {
+    const base = {
+      shortfall: 1,
+      message: "message",
+      suggestion: "suggestion",
+    };
+    assert.equal(scheduleDiagnosticSchema.safeParse({
+      ...base,
+      code: "student_exam_clash",
+      severity: "error",
+      resource_dimension: "student",
+      affected_ids: ["exam-a", "exam-b", "slot-1"],
+    }).success, true);
+    assert.equal(scheduleDiagnosticSchema.safeParse({
+      ...base,
+      code: "student_exam_clash",
+      severity: "warning",
+      resource_dimension: "student",
+      affected_ids: ["exam-a", "exam-b", "slot-1"],
+    }).success, false);
+    assert.equal(scheduleDiagnosticSchema.safeParse({
+      ...base,
+      code: "student_exam_clash",
+      severity: "error",
+      resource_dimension: "student",
+      affected_ids: ["exam-b", "exam-a", "slot-1"],
+    }).success, false);
+    assert.equal(scheduleDiagnosticSchema.safeParse({
+      ...base,
+      code: "student_overlap_edge_invalid",
+      severity: "error",
+      resource_dimension: "input",
+      affected_ids: [],
+    }).success, true);
+    assert.equal(scheduleDiagnosticSchema.safeParse({
+      ...base,
+      code: "participant_snapshot_stale",
+      severity: "error",
+      resource_dimension: "participant_data",
+      affected_ids: ["batch-2026"],
+    }).success, true);
   });
 });
