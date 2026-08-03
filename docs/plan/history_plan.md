@@ -275,3 +275,4 @@
 - 本地收尾：online smoke runner 只受限解析四个独立 `ONLINE_*_PASSWORD` 值，并直接传入隔离子进程，不再把生产 `.env` 当 shell 文件或让 Node dotenv 重新解释密码字符。`v5.0.6` 的 `npm run test:deploy` 为 `53 passed`，`npm run test:ci` 为 `9 passed`，`npm run test:release` 为 `20 passed`，`npm run test:production-local`、Bash 语法和 `git diff --check` 均通过；特殊字符密码传递已作最窄证明。
 - 归档边界：服务器仍运行 `v5.0.5`，`v5.0.6` 未启动 Runner、未生成新的 TCR digest 或 release manifest、未写入服务器。服务器没有独立 `.online-smoke.env`，因此官方 online smoke、正式域名四角色 Playwright 和真实有限开放观察未执行；没有使用、猜测或从 bootstrap 变量复制当前密码。用户于 2026-07-24 明确决定不为该小型补丁再走一次发布部署链，并接受上述三项留待下一次获准发布/维护窗口完成，归档不将其记为通过。
 - 审查与后续影响：CR-003、CR-036 保持 P3 暂缓，未混入后续版本设计或实现。第五版活动计划至此归档；未来发布须从选定源码重新生成和校验 release manifest，按精确 digest 部署后再补齐独立凭据、官方 online smoke、正式域名 Playwright 与有限开放观察。
+- 文档补充：已补齐 `docs/background/第五版正式部署验证记录.md`，集中保存脱敏的制品、部署、HTTPS、备份恢复、容量、故障恢复、回滚和延期验证事实；该文件是课程报告的部署与运维证据入口，不改变线上验证延期边界。

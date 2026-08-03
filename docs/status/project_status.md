@@ -117,7 +117,7 @@
 - 服务器先校验上传 bundle 的 manifest 与附件，再以 `deploy.sh` 按精确 manifest 部署；迁移无待应用项，七项容器 health 和 API/Publisher/Worker/scheduler readiness 通过，四个应用 OCI revision 均为 `f12486160dcacc09c00f29b6ed63110f1f3378a9`。`current` 指向该提交，`previous` 保留 `47e7af4b8e437db9d31b4fdf010f76a08db7abe0`；正式域名 `/_health/api` 与 `/_health/api-ready` 均返回 `200`，`certbot renew --dry-run --cert-name examforge.site`、`nginx -t` 与 nginx logrotate dry-run 通过。
 - 2026-07-24 20:26 至 20:56（CST）的部署后稳定性观察包含基线和五次完整样本。七个容器始终为 `healthy`、重启计数为 0、OOM 为 false；两个公开健康端点均为 `200`，全量健康检查与本地/COS 备份完整性检查均通过。可用内存介于 2177 至 2209 MiB，数据盘可用空间约 19306532 KiB，nginx error log 行数始终为 12，应用服务错误关键字计数为 0。部署转换瞬间的健康巡检曾因服务重建记录一次失败；部署完成后的下一次巡检及全部观察样本均成功。
 - `v5.0.6`（`414fc866b5f16b589d0ef99f7ea9add863b56c35`）将 runner 改为把已受限解析的四个当前密码直接注入隔离子进程，不再生成由 Node `--env-file` 解析的临时文件，从而保留 `#`、`=` 等密码字符。`npm run test:deploy` 为 `53 passed`，`npm run test:ci` 为 `9 passed`，`npm run test:release` 为 `20 passed`，`npm run test:production-local`、Bash 语法和 `git diff --check` 均通过；标签与提交已推送到 `origin`，未启动 Runner、TCR 或服务器部署。
-- 服务器未存在独立 `.online-smoke.env`，故官方 online smoke 和正式域名四角色 Playwright 均未运行，也没有使用或猜测 bootstrap 密码。上述稳定性观察不代表真实有限开放流量观察。用户于 2026-07-24 明确接受这些线上项目延期，并据此归档第六阶段；归档不将缺失的线上验证记为通过。
+- 服务器未存在独立 `.online-smoke.env`，故官方 online smoke 和正式域名四角色 Playwright 均未运行，也没有使用或猜测 bootstrap 密码。上述稳定性观察不代表真实有限开放流量观察。用户于 2026-07-24 明确接受这些线上项目延期，并据此归档第六阶段；归档不将缺失的线上验证记为通过。脱敏部署证据已汇总至 `docs/background/第五版正式部署验证记录.md`。
 
 ## 3. 最新验证事实
 
