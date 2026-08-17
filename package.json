@@ -16,6 +16,7 @@
     "dev": "npm run build --workspace @examforge/shared && (npm run dev --workspace @examforge/api & npm run dev --workspace @examforge/web)",
     "build": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/scheduling-application && npm run build --workspace @examforge/db && npm run build --workspace @examforge/worker && npm run build --workspace @examforge/api && npm run build --workspace @examforge/web",
     "check:ci": "node scripts/ci/check-repository.mjs",
+    "check:docs": "node scripts/check-doc-governance.mjs",
     "test": "npm test --workspace @examforge/shared && npm run build --workspace @examforge/shared && npm test --workspace @examforge/scheduling-application && npm run build --workspace @examforge/scheduling-application && npm run build --workspace @examforge/db && npm test --workspace @examforge/api && npm test --workspace @examforge/web",
     "test:postgres": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/scheduling-application && npm run build --workspace @examforge/db && npm run test:postgres --workspace @examforge/api",
     "test:migrations": "npm run build --workspace @examforge/shared && npm run build --workspace @examforge/scheduling-application && npm run build --workspace @examforge/db && npm run test:migrations --workspace @examforge/db",

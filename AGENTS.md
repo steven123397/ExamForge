@@ -28,7 +28,7 @@ ExamForge 是个人维护的排考平台，包含调度算法、Web、API、数�
 - GitHub Issues：spec、Wayfinder map、决策票、实现 ticket、验收和解决记录。
 - `docs/background/`：外部输入与历史参考，保持原有职责；除非用户明确要求，不改写其内容。
 - `docs/temp/`：用户维护草稿区，保持原有职责；不默认遍历、搜索、清理或迁移。
-- `docs/design/`、`docs/plan/`、`docs/status/`：迁移期间的既有参考和事实材料。新工作不在其中复制创建 spec/ticket；迁移边界以 Wayfinder map 为准。
+- `docs/archive/`：迁移期间的既有设计、计划和状态材料，仅作历史参考。新工作不在其中复制创建 spec/ticket；当前边界以 Wayfinder map、GitHub Issues 和 ADR 为准。
 
 课程报告、课程演示和课程交付材料已退出当前产品范围，不为后续开发新增或维护此类内容。
 
@@ -48,6 +48,7 @@ ExamForge 是个人维护的排考平台，包含调度算法、Web、API、数�
 | 改动范围 | 命令 |
 | --- | --- |
 | 文档或配置 | `git diff --check` |
+| 文档治理入口或归档 | `npm run check:docs` |
 | 调度器 | `npm run test:scheduler` |
 | TypeScript 类型 | `npm run typecheck` |
 | Web、API、共享或应用层 | `npm test` |

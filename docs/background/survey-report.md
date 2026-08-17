@@ -244,7 +244,7 @@ nginx 当前状态：master + 4 worker，CPU 0%、内存各 6–10 MiB；80/443 
 3. PostgreSQL 和 Redis 只在 Compose 内部网络暴露，不映射宿主机 5432/6379。
 4. swap 是 OOM 峰值保护，不是部署可行性的替代证据。
 5. 复用现有 nginx 是 ExamForge 项目基于服务器现状作出的设计选择，不是本报告对项目的强制要求。
-6. 北京服务器访问广州 TCR registry 端点约为 0.12 秒，服务器侧只读登录准备正常。两次 GitHub 托管 Runner 正式发布均在跨境推送阶段未完成，不能据此归因于北京服务器访问 TCR；项目侧已决定保留 TCR，并将正式镜像构建与推送迁移到本地 WSL self-hosted Runner。详细边界见 `docs/design/第五版本地托管Runner发布设计.md`。
+6. 北京服务器访问广州 TCR registry 端点约为 0.12 秒，服务器侧只读登录准备正常。两次 GitHub 托管 Runner 正式发布均在跨境推送阶段未完成，不能据此归因于北京服务器访问 TCR；项目侧已决定保留 TCR，并将正式镜像构建与推送迁移到本地 WSL self-hosted Runner。详细边界见历史归档 `docs/archive/design/第五版本地托管Runner发布设计.md`；当前发布决策见 `docs/adr/0018-digest-pinned-release-boundary.md`。
 
 ## 10. 后续需要用户确认的信息
 - ExamForge 对外域名已确定为 `examforge.site`，根域名与 `www` 已解析；仍需等待备案通过并验证 HTTP-01 可达性。

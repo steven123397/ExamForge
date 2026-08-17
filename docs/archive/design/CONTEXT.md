@@ -1,5 +1,5 @@
 # 规范术语入口
 
-ExamForge 的规范术语和领域边界已迁移到根目录 [`CONTEXT.md`](../../CONTEXT.md)。
+ExamForge 的规范术语和领域边界已迁移到根目录 [`CONTEXT.md`](../../../CONTEXT.md)。
 
 本文件只作为旧链接的兼容入口，不再维护独立内容。新增或修改术语时，请直接更新根级 glossary，并在需要时同步相关 ADR。

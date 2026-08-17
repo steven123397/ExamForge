@@ -1,10 +1,12 @@
 # ExamForge 代码审查与问题状态
 
+> **归档声明（2026-08-17）**：本文是迁移前的审查历史和风险索引。新的审查闭环、问题状态和解决证据以 GitHub Issues/评论为准。
+
 ## 1. 文档定位
 
 本文档是 ExamForge 的代码审查结果和存留问题状态文档。它记录开发过程中发现但尚未解决的问题、风险、技术债和审查结论。
 
-`docs/status/project_status.md` 只描述项目开发进度、已实现内容、验证结果和下一步；本文档专门维护“问题是否存在、是否已解决、解决证据是什么”。
+`docs/archive/status/project_status.md` 只描述项目开发进度、已实现内容、验证结果和下一步；本文档专门维护“问题是否存在、是否已解决、解决证据是什么”。
 
 ## 2. 状态规则
 
@@ -37,7 +39,7 @@
 - 状态：暂缓
 - 严重级别：P3 低优先级
 - 所属模块：本地部署环境
-- 发现来源：`docs/status/project_status.md`
+- 发现来源：`docs/archive/status/project_status.md`
 - 位置：本机 Docker systemd 配置；`docker-compose.yml`
 - 问题描述：Docker daemon 依赖当前 WSL 到 Windows 代理 `http://172.22.112.1:7897` 拉取 Docker Hub 镜像。
 - 影响：如果 Windows 代理端口或地址变化，重新拉取镜像可能失败；已存在的 `postgres:16-alpine` 镜像和容器不受影响。
@@ -125,7 +127,7 @@
 
 - 2026-07-13：第五版第二阶段解决 CR-008。新增独立 FastAPI scheduler 的 `/health`、`/ready`、`/solve` 和确定性 OpenAPI，CLI/HTTP 共用解析、求解、报告与序列化 pipeline；API 生产 Compose 显式使用 HTTP 客户端并稳定分类合同错误、业务不可行、超时、取消、不可用、协议损坏和内部错误，不进行 CLI 回退。独立 scheduler 镜像以 UID 10002 运行并设置 CPU、内存、进程数和健康检查，API 镜像探针确认不含 Python/uv。固定样例等价测试覆盖可行、不可行、固定安排和增量重排；隔离 Compose smoke 直连 scheduler 后完成真实会话排考、PostgreSQL 持久化和 API 重启读取，Chromium E2E `17 passed`。CR-007 仍保留到第三阶段，不能用同步 HTTP 服务替代可靠队列或 SSE 结论。
 
-- 2026-07-06：创建本文档，迁入 `docs/status/project_status.md` 中既有存留风险，并补充第二版第四阶段已明确的轻量实现边界问题。
+- 2026-07-06：创建本文档，迁入 `docs/archive/status/project_status.md` 中既有存留风险，并补充第二版第四阶段已明确的轻量实现边界问题。
 - 2026-07-06：执行当前 `main` 全量代码审查；复核 CR-001 至 CR-009 均仍成立，新增 CR-010 至 CR-013。新鲜验证包括：默认 `python -m pytest -q` 因 `python` 缺失失败，`cd apps/scheduler && uv run --python 3.12 --extra dev python -m pytest -q` 为 `32 passed`，`npm test` 为 API `16` 个测试通过，`npm run typecheck` 通过，`npm run build` 通过，顺序运行 `npm run test:e2e` 为 `2 passed`，`npm audit --audit-level=moderate` 仍报告 2 个 moderate 公告。
 - 2026-07-07：修复 CR-010、CR-011、CR-012，提交为 `a835a94 fix(审查): 修复角色权限与草稿锁定问题`。先新增 API 红灯测试，确认无角色默认管理员、空 `allowed_slot_ids` 草稿误阻断和 DB schema 缺少锁字段三个问题可复现；随后完成修复并验证 `npm run typecheck`、`npm test`、`npm run build`、`npm run test:e2e` 均通过。
 - 2026-07-07：修复 CR-001。仓库根 `package.json` 新增 `npm run test:scheduler`，统一通过 `uv run --python 3.12 --extra dev python -m pytest -q` 调用调度器测试；`apps/scheduler/AGENTS.md` 和 `README.md` 同步改为推荐项目级脚本，避免后续代理依赖本机默认 `python`。验证 `npm run test:scheduler` 通过，调度器测试结果为 `32 passed`。
@@ -148,4 +150,4 @@
 - 2026-07-12：修复 CR-027。DOM 红灯确认旧页面仍暴露 1 个不完整 `grid`；随后草稿矩阵改为原生 `table`、`thead`、`tbody`、列头、行头和数据单元格，交互与拖拽继续由单元格内原生按钮承载，横向滚动限制在矩阵包装层。全局异步错误和面板查询错误使用 polite live region，确认对话框补充滚动边界。专项用例精确核对列头、行头和单元格数量，Enter 可激活考试，1600×1000 与 375×812 均无页面级横向溢出；临时 `3107/4107` 服务上的 Chromium 全套 14 项通过。实际截图复核桌面、移动矩阵及移动确认框均无文本或控件重叠，服务随后已停止，原有演示栈未修改。
 - 2026-07-12：处置 CR-002、CR-003、CR-007、CR-008。CR-002 的 npm 官方元数据和隔离 lock 探针证明，强制 PostCSS override 虽可清除 audit，但会使 `npm ls` 返回 `ELSPROBLEMS`，相关试验改动已撤回；CR-003 的 daemon 代理仍为 `172.22.112.1:7897`，实际拉取 PostgreSQL 新镜像成功且未修改机器配置；CR-007/008 分别依赖第五版第三阶段可靠任务事件/SSE和第二阶段 FastAPI/OpenAPI 合同，第一阶段明确不实施。四项均保留在问题明细并改为暂缓，具备明确重评条件。
 - 2026-07-12：完成第四版审查整改全量验证。`npm run test:ci` 为 7 passed，`npm run check:ci`、`npm run typecheck`、`LOG_LEVEL=silent npm test`（API 62 passed）、`npm run test:scheduler`（78 passed）和 `npm run build` 通过；固定 seed 的 50/100/150 场 benchmark 均 feasible、0 冲突，耗时 246/412/724 ms，教师负载极差均为 1。可丢弃 PostgreSQL 16 容器中迁移测试 4 passed、迁移检查无缺失或双向不一致、正式迁移无待应用、集成测试 11 passed。第一次独立 Compose 验证因 `demo-smoke.mjs` 匿名读取受保护基础数据返回 401 而失败，补齐 viewer token 后，第二次从空卷完成 smoke、API 重启持久化和 Chromium E2E 14 passed；测试容器、网络、卷及隔离 PostgreSQL 均已清理，原 `examforge` 栈保持健康。当前问题明细只剩 4 项暂缓边界，分布为 P2 3 项、P3 1 项，无待解决 P0/P1。
-- 2026-07-12：第五版第一阶段完成作业状态/事件/outbox、关系化单一事实源、本地账户与服务端会话、四角色 RBAC、真实 actor 审计、Web Cookie 会话及前端信息架构基础。CR-007 复核后仍存在：持久化事件已经具备，但 Publisher、可靠 Worker 与 SSE 补发合同尚未实现，继续留到第三阶段。CR-008 复核后仍存在：API 生产路径仍调用 Python CLI，已通过 `docs/plan/第五版第二阶段计划.md` 固定 FastAPI/OpenAPI/HTTP 客户端和独立部署的验证门槛，在取得实现证据前不提前关闭。CR-002、CR-003 状态不变；问题明细仍为 P2 3 项、P3 1 项，无待解决 P0/P1。
+- 2026-07-12：第五版第一阶段完成作业状态/事件/outbox、关系化单一事实源、本地账户与服务端会话、四角色 RBAC、真实 actor 审计、Web Cookie 会话及前端信息架构基础。CR-007 复核后仍存在：持久化事件已经具备，但 Publisher、可靠 Worker 与 SSE 补发合同尚未实现，继续留到第三阶段。CR-008 复核后仍存在：API 生产路径仍调用 Python CLI，已通过 `docs/archive/plan/第五版第二阶段计划.md` 固定 FastAPI/OpenAPI/HTTP 客户端和独立部署的验证门槛，在取得实现证据前不提前关闭。CR-002、CR-003 状态不变；问题明细仍为 P2 3 项、P3 1 项，无待解决 P0/P1。

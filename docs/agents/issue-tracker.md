@@ -13,7 +13,7 @@
 
 ## 规格与工单
 
-规格、Wayfinder map、决策票和 tracer-bullet tickets 均发布为 GitHub Issues，不在 `docs/plan/` 或 `.scratch/` 复制维护。
+规格、Wayfinder map、决策票和 tracer-bullet tickets 均发布为 GitHub Issues，不在 `docs/archive/` 或 `.scratch/` 复制维护。
 
 ## Wayfinding operations
 
