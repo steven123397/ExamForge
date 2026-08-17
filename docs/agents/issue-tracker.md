@@ -26,11 +26,11 @@
 
 每个 spec、tracer ticket 和决策票的正文末尾都必须有 `## Delivery decision`，明确：
 
-- `Commit`: `required`、`optional` 或 `not needed`。
-- `Push/PR`: `required`、`optional` 或 `not needed`。
+- `Commit`: `required` 或 `not needed`。
+- `Push/PR`: `required` 或 `not needed`。
 - `Commit scope`: 允许进入提交的文件或行为边界。
 
-实现者按该段执行 Git 交付动作。`optional` 由实现者根据工作树和后续依赖判断，并在 resolution 中记录决定；`required` 必须在关闭 issue 前完成；`not needed` 则只交付 issue 规定的工作树和证据，不创建提交或推送。提交信息、推送目标和 PR 关联也属于该 issue 的交付范围。质量和规范验证统一由 `/code-review` 的 Standards 与 Spec 双轴复核负责。
+实现者按该段执行 Git 交付动作。`required` 必须在关闭 issue 前完成；`not needed` 则只交付 issue 规定的工作树和证据，不创建提交或推送。提交信息、推送目标和 PR 关联也属于该 issue 的交付范围。质量和规范审查由 `/code-review` 的 Standards 与 Spec 双轴复核负责；命令验证仍按根级 `AGENTS.md` 作为证据执行，但不改变 issue 的 Git 交付决策。
 
 ## Pull requests as a request surface
 
