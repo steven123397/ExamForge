@@ -8,6 +8,9 @@ venv/
 .codegraph/
 docs/temp/
 
+# Project-local agent skills are installed and managed outside Git.
+.agents/skills/
+
 node_modules/
 .next/
 *.tsbuildinfo
