@@ -4,7 +4,7 @@ import {
   type ScheduleInput,
   type ScheduleJobListQuery,
 } from "@examforge/shared";
-import { JobSubmissionService } from "@examforge/scheduling-application";
+import { buildScheduleInput, JobSubmissionService } from "@examforge/scheduling-application";
 import type { PlatformRepository } from "../repository.js";
 import type { SchedulerClient } from "../scheduler-client.js";
 import { randomUUID } from "node:crypto";
@@ -33,14 +33,24 @@ export class ScheduleRunService {
     this.jobSubmissionService = new JobSubmissionService(repository);
   }
 
+  /**
+   * 同步排考与异步作业共用同一个 builder，并持久化相同的参与者摘要；
+   * 不为同步入口保留不带快照的快捷路径（设计 §7.2）。
+   */
   async createScheduleRun(overrides: ScheduleRunOverrides) {
     const referenceData = await this.repository.getReferenceData();
     const strategy = await this.repository.resolveConstraintProfile(
       overrides.constraintProfileVersionId,
     );
+    const participant = await this.repository.getParticipantContext();
+    const built = buildScheduleInput({
+      referenceInput: referenceData.scheduleInput,
+      constraintProfile: strategy.snapshot,
+      participant,
+    });
     let schedulerVersion = "unknown";
     const result = await this.scheduler.solve(
-      withScheduleOverrides(referenceData.scheduleInput, overrides, strategy.snapshot.config),
+      withScheduleOverrides(built.input, overrides, strategy.snapshot.config),
       {
         requestId: `trace-${randomUUID()}`,
         onMetadata: (metadata) => {
@@ -51,6 +61,7 @@ export class ScheduleRunService {
     return this.repository.createScheduleRun(result, {
       constraintProfileVersionId: strategy.versionId,
       constraintProfileSnapshot: strategy.snapshot,
+      participantSnapshot: built.participantSnapshot,
       schedulerVersion,
     });
   }
@@ -71,10 +82,15 @@ export class ScheduleRunService {
     const lockedExamTaskIds = new Set(draft.lockedExamTaskIds ?? []);
     const referenceData = await this.repository.getReferenceData();
     const strategy = await this.repository.resolveConstraintProfile();
+    const participant = await this.repository.getParticipantContext();
+    const built = buildScheduleInput({
+      referenceInput: referenceData.scheduleInput,
+      constraintProfile: strategy.snapshot,
+      participant,
+    });
     let schedulerVersion = "unknown";
     const result = await this.scheduler.solve({
-      ...referenceData.scheduleInput,
-      constraint_profile: structuredClone(strategy.snapshot.config),
+      ...built.input,
       fixed_assignments: [],
       reschedule_context: {
         baseline_assignments: baselineAssignments,
@@ -92,6 +108,7 @@ export class ScheduleRunService {
     const response = await this.repository.createScheduleRun(result, {
       constraintProfileVersionId: strategy.versionId,
       constraintProfileSnapshot: strategy.snapshot,
+      participantSnapshot: built.participantSnapshot,
       schedulerVersion,
     });
     return {

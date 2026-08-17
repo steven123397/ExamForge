@@ -4,6 +4,7 @@ from .models import (
     ConflictRecord,
     ConflictSeverity,
     ExamTask,
+    ParticipantMode,
     Room,
     ScheduledExam,
     ScheduleInput,
@@ -21,7 +22,10 @@ def detect_assignment_conflicts(
     conflicts: list[ConflictRecord] = []
     conflicts.extend(_unscheduled_exam_conflicts(schedule_input, assigned_exam_ids))
     conflicts.extend(_room_time_conflicts(assignments))
-    conflicts.extend(_student_group_clash_conflicts(assignments, task_by_id))
+    if schedule_input.participant_mode is ParticipantMode.GROUPS_ONLY:
+        conflicts.extend(_student_group_clash_conflicts(assignments, task_by_id))
+    else:
+        conflicts.extend(_student_exam_clash_conflicts(schedule_input, assignments))
     conflicts.extend(_teacher_time_clash_conflicts(assignments))
     conflicts.extend(_assignment_requirement_conflicts(assignments, task_by_id, room_by_id))
     return tuple(conflicts)
@@ -90,6 +94,42 @@ def _student_group_clash_conflicts(
                     "请错开这些考试的时间段，避免同一学生群体同时参加多场考试。",
                 )
             )
+    return tuple(conflicts)
+
+
+def _student_exam_clash_conflicts(
+    schedule_input: ScheduleInput,
+    assignments: tuple[ScheduledExam, ...],
+) -> tuple[ConflictRecord, ...]:
+    assignment_by_exam_id = {
+        assignment.exam_task_id: assignment for assignment in assignments
+    }
+    conflicts: list[ConflictRecord] = []
+    for edge in schedule_input.student_overlap_edges:
+        left_assignment = assignment_by_exam_id.get(edge.exam_task_id_a)
+        right_assignment = assignment_by_exam_id.get(edge.exam_task_id_b)
+        if (
+            left_assignment is None
+            or right_assignment is None
+            or left_assignment.time_slot_id != right_assignment.time_slot_id
+        ):
+            continue
+        conflicts.append(
+            _conflict(
+                "student_exam_clash",
+                (
+                    edge.exam_task_id_a,
+                    edge.exam_task_id_b,
+                    left_assignment.time_slot_id,
+                ),
+                (
+                    "共享学生的考试 "
+                    f"{edge.exam_task_id_a} 和 {edge.exam_task_id_b} "
+                    f"在时间段 {left_assignment.time_slot_id} 同槽。"
+                ),
+                "请将其中一场考试调整到其他时间段，避免共享学生同时参加两场考试。",
+            )
+        )
     return tuple(conflicts)
 
 

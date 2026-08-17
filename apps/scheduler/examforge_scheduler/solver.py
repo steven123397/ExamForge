@@ -7,6 +7,7 @@ from .diagnostics import build_diagnostics
 from .models import (
     ConflictRecord,
     ConflictSeverity,
+    ParticipantMode,
     ScheduleInput,
     ScheduleResult,
     ScheduledExam,
@@ -33,7 +34,7 @@ def solve_schedule(schedule_input: ScheduleInput) -> ScheduleResult:
     if validation_errors:
         conflicts = tuple(
             ConflictRecord(
-                type="input_validation_error",
+                type=_validation_conflict_type(error),
                 severity=ConflictSeverity.ERROR,
                 affected_ids=(),
                 message=error,
@@ -89,7 +90,10 @@ def solve_schedule(schedule_input: ScheduleInput) -> ScheduleResult:
 
     _add_exam_assignment_constraints(model, candidates_by_task, variables)
     _add_room_time_constraints(model, variables)
-    _add_student_group_constraints(schedule_input, model, variables)
+    if schedule_input.participant_mode is ParticipantMode.GROUPS_ONLY:
+        _add_student_group_constraints(schedule_input, model, variables)
+    else:
+        _add_student_overlap_constraints(schedule_input, model, variables)
     _add_fixed_assignment_constraints(schedule_input, model, variables)
     _add_frozen_baseline_constraints(schedule_input, model, variables)
     objective_terms = _build_soft_objective_terms(schedule_input, model, variables)
@@ -147,6 +151,14 @@ def solve_schedule(schedule_input: ScheduleInput) -> ScheduleResult:
         attempted_assignments=attempted_assignments,
         assignments=tuple(assignments_with_teachers),
     )
+
+
+def _validation_conflict_type(error: str) -> str:
+    if error.startswith("student_overlap_edge"):
+        return "student_overlap_edge_invalid"
+    if error.startswith("participant_mode"):
+        return "participant_mode_invalid"
+    return "input_validation_error"
 
 
 def _build_candidates(
@@ -312,6 +324,25 @@ def _add_student_group_constraints(
                 model.Add(sum(group_slot_variables) <= 1)
 
 
+def _add_student_overlap_constraints(
+    schedule_input: ScheduleInput,
+    model: cp_model.CpModel,
+    variables: dict[_Candidate, cp_model.IntVar],
+) -> None:
+    """Enforce each sealed overlap edge without exposing student identities to CP-SAT."""
+    for edge in schedule_input.student_overlap_edges:
+        for slot in schedule_input.time_slots:
+            edge_slot_variables = [
+                variable
+                for candidate, variable in variables.items()
+                if candidate.slot_id == slot.id
+                and candidate.exam_task_id
+                in {edge.exam_task_id_a, edge.exam_task_id_b}
+            ]
+            if edge_slot_variables:
+                model.Add(sum(edge_slot_variables) <= 1)
+
+
 def _add_fixed_assignment_constraints(
     schedule_input: ScheduleInput,
     model: cp_model.CpModel,
@@ -391,6 +422,9 @@ def _student_consecutive_exam_terms(
     model: cp_model.CpModel,
     variables: dict[_Candidate, cp_model.IntVar],
 ) -> list:
+    if schedule_input.participant_mode is ParticipantMode.ENROLLMENTS:
+        return []
+
     weight = schedule_input.constraint_profile.soft_weights.get(
         "student_consecutive_exam", 0
     )

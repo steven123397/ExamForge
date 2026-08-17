@@ -27,6 +27,8 @@ export const criticalMigrationTables = [
   "auth_login_attempts",
   "user_teacher_scopes",
   "user_student_group_scopes",
+  "students",
+  "exam_enrollments",
 ];
 
 const criticalMigrationConstraints = [
@@ -174,6 +176,51 @@ const criticalMigrationConstraints = [
     id: "schedule_runs.constraint_profile_snapshot_check",
     tableName: "schedule_runs",
     constraintName: "schedule_runs_constraint_profile_snapshot_check",
+  },
+  {
+    id: "exam_batches.participant_data_version_check",
+    tableName: "exam_batches",
+    constraintName: "exam_batches_participant_data_version_check",
+  },
+  {
+    id: "exam_batches.participant_data_digest_check",
+    tableName: "exam_batches",
+    constraintName: "exam_batches_participant_data_digest_check",
+  },
+  {
+    id: "exam_batches.participant_state_check",
+    tableName: "exam_batches",
+    constraintName: "exam_batches_participant_state_check",
+  },
+  {
+    id: "students.primary_key",
+    tableName: "students",
+    definition: "PRIMARY KEY (id)",
+  },
+  {
+    id: "students.display_code_unique",
+    tableName: "students",
+    constraintName: "students_display_code_unique",
+  },
+  {
+    id: "students.primary_student_group_foreign_key",
+    tableName: "students",
+    constraintName: "students_primary_student_group_id_fk",
+  },
+  {
+    id: "exam_enrollments.primary_key",
+    tableName: "exam_enrollments",
+    definition: "PRIMARY KEY (exam_task_id, student_id)",
+  },
+  {
+    id: "exam_enrollments.exam_task_foreign_key",
+    tableName: "exam_enrollments",
+    constraintName: "exam_enrollments_exam_task_id_fk",
+  },
+  {
+    id: "exam_enrollments.student_foreign_key",
+    tableName: "exam_enrollments",
+    constraintName: "exam_enrollments_student_id_fk",
   },
   {
     id: "exam_task_student_groups.primary_key",

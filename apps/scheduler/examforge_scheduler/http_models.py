@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ContractModel(BaseModel):
@@ -75,6 +75,22 @@ class RescheduleContextModel(ContractModel):
     movable_exam_task_ids: list[str] = Field(default_factory=list)
 
 
+class OverlapSampleParticipantModel(ContractModel):
+    student_id: str = Field(min_length=1)
+    exam_a_source: Literal["regular", "elective", "retake", "other"]
+    exam_b_source: Literal["regular", "elective", "retake", "other"]
+
+
+class StudentOverlapEdgeModel(ContractModel):
+    exam_task_id_a: str = Field(min_length=1)
+    exam_task_id_b: str = Field(min_length=1)
+    overlap_count: int = Field(gt=0)
+    sample_participants: list[OverlapSampleParticipantModel] = Field(
+        default_factory=list,
+        max_length=5,
+    )
+
+
 class ScheduleInputModel(ContractModel):
     student_groups: list[StudentGroupModel]
     teachers: list[TeacherModel]
@@ -85,6 +101,8 @@ class ScheduleInputModel(ContractModel):
     constraint_profile: ConstraintProfileModel
     fixed_assignments: list[AssignmentModel] = Field(default_factory=list)
     reschedule_context: RescheduleContextModel | None = None
+    participant_mode: Literal["groups_only", "enrollments"] = "groups_only"
+    student_overlap_edges: list[StudentOverlapEdgeModel] = Field(default_factory=list)
 
 
 class ConflictRecordModel(ContractModel):
@@ -132,6 +150,15 @@ class ScheduleDiagnosticModel(ContractModel):
         "invalid_reference",
         "solver_infeasible",
         "unclassified_conflict",
+        "participant_mode_invalid",
+        "participant_data_incomplete",
+        "participant_snapshot_stale",
+        "expected_count_exceeds_group_size",
+        "expected_count_lower_than_group_size",
+        "expected_count_mismatch",
+        "student_enrollment_reference_invalid",
+        "student_overlap_edge_invalid",
+        "student_exam_clash",
     ]
     severity: Literal["error", "warning"]
     resource_dimension: Literal[
@@ -142,11 +169,40 @@ class ScheduleDiagnosticModel(ContractModel):
         "student_group",
         "input",
         "solver",
+        "participant_data",
+        "student",
+        "exam_task",
     ]
     affected_ids: list[str]
     shortfall: int = Field(ge=0)
     message: str
     suggestion: str
+
+    @model_validator(mode="after")
+    def validate_participant_diagnostic_contract(self):
+        if self.code == "student_exam_clash":
+            if (
+                self.severity != "error"
+                or self.resource_dimension != "student"
+                or len(self.affected_ids) != 3
+                or self.affected_ids[0] >= self.affected_ids[1]
+            ):
+                raise ValueError(
+                    "student_exam_clash requires error/student and "
+                    "(exam_task_id_a, exam_task_id_b, time_slot_id)"
+                )
+        elif self.code == "student_overlap_edge_invalid":
+            if self.severity != "error" or self.resource_dimension != "input":
+                raise ValueError("student_overlap_edge_invalid is an input error")
+        elif self.code == "participant_snapshot_stale":
+            if (
+                self.severity != "error"
+                or self.resource_dimension != "participant_data"
+            ):
+                raise ValueError(
+                    "participant_snapshot_stale is a participant-data error"
+                )
+        return self
 
 
 class SolverStatisticsModel(ContractModel):

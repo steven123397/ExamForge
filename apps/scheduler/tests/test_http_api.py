@@ -80,6 +80,29 @@ def test_solve_returns_semantic_validation_errors_without_input_leakage():
     assert "student_groups" not in response.text
 
 
+def test_solve_returns_the_stable_overlap_edge_error_code():
+    client = TestClient(create_app())
+    payload = to_jsonable(generate_small_dataset(seed=20260705))
+    exam_task_id = payload["exam_tasks"][0]["id"]
+    payload["participant_mode"] = "enrollments"
+    payload["student_overlap_edges"] = [{
+        "exam_task_id_a": exam_task_id,
+        "exam_task_id_b": exam_task_id,
+        "overlap_count": 1,
+        "sample_participants": [],
+    }]
+
+    response = client.post("/solve", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"] == {
+        "category": "validation",
+        "code": "student_overlap_edge_invalid",
+        "message": "Schedule input failed semantic validation.",
+        "retryable": False,
+    }
+
+
 def test_internal_errors_are_sanitized_and_correlated():
     def fail(_payload):
         raise RuntimeError("database-password=do-not-leak")

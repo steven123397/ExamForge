@@ -26,6 +26,21 @@ class SolveStatus(StrEnum):
     ERROR = "error"
 
 
+class ParticipantMode(StrEnum):
+    GROUPS_ONLY = "groups_only"
+    ENROLLMENTS = "enrollments"
+
+
+class EnrollmentSource(StrEnum):
+    REGULAR = "regular"
+    ELECTIVE = "elective"
+    RETAKE = "retake"
+    OTHER = "other"
+
+
+MAX_OVERLAP_SAMPLE_PARTICIPANTS = 5
+
+
 @dataclass(frozen=True)
 class StudentGroup:
     id: str
@@ -172,6 +187,21 @@ class SolverStatistics:
 
 
 @dataclass(frozen=True)
+class OverlapSampleParticipant:
+    student_id: str
+    exam_a_source: EnrollmentSource
+    exam_b_source: EnrollmentSource
+
+
+@dataclass(frozen=True)
+class StudentOverlapEdge:
+    exam_task_id_a: str
+    exam_task_id_b: str
+    overlap_count: int
+    sample_participants: tuple[OverlapSampleParticipant, ...] = ()
+
+
+@dataclass(frozen=True)
 class ScheduleInput:
     student_groups: tuple[StudentGroup, ...]
     teachers: tuple[Teacher, ...]
@@ -182,6 +212,8 @@ class ScheduleInput:
     constraint_profile: ConstraintProfile
     fixed_assignments: tuple[FixedAssignment, ...] = ()
     reschedule_context: RescheduleContext | None = None
+    participant_mode: ParticipantMode = ParticipantMode.GROUPS_ONLY
+    student_overlap_edges: tuple[StudentOverlapEdge, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -305,6 +337,8 @@ def validate_schedule_input(schedule_input: ScheduleInput) -> tuple[str, ...]:
                     f"references missing teacher_id {teacher_id}"
                 )
 
+    _validate_student_overlap_edges(errors, schedule_input, task_ids)
+
     if schedule_input.reschedule_context is not None:
         _validate_reschedule_context(
             errors,
@@ -316,6 +350,81 @@ def validate_schedule_input(schedule_input: ScheduleInput) -> tuple[str, ...]:
         )
 
     return tuple(errors)
+
+
+def _validate_student_overlap_edges(
+    errors: list[str],
+    schedule_input: ScheduleInput,
+    task_ids: set[str],
+) -> None:
+    """校验 exam-exam 重叠边的规范形式。
+
+    第六版第一阶段只冻结边的合同，个体互斥约束在第二阶段实现。
+    """
+    if schedule_input.participant_mode is ParticipantMode.GROUPS_ONLY:
+        if schedule_input.student_overlap_edges:
+            errors.append(
+                "participant_mode groups_only must not carry student_overlap_edges"
+            )
+        return
+
+    previous_key: tuple[str, str] | None = None
+    for edge in schedule_input.student_overlap_edges:
+        key = (edge.exam_task_id_a, edge.exam_task_id_b)
+        if edge.exam_task_id_a >= edge.exam_task_id_b:
+            errors.append(
+                "student_overlap_edge requires exam_task_id_a < exam_task_id_b, got "
+                f"{edge.exam_task_id_a}/{edge.exam_task_id_b}"
+            )
+        if previous_key is not None and previous_key == key:
+            errors.append(
+                "student_overlap_edge references duplicate exam pair "
+                f"{edge.exam_task_id_a}/{edge.exam_task_id_b}"
+            )
+        elif previous_key is not None and previous_key > key:
+            errors.append(
+                "student_overlap_edges must be sorted by (exam_task_id_a, exam_task_id_b)"
+            )
+        previous_key = key
+
+        for exam_task_id in (edge.exam_task_id_a, edge.exam_task_id_b):
+            if exam_task_id not in task_ids:
+                errors.append(
+                    "student_overlap_edge references missing exam_task_id "
+                    f"{exam_task_id}"
+                )
+
+        if edge.overlap_count <= 0:
+            errors.append(
+                "student_overlap_edge "
+                f"{edge.exam_task_id_a}/{edge.exam_task_id_b} overlap_count must be > 0"
+            )
+
+        if len(edge.sample_participants) > MAX_OVERLAP_SAMPLE_PARTICIPANTS:
+            errors.append(
+                "student_overlap_edge "
+                f"{edge.exam_task_id_a}/{edge.exam_task_id_b} keeps at most "
+                f"{MAX_OVERLAP_SAMPLE_PARTICIPANTS} sample_participants"
+            )
+        if len(edge.sample_participants) > edge.overlap_count:
+            errors.append(
+                "student_overlap_edge "
+                f"{edge.exam_task_id_a}/{edge.exam_task_id_b} "
+                "sample_participants cannot exceed overlap_count"
+            )
+
+        previous_student_id: str | None = None
+        for participant in edge.sample_participants:
+            if (
+                previous_student_id is not None
+                and previous_student_id >= participant.student_id
+            ):
+                errors.append(
+                    "student_overlap_edge "
+                    f"{edge.exam_task_id_a}/{edge.exam_task_id_b} "
+                    "sample_participants must be sorted by student_id"
+                )
+            previous_student_id = participant.student_id
 
 
 def _validate_reschedule_context(

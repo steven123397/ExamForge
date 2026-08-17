@@ -17,6 +17,7 @@ import { sql } from "drizzle-orm";
 import type {
   ConstraintProfile,
   ConstraintProfileSnapshot,
+  ParticipantSnapshot,
   ScheduleJobRequestSnapshot,
   ScoreBreakdown,
 } from "@examforge/shared";
@@ -55,6 +56,24 @@ export const draftStatus = pgEnum("draft_status", [
   "published",
   "discarded",
 ]);
+
+export const participantMode = pgEnum("participant_mode", [
+  "groups_only",
+  "enrollments",
+]);
+export const participantDataStatus = pgEnum("participant_data_status", [
+  "not_required",
+  "draft",
+  "complete",
+]);
+export const studentStatus = pgEnum("student_status", ["active", "disabled"]);
+export const enrollmentSource = pgEnum("enrollment_source", [
+  "regular",
+  "elective",
+  "retake",
+  "other",
+]);
+export const enrollmentStatus = pgEnum("enrollment_status", ["active", "withdrawn"]);
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -164,6 +183,13 @@ export const examBatches = pgTable("exam_batches", {
   constraintProfile: jsonb("constraint_profile").notNull(),
   publishedRunId: text("published_run_id"),
   publicationVersion: integer("publication_version").notNull().default(0),
+  participantMode: participantMode("participant_mode").notNull().default("groups_only"),
+  participantDataStatus: participantDataStatus("participant_data_status")
+    .notNull()
+    .default("not_required"),
+  participantDataVersion: integer("participant_data_version").notNull().default(0),
+  participantDataDigest: text("participant_data_digest"),
+  participantDataSealedAt: timestamp("participant_data_sealed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -248,6 +274,43 @@ export const examTaskStudentGroups = pgTable("exam_task_student_groups", {
   pk: primaryKey({ columns: [table.examTaskId, table.studentGroupId] }),
 }));
 
+/**
+ * 脱敏学生。只保存排考参与者标识与组织关系，
+ * 不保存姓名、证件号、联系方式等真实个人信息。
+ */
+export const students = pgTable("students", {
+  id: text("id").primaryKey(),
+  displayCode: text("display_code"),
+  primaryStudentGroupId: text("primary_student_group_id").references(
+    () => studentGroups.id,
+    { onDelete: "restrict" },
+  ),
+  status: studentStatus("status").notNull().default("active"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  displayCodeUnique: uniqueIndex("students_display_code_unique").on(table.displayCode),
+  primaryStudentGroupIdx: index("students_primary_student_group_id_idx").on(
+    table.primaryStudentGroupId,
+  ),
+}));
+
+export const examEnrollments = pgTable("exam_enrollments", {
+  examTaskId: text("exam_task_id").notNull().references(() => examTasks.id, {
+    onDelete: "cascade",
+  }),
+  studentId: text("student_id").notNull().references(() => students.id, {
+    onDelete: "restrict",
+  }),
+  source: enrollmentSource("source").notNull().default("regular"),
+  status: enrollmentStatus("status").notNull().default("active"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.examTaskId, table.studentId] }),
+  studentIdx: index("exam_enrollments_student_id_idx").on(table.studentId),
+}));
+
 export const scheduleRuns = pgTable("schedule_runs", {
   id: text("id").primaryKey(),
   batchId: text("batch_id").notNull().references(() => examBatches.id, { onDelete: "cascade" }),
@@ -266,6 +329,7 @@ export const scheduleRuns = pgTable("schedule_runs", {
   constraintProfileSnapshot: jsonb("constraint_profile_snapshot")
     .$type<ConstraintProfileSnapshot | LegacyConstraintProfileSnapshot>()
     .notNull(),
+  participantSnapshot: jsonb("participant_snapshot").$type<ParticipantSnapshot>(),
   schedulerVersion: text("scheduler_version").notNull(),
   scoringContractVersion: integer("scoring_contract_version").notNull(),
   normalizedScore: numeric("normalized_score", {

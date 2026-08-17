@@ -5,6 +5,8 @@ import {
   fixedAssignmentSchema,
   constraintProfileSchema,
   constraintProfileStatusSchema,
+  participantImportRequestSchema,
+  participantModeSchema,
   rescheduleContextSchema,
   referenceRecordCreateSchemas,
   referenceRecordUpdateSchemas,
@@ -24,6 +26,7 @@ import {
   ConstraintProfileService,
   ConstraintProfileSelectionError,
   ConstraintProfileValidationError,
+  ScheduleInputParticipantError,
 } from "@examforge/scheduling-application";
 import {
   ReferenceIntegrityError,
@@ -41,6 +44,10 @@ import {
   parseAuditEventFilter,
 } from "./services/audit-service.js";
 import { DraftService } from "./services/draft-service.js";
+import {
+  ParticipantService,
+  type ParticipantCommandResult,
+} from "./services/participant-service.js";
 import { PublicationService } from "./services/publication-service.js";
 import { AudienceScopeError, AudienceScopeService } from "./services/audience-scope-service.js";
 import { ScheduleRunService } from "./services/schedule-run-service.js";
@@ -101,6 +108,7 @@ export function createApp(options: AppOptions = {}) {
   const eventNotifier = options.eventNotifier ?? createScheduleJobEventNotifier();
   const scheduleJobEventService = new ScheduleJobEventService(repository, eventNotifier);
   const draftService = new DraftService(repository);
+  const participantService = new ParticipantService(repository);
   const publicationService = new PublicationService(repository);
   const audienceScopeService = new AudienceScopeService(repository);
   const cookieConfig = getSessionCookieConfig();
@@ -149,6 +157,14 @@ export function createApp(options: AppOptions = {}) {
         message: notFound
           ? "The selected constraint profile version does not exist."
           : "The selected constraint profile is disabled.",
+      });
+    }
+    // 参与者数据不满足求解前提属于输入/治理错误：稳定拒绝，不进入自动重试。
+    if (error instanceof ScheduleInputParticipantError) {
+      return reply.code(409).send({
+        error: error.code,
+        message: error.message,
+        diagnostics: error.diagnostics,
       });
     }
     if (isDatabaseIntegrityError(error)) {
@@ -460,6 +476,69 @@ export function createApp(options: AppOptions = {}) {
       return { profile };
     },
   );
+
+  // 参与者数据治理：只读健康摘要开放给运营角色，
+  // 模式切换、导入、seal 和重新打开一律限管理员（设计 §11.2）。
+  app.get("/api/participants", async (request, reply) => {
+    if (!requireRole(request, reply, operationalReadRoles)) {
+      return reply;
+    }
+    return { participants: await participantService.getHealthSummary() };
+  });
+
+  app.put("/api/participants/mode", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin"])) {
+      return reply;
+    }
+    const parsed = z.object({ mode: participantModeSchema }).strict().safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_participant_mode",
+        message: "Participant mode payload is invalid.",
+        issues: parsed.error.issues,
+      });
+    }
+    const result = await participantService.setMode(
+      parsed.data.mode,
+      participantMutationContext(request),
+    );
+    return sendParticipantResult(reply, result);
+  });
+
+  app.post("/api/participants/import", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin"])) {
+      return reply;
+    }
+    const parsed = participantImportRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_participant_payload",
+        message: "Participant import payload does not match the anonymized contract.",
+        issues: parsed.error.issues,
+      });
+    }
+    const result = await participantService.importData(
+      parsed.data,
+      participantMutationContext(request),
+    );
+    return sendParticipantResult(reply, result);
+  });
+
+  app.post("/api/participants/seal", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin"])) {
+      return reply;
+    }
+    const result = await participantService.seal(participantMutationContext(request));
+    return sendParticipantResult(reply, result);
+  });
+
+  app.post("/api/participants/reopen", async (request, reply) => {
+    if (!requireRole(request, reply, ["admin"])) {
+      return reply;
+    }
+    const result = await participantService.reopen(participantMutationContext(request));
+    return sendParticipantResult(reply, result);
+  });
 
   app.post<{ Params: { resource: string } }>(
     "/api/reference-data/:resource/import",
@@ -1326,6 +1405,51 @@ function requireAuthContext(request: FastifyRequest) {
     throw new Error("Authenticated route has no request auth context.");
   }
   return context;
+}
+
+function participantMutationContext(request: FastifyRequest) {
+  const context = getRequestAuthContext(request);
+  if (!context) {
+    throw new Error("Participant mutation requires an authenticated context.");
+  }
+  return {
+    actorUsername: context.user.username,
+    traceId: request.id,
+  };
+}
+
+function sendParticipantResult(reply: FastifyReply, result: ParticipantCommandResult) {
+  switch (result.resolution) {
+    case "ok":
+      return { participants: result.summary };
+    case "ok_imported":
+      return { participants: result.summary, imported: result.imported };
+    case "invalid_import":
+      return reply.code(400).send({
+        error: "invalid_participant_import",
+        message: "Participant import was rejected as a whole batch.",
+        issues: result.issues,
+      });
+    case "mode_invalid":
+      return reply.code(409).send({
+        error: "participant_mode_invalid",
+        message: "The batch participant mode does not allow this operation.",
+        participants: result.summary,
+      });
+    case "version_conflict":
+      return reply.code(409).send({
+        error: "participant_snapshot_stale",
+        message: "Participant data changed while the operation was running.",
+        participants: result.summary,
+      });
+    case "incomplete":
+      return reply.code(409).send({
+        error: "participant_data_incomplete",
+        message: "Participant data cannot be sealed while blocking diagnostics remain.",
+        participants: result.summary,
+        diagnostics: result.diagnostics,
+      });
+  }
 }
 
 function constraintProfileMutationContext(request: FastifyRequest) {

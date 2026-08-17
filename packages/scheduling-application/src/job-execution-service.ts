@@ -5,6 +5,7 @@ import {
   type ScheduleResultWriter,
   type SchedulerClient,
 } from "./contracts.js";
+import { normalizeScheduleInputFromSnapshot } from "./schedule-input-builder.js";
 
 export interface JobExecutionServiceOptions {
   maxAttempts?: number;
@@ -72,13 +73,18 @@ export class JobExecutionService {
 
     try {
       let schedulerVersion = "unknown";
-      const result = await this.scheduler.solve(claim.requestSnapshot.input, {
-        requestId: claim.attempt.schedulerRequestId,
-        signal: options.signal,
-        onMetadata: (metadata) => {
-          schedulerVersion = metadata.schedulerVersion;
+      // v1 / v2 历史快照在 application 边界规范化为新的 scheduler 输入结构，
+      // 不改写数据库中的原快照与原 request digest（设计 §8.2）。
+      const result = await this.scheduler.solve(
+        normalizeScheduleInputFromSnapshot(claim.requestSnapshot),
+        {
+          requestId: claim.attempt.schedulerRequestId,
+          signal: options.signal,
+          onMetadata: (metadata) => {
+            schedulerVersion = metadata.schedulerVersion;
+          },
         },
-      });
+      );
       const completion = await this.resultWriter.completeScheduleJob(jobId, {
         attemptId: claim.attempt.id,
         result,

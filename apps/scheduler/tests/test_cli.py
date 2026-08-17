@@ -45,6 +45,29 @@ def test_cli_returns_json_error_for_invalid_solve_payload():
     assert payload["error"]["message"]
 
 
+def test_cli_returns_the_stable_overlap_edge_error_code():
+    payload = _to_jsonable(generate_small_dataset(seed=20260705))
+    exam_task_id = payload["exam_tasks"][0]["id"]
+    payload["participant_mode"] = "enrollments"
+    payload["student_overlap_edges"] = [{
+        "exam_task_id_a": exam_task_id,
+        "exam_task_id_b": exam_task_id,
+        "overlap_count": 1,
+        "sample_participants": [],
+    }]
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "examforge_scheduler.cli", "solve"],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["error"]["code"] == "student_overlap_edge_invalid"
+
+
 def test_cli_rejects_unknown_commands_on_stderr():
     completed = subprocess.run(
         [sys.executable, "-m", "examforge_scheduler.cli", "unknown"],

@@ -40,6 +40,8 @@ import {
   type ScheduleResult,
   type ScheduleRunResponse,
   type ScheduleRunSummary,
+  type ParticipantMode,
+  type ParticipantSnapshot,
   type UserRole,
   resolveScheduleJobTransition,
   scheduleJobStatusForSolveResult,
@@ -47,8 +49,26 @@ import {
 } from "@examforge/shared";
 import {
   digestConstraintProfile,
+  buildParticipantSnapshot,
+  buildScheduleJobRequest,
+  readParticipantSnapshot,
+  digestParticipantData,
+  ScheduleInputParticipantError,
+  evaluateParticipantConsistency,
+  selectActiveEnrollments,
+  validateParticipantImport,
   ConstraintProfileSelectionError,
   ScheduleJobIdempotencyConflictError,
+  type ExamEnrollmentRecord,
+  type ImportParticipantDataCommand,
+  type ImportParticipantDataResult,
+  type ParticipantBatchContext,
+  type ParticipantDataRepository,
+  type ParticipantStateRecord,
+  type SealParticipantDataCommand,
+  type SealParticipantDataResult,
+  type SetParticipantModeCommand,
+  type StudentRecord,
   type ClaimScheduleJobCommand,
   type CompleteScheduleJobCommand,
   type CreateScheduleJobCommand,
@@ -77,7 +97,8 @@ export interface PlatformRepository
   extends ScheduleJobRepository,
     ScheduleResultWriter,
     ScheduleJobEventRepository,
-    ConstraintProfileRepository {
+    ConstraintProfileRepository,
+    ParticipantDataRepository {
   readonly storageMode: "memory" | "postgres";
   checkReadiness(): Promise<void>;
   getDashboard(): Promise<DashboardResponse>;
@@ -170,6 +191,7 @@ export interface PlatformRepository
 export interface ScheduleRunPersistenceContext {
   constraintProfileVersionId: string;
   constraintProfileSnapshot: ConstraintProfileSnapshot;
+  participantSnapshot: ParticipantSnapshot;
   schedulerVersion: string;
 }
 
@@ -257,6 +279,20 @@ export type { CreateScheduleJobCommand, CreateScheduleJobResult };
 export type PublishScheduleRunResult = PublishedScheduleResponse | "publication_conflict" | "not_publishable" | null;
 export type ScheduleRollbackResult = ScheduleRollbackResponse | "publication_conflict";
 
+/** 历史 v1 / v2 作业没有参与者快照，一律解释为群体模式（设计 §8.2）。 */
+export function legacyGroupsOnlyParticipantSnapshot(batchId: string): ParticipantSnapshot {
+  return {
+    schemaVersion: 1,
+    batchId,
+    mode: "groups_only",
+    dataVersion: 0,
+    digest: null,
+    studentCount: 0,
+    enrollmentCount: 0,
+    overlapEdgeCount: 0,
+  };
+}
+
 export class ReferenceIntegrityError extends Error {
   constructor(readonly issues: string[]) {
     super("Reference data integrity violation.");
@@ -291,6 +327,16 @@ export class InMemoryPlatformRepository implements PlatformRepository {
   private scheduleInput = structuredClone(demoScheduleInput);
   private readonly scheduleJobCreatedSequences = new Map<string, number>();
   private nextScheduleJobCreatedSequence = 0;
+  private participantState: ParticipantStateRecord = {
+    batchId: demoBatch.id,
+    mode: "groups_only",
+    status: "not_required",
+    dataVersion: 0,
+    digest: null,
+    sealedAt: null,
+  };
+  private students = new Map<string, StudentRecord>();
+  private enrollments = new Map<string, ExamEnrollmentRecord>();
 
   constructor(options: { authUsers?: AuthUserRecord[] } = {}) {
     for (const user of options.authUsers ?? []) {
@@ -348,6 +394,185 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     return {
       batch: this.batch,
       scheduleInput: this.scheduleInput,
+    };
+  }
+
+  async getParticipantContext(): Promise<ParticipantBatchContext> {
+    return this.readParticipantContext();
+  }
+
+  async setParticipantMode(command: SetParticipantModeCommand): Promise<ParticipantStateRecord> {
+    if (
+      command.expectedVersion !== undefined
+      && command.expectedVersion !== this.participantState.dataVersion
+    ) {
+      return structuredClone(this.participantState);
+    }
+    if (this.participantState.mode === command.mode) {
+      return structuredClone(this.participantState);
+    }
+    this.participantState = command.mode === "groups_only"
+      ? {
+        ...this.participantState,
+        mode: "groups_only",
+        status: "not_required",
+        dataVersion: this.participantState.dataVersion + 1,
+        digest: null,
+        sealedAt: null,
+      }
+      : {
+        ...this.participantState,
+        mode: "enrollments",
+        status: "draft",
+        dataVersion: this.participantState.dataVersion + 1,
+        digest: null,
+        sealedAt: null,
+      };
+    return structuredClone(this.participantState);
+  }
+
+  async importParticipantData(
+    command: ImportParticipantDataCommand,
+  ): Promise<ImportParticipantDataResult> {
+    if (this.participantState.mode !== "enrollments") {
+      return { resolution: "mode_invalid", state: structuredClone(this.participantState) };
+    }
+    if (
+      command.expectedVersion !== undefined
+      && command.expectedVersion !== this.participantState.dataVersion
+    ) {
+      return { resolution: "version_conflict", state: structuredClone(this.participantState) };
+    }
+
+    const context = this.readParticipantContext();
+    const { issues, normalized } = validateParticipantImport(command.request, {
+      examTaskIds: new Set(context.examTasks.map((task) => task.id)),
+      studentGroupIds: new Set(context.studentGroupSizes.keys()),
+      existingStudentIds: new Set(this.students.keys()),
+      existingStudentDisplayCodeOwners: new Map(
+        context.data.students.flatMap((student) => (
+          student.displayCode === null ? [] : [[student.displayCode, student.id] as const]
+        )),
+      ),
+    });
+    if (issues.length > 0) {
+      return { resolution: "invalid", issues };
+    }
+
+    if (command.request.mode === "replace") {
+      const batchExamTaskIds = new Set(context.examTasks.map((task) => task.id));
+      for (const [key, enrollment] of [...this.enrollments.entries()]) {
+        if (batchExamTaskIds.has(enrollment.examTaskId)) {
+          this.enrollments.delete(key);
+        }
+      }
+    }
+    for (const student of normalized.students) {
+      this.students.set(student.id, { ...student });
+    }
+    for (const enrollment of normalized.enrollments) {
+      this.enrollments.set(`${enrollment.examTaskId} ${enrollment.studentId}`, { ...enrollment });
+    }
+    this.bumpParticipantVersion();
+
+    return {
+      resolution: "imported",
+      state: structuredClone(this.participantState),
+      imported: {
+        students: normalized.students.length,
+        enrollments: normalized.enrollments.length,
+      },
+    };
+  }
+
+  async sealParticipantData(
+    command: SealParticipantDataCommand,
+  ): Promise<SealParticipantDataResult> {
+    if (this.participantState.mode !== "enrollments") {
+      return { resolution: "mode_invalid", state: structuredClone(this.participantState) };
+    }
+    if (
+      command.expectedVersion !== undefined
+      && command.expectedVersion !== this.participantState.dataVersion
+    ) {
+      return { resolution: "version_conflict", state: structuredClone(this.participantState) };
+    }
+
+    const context = this.readParticipantContext();
+    const report = evaluateParticipantConsistency({
+      ...context,
+      applyExpectedCountWriteBack: true,
+    });
+    const blocking = report.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+    if (blocking.length > 0) {
+      return {
+        resolution: "incomplete",
+        state: structuredClone(this.participantState),
+        diagnostics: report.diagnostics,
+      };
+    }
+
+    for (const task of this.scheduleInput.exam_tasks) {
+      const actual = report.enrollmentCountsByExamTask.get(task.id);
+      if (actual !== undefined) {
+        task.expected_count = actual;
+      }
+    }
+
+    const digest = digestParticipantData({
+      batchId: context.state.batchId,
+      mode: "enrollments",
+      dataVersion: context.state.dataVersion,
+      students: context.data.students,
+      enrollments: report.activeEnrollments,
+      overlapEdges: report.overlapEdges,
+    });
+    this.participantState = {
+      ...this.participantState,
+      status: "complete",
+      digest,
+      sealedAt: command.sealedAt,
+    };
+    return { resolution: "sealed", state: structuredClone(this.participantState) };
+  }
+
+  async reopenParticipantData(): Promise<ParticipantStateRecord> {
+    if (this.participantState.mode !== "enrollments") {
+      return structuredClone(this.participantState);
+    }
+    this.bumpParticipantVersion();
+    return structuredClone(this.participantState);
+  }
+
+  private readParticipantContext(): ParticipantBatchContext {
+    return {
+      state: structuredClone(this.participantState),
+      examTasks: this.scheduleInput.exam_tasks.map((task) => ({
+        id: task.id,
+        expectedCount: task.expected_count,
+        studentGroupIds: [...task.student_group_ids],
+      })),
+      studentGroupSizes: new Map(
+        this.scheduleInput.student_groups.map((group) => [group.id, group.size]),
+      ),
+      data: {
+        students: [...this.students.values()].map((student) => ({ ...student })),
+        enrollments: [...this.enrollments.values()].map((enrollment) => ({ ...enrollment })),
+      },
+    };
+  }
+
+  /** 参与者事实一旦变化，旧 seal 与 digest 立即失效。 */
+  private bumpParticipantVersion() {
+    if (this.participantState.mode !== "enrollments") {
+      return;
+    }
+    this.participantState = {
+      ...this.participantState,
+      status: "draft",
+      dataVersion: this.participantState.dataVersion + 1,
+      digest: null,
+      sealedAt: null,
     };
   }
 
@@ -519,9 +744,13 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     resource: ReferenceResource,
     record: ReferenceRecord,
   ): Promise<ReferenceRecord> {
+    assertParticipantEditableReference(resource, record, this.participantState.mode);
     validateReferenceRecord(resource, record, this.scheduleInput);
     const collection = this.getCollection(resource);
     collection.push(record as never);
+    if (resource === "exam-tasks") {
+      this.bumpParticipantVersion();
+    }
     return record;
   }
 
@@ -530,6 +759,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     id: string,
     patch: Partial<ReferenceRecord>,
   ): Promise<ReferenceRecord | null> {
+    assertParticipantEditableReference(resource, patch, this.participantState.mode);
     const collection = this.getCollection(resource);
     const index = collection.findIndex((record) => record.id === id);
     if (index === -1) {
@@ -549,6 +779,9 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     resource: ReferenceResource,
     records: ReferenceRecord[],
   ): Promise<ReferenceImportResponse> {
+    for (const record of records) {
+      assertParticipantEditableReference(resource, record, this.participantState.mode);
+    }
     const collection = this.getCollection(resource);
     const imported = records.map((record) => {
       validateReferenceRecord(resource, record, this.scheduleInput);
@@ -560,6 +793,9 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       collection[index] = record as never;
       return collection[index] as ReferenceRecord;
     });
+    if (resource === "exam-tasks") {
+      this.bumpParticipantVersion();
+    }
     return { resource, records: imported };
   }
 
@@ -574,6 +810,14 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       return null;
     }
     const [deleted] = collection.splice(index, 1);
+    if (resource === "exam-tasks") {
+      for (const [key, enrollment] of [...this.enrollments.entries()]) {
+        if (enrollment.examTaskId === id) {
+          this.enrollments.delete(key);
+        }
+      }
+      this.bumpParticipantVersion();
+    }
     return {
       resource,
       deleted: deleted as ReferenceRecord,
@@ -604,6 +848,7 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       assignmentCount: result.assignments.length,
       constraintProfileVersionId: context.constraintProfileVersionId,
       constraintProfileSnapshot: structuredClone(context.constraintProfileSnapshot),
+      participantSnapshot: structuredClone(context.participantSnapshot),
       schedulerVersion: context.schedulerVersion,
       scoringContractVersion: result.score.scoring_contract_version,
     };
@@ -1050,17 +1295,18 @@ export class InMemoryPlatformRepository implements PlatformRepository {
       digest: selectedVersion.digest,
       config: structuredClone(selectedVersion.config),
     };
-    const requestSnapshot: ScheduleJobRequestSnapshot = {
-      version: 2,
-      input: {
-        ...structuredClone(command.requestSnapshot.input),
-        constraint_profile: structuredClone(selectedVersion.config),
-      },
+    const participant = this.readParticipantContext();
+    const { requestSnapshot, requestDigest } = buildScheduleJobRequest({
+      referenceInput: command.requestSnapshot.input,
       constraintProfile: constraintProfileSnapshot,
-    };
-    const requestDigest = createHash("sha256")
-      .update(JSON.stringify(requestSnapshot))
-      .digest("hex");
+      participant,
+    });
+    if (participant.state.dataVersion !== this.participantState.dataVersion) {
+      throw new ScheduleInputParticipantError(
+        "participant_snapshot_stale",
+        "Participant data changed while the schedule job request was being built.",
+      );
+    }
     const existing = [...this.scheduleJobs.values()].find(
       (job) => job.idempotencyKey === command.idempotencyKey,
     );
@@ -1461,9 +1707,13 @@ export class InMemoryPlatformRepository implements PlatformRepository {
     if (!current.constraintProfileVersionId || !current.constraintProfileSnapshot) {
       throw new Error(`Schedule job ${id} does not contain a current strategy snapshot.`);
     }
+    // 运行继承作业的冻结参与者快照，不回读当前报名数据。
+    const frozenSnapshot = this.scheduleJobRequests.get(id);
     const response = this.createScheduleRunInternal(command.result, {
       constraintProfileVersionId: current.constraintProfileVersionId,
       constraintProfileSnapshot: current.constraintProfileSnapshot,
+      participantSnapshot: (frozenSnapshot && readParticipantSnapshot(frozenSnapshot))
+        ?? legacyGroupsOnlyParticipantSnapshot(current.batchId),
       schedulerVersion: command.schedulerVersion ?? "unknown",
     });
     const now = new Date().toISOString();
@@ -1510,9 +1760,17 @@ export class InMemoryPlatformRepository implements PlatformRepository {
 
   private async defaultScheduleRunPersistenceContext(): Promise<ScheduleRunPersistenceContext> {
     const strategy = await this.resolveConstraintProfile();
+    const participant = this.readParticipantContext();
+    const report = evaluateParticipantConsistency(participant);
     return {
       constraintProfileVersionId: strategy.versionId,
       constraintProfileSnapshot: strategy.snapshot,
+      participantSnapshot: buildParticipantSnapshot({
+        state: participant.state,
+        studentCount: participant.data.students.length,
+        enrollmentCount: report.activeEnrollments.length,
+        overlapEdgeCount: report.overlapEdges.length,
+      }),
       schedulerVersion: "unknown",
     };
   }
@@ -1830,6 +2088,27 @@ function assignmentKey(assignment: ScheduleResult["assignments"][number]) {
     assignment.time_slot_id,
     ...assignment.teacher_ids,
   ].join("|");
+}
+
+/**
+ * enrollment 模式下 `expected_count` 只能由 seal 按有效报名数回写，
+ * 通用编辑 API 不得维护第三份人数事实（设计 §5.4）。
+ */
+export function assertParticipantEditableReference(
+  resource: ReferenceResource,
+  record: Partial<ReferenceRecord>,
+  mode: ParticipantMode,
+) {
+  if (resource !== "exam-tasks" || mode !== "enrollments") {
+    return;
+  }
+  if (!Object.prototype.hasOwnProperty.call(record, "expected_count")) {
+    return;
+  }
+  throw new ReferenceIntegrityError([
+    "expected_count is derived from active enrollments while the batch runs in enrollments mode;"
+    + " import enrollments and seal participant data instead.",
+  ]);
 }
 
 export function validateReferenceRecord(

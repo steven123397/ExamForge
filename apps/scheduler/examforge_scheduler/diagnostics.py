@@ -28,6 +28,9 @@ _CONFLICT_CLASSIFICATION = {
         "student_group",
     ),
     "student_group_clash": ("student_group_slot_conflict", "student_group"),
+    "student_overlap_edge_invalid": ("student_overlap_edge_invalid", "input"),
+    "student_exam_clash": ("student_exam_clash", "student"),
+    "participant_mode_invalid": ("participant_mode_invalid", "participant_data"),
     "input_validation_error": ("invalid_reference", "input"),
     "solver_infeasible": ("solver_infeasible", "solver"),
     "solver_no_solution_within_time_limit": ("solver_infeasible", "solver"),
@@ -65,7 +68,11 @@ def _diagnostic_from_conflict(
         code=code,
         severity=conflict.severity,
         resource_dimension=resource_dimension,
-        affected_ids=tuple(sorted(conflict.affected_ids)),
+        affected_ids=(
+            conflict.affected_ids
+            if code == "student_exam_clash"
+            else tuple(sorted(conflict.affected_ids))
+        ),
         shortfall=_shortfall(schedule_input, conflict, code),
         message=conflict.message,
         suggestion=conflict.suggestion,
@@ -117,6 +124,21 @@ def _shortfall(
             task_count += 1
             available_slots.update(task.allowed_slot_ids or all_slots)
         return max(0, task_count - len(available_slots))
+    if code == "student_exam_clash":
+        if len(conflict.affected_ids) < 2:
+            return 0
+        exam_task_id_a, exam_task_id_b = conflict.affected_ids[:2]
+        return next(
+            (
+                edge.overlap_count
+                for edge in schedule_input.student_overlap_edges
+                if (
+                    edge.exam_task_id_a == exam_task_id_a
+                    and edge.exam_task_id_b == exam_task_id_b
+                )
+            ),
+            0,
+        )
     if code in {
         "time_slot_shortage",
         "fixed_assignment_conflict",
