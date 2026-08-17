@@ -1,90 +1,64 @@
 # ExamForge Agent 工作规则
 
-## 1. 适用范围
+## 1. 任务入口
 
-本文件适用于整个 ExamForge 仓库。进入子目录工作时，还必须读取该子目录下更近的 `AGENTS.md`。
+ExamForge 是个人维护的排考平台，包含调度算法、Web、API、数据库和运行工具。根级 `AGENTS.md` 是唯一仓库规则入口；领域术语、长期决策和工作票据分别由 `CONTEXT.md`、`docs/adr/` 和 GitHub Issues 承载。
 
-本仓库承载 ExamForge 排考平台的产品、算法、Web、API、数据层和课程材料。`AGENTS.md` 只记录长期协作规则，不记录当前阶段、最新进展或临时计划。
+开始任何修改前：
 
-当前开发进度、已实现内容、验证结果和下一步以 `docs/status/project_status.md` 为准；代码审查发现、存留问题、风险和技术债以 `docs/status/code_review_status.md` 为准；长期架构和模块边界以 `docs/design/` 为准。
+1. 运行 `git status --short --branch`，保留用户已有改动。
+2. 读取根 `CONTEXT.md`，再读取与当前工作相关的 `docs/adr/`。
+3. 读取当前 GitHub issue/spec/ticket 的完整正文和验收条件；没有票据时先判断是否需要 Wayfinder、grilling 或 spec。
+4. 需要理解代码时，仓库存在 `.codegraph/` 就先使用 CodeGraph；新增文件、纯文本和索引未覆盖的内容再使用常规检索。
 
-## 2. 默认阅读顺序
+任务完成的最低标准是：目标事实已写入唯一权威位置，验收条件有对应证据，工作树没有由本次验证产生的应提交产物。
 
-开始修改前按顺序阅读：
+## 2. Matt skill 工作流
 
-1. 根目录 `AGENTS.md`
-2. 目标子树的 `AGENTS.md`
-3. `docs/index.md`
-4. `docs/status/project_status.md`
-5. 与任务相关的 `docs/design/` 或 `docs/plan/` 文档
+- 规格、决策票和 tracer-bullet ticket 统一发布到 GitHub Issues；具体命令、标签和 Wayfinder 操作见 `docs/agents/issue-tracker.md`。
+- 大型且路径未清晰的工作先走 Wayfinder；路径清晰后用 `/to-spec`、`/to-tickets`，再按 ticket 使用 `/implement`。
+- `/implement` 内部采用 TDD；交付前使用 `/code-review` 做 Standards 与 Spec 双轴复核。
+- 领域术语只由 `CONTEXT.md` 规范；硬决策只有满足 ADR 三项条件时才写入 `docs/adr/`。消费规则见 `docs/agents/domain.md`。
+- 新建或修改 agent-facing 文档时遵循渐进披露：入口文件写步骤和触发条件，长参考资料通过明确指针按需加载。
 
-如果这些文件之间冲突，以更具体目录的 `AGENTS.md`、最新状态文档和用户当前指令为准；长期设计事实应回写到 `docs/design/`，临时执行事实不要写入 `AGENTS.md`。
+## 3. 文档事实源
 
-## 3. 文档治理
+- `CONTEXT.md`：ExamForge 规范术语、概念关系和领域边界；不写实现细节、计划、状态或聊天记录。
+- `docs/adr/`：难以逆转、没有背景会令人意外且经过真实取舍的长期决策。
+- GitHub Issues：spec、Wayfinder map、决策票、实现 ticket、验收和解决记录。
+- `docs/background/`：外部输入与历史参考，保持原有职责；除非用户明确要求，不改写其内容。
+- `docs/temp/`：用户维护草稿区，保持原有职责；不默认遍历、搜索、清理或迁移。
+- `docs/design/`、`docs/plan/`、`docs/status/`：迁移期间的既有参考和事实材料。新工作不在其中复制创建 spec/ticket；迁移边界以 Wayfinder map 为准。
 
-文档目录采用简化的单一事实源规则：
+课程报告、课程演示和课程交付材料已退出当前产品范围，不为后续开发新增或维护此类内容。
 
-- `docs/background/`：课程要求、项目背景、需求分析、可行性分析等输入材料。
-- `docs/design/`：长期有效的系统边界、架构、数据模型、算法和接口设计。
-- `docs/plan/`：可执行计划、任务拆分、验证命令和交付边界。
-- `docs/status/project_status.md`：当前开发事实、最新进展、已实现内容、验证结果和下一步。
-- `docs/status/code_review_status.md`：代码审查结果、存留问题、风险、技术债和修复状态。问题解决后，从问题明细中移除完整条目，在 `## 4. 已解决问题索引` 保留编号和题目，并将解决过程与验证证据写入 `## 5. 审查记录`。`## 3. 问题明细` 只保留 `待解决` 或 `暂缓` 的问题。
-- `docs/status/` 其他文件：按主题记录当前事实，但不得与上述两个状态文档重复维护同一事实。
+## 4. 产品与模块边界
 
-计划完成后，不新建专门归档目录。将完成时间、提交、完成内容、验证结果和后续影响追加到 `docs/plan/history_plan.md`，然后删除对应的活动计划文件。
+- `apps/scheduler/` 负责 Python 排考数据合同、预检、CP-SAT 求解、评分、冲突解释和报告整理。使用 `snake_case`；不实现 Web 页面、HTTP API、数据库访问或前端状态管理。
+- `apps/api/` 负责业务 API、排考运行入口、数据聚合和外部边界。
+- `apps/web/` 负责运营工作台、安排展示、冲突解释和资源分析。
+- Web/API 不承载算法核心逻辑；算法通过明确的 scheduler 接口调用。
+- shared 合同、API DTO、数据库 schema、OpenAPI 和前端展示口径必须同步演进。
+- 新增模块或改变跨模块边界时，先更新相关 spec/ADR，再实现行为。
 
-新增、删除或重命名正式文档时，同步更新 `docs/index.md`。
+## 5. 验证
 
-## 4. 开发边界
+按改动范围运行最窄可证明命令：
 
-开发边界由当前设计文档和活动计划决定。不要把某一阶段的实现状态写死在本文件中。
+| 改动范围 | 命令 |
+| --- | --- |
+| 文档或配置 | `git diff --check` |
+| 调度器 | `npm run test:scheduler` |
+| TypeScript 类型 | `npm run typecheck` |
+| Web、API、共享或应用层 | `npm test` |
+| 数据库迁移 | `npm run test:migrations` |
+| 部署与运维 | `npm run test:deploy` |
+| 端到端 | `npm run test:e2e` |
 
-实现时不要做的很保守，要偏向商业、企业级，不要被课程设计这个框架束缚住。
+Node 依赖仓库锁定的版本；调度器测试使用仓库脚本固定 Python 3.12 和 `uv`。依赖或真实 PostgreSQL 缺失时，报告具体命令和阻塞，不得将未执行验证描述为通过。
 
-实现时优先保持以下长期边界：
+## 6. Git 与产物
 
-- 算法、Web、API、数据层和文档各自保持清晰职责。
-- 排考求解、预检、评分、冲突解释和报告整理应保持可独立测试。
-- Web/API 层不得承载算法核心逻辑；算法能力通过明确接口暴露。
-- 数据库 schema、API DTO 和前端展示口径需要同步演进。
-- 课程报告需要的流程、测试结论和取舍原因应随开发同步沉淀，但不能替代真实实现。
-
-## 5. Git 与验证
-
-修改前先运行：
-
-```bash
-git status --short --branch
-```
-
-不要回滚用户已有改动。除非用户明确要求，不要自动提交或推送。
-
-文档类修改至少运行：
-
-```bash
-git diff --check
-```
-
-调度器代码修改优先运行：
-
-```bash
-cd apps/scheduler
-python -m pytest -q
-```
-
-如果本机 Python 或依赖不满足 `apps/scheduler/pyproject.toml`，需要报告具体阻塞，不要声称测试通过。
-
-Web、API 或数据层修改应按对应 package 的脚本运行最窄可证明验证；具体命令以各 package 的 `package.json`、README 或活动计划为准。
-
-## 6. 不应提交的产物
-
-不要提交缓存、虚拟环境、依赖目录和构建产物，包括：
-
-- `.pytest_cache/`
-- `__pycache__/`
-- `.venv/`
-- `node_modules/`
-- `dist/`
-- `build/`
-- `coverage/`
-- `.codegraph/`
+- 不自动 `git commit` 或 `git push`，除非用户在当前任务中明确授权。
+- 不回滚、覆盖或清理用户已有改动。
+- 不提交 `.pytest_cache/`、`__pycache__/`、`.venv/`、`node_modules/`、`dist/`、`build/`、`coverage/` 或 `.codegraph/`。
