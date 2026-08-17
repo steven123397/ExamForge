@@ -22,6 +22,16 @@
 - 阻塞关系优先使用 GitHub 原生 issue dependencies；如果仓库能力不可用，才在 ticket 正文声明 `Blocked by`。
 - 认领 ticket 时先指派当前开发者；解决时先记录 resolution，再关闭 issue，并将简短上下文指针追加到 map。
 
+## Delivery decision
+
+每个 spec、tracer ticket 和决策票的正文末尾都必须有 `## Delivery decision`，明确：
+
+- `Commit`: `required`、`optional` 或 `not needed`。
+- `Push/PR`: `required`、`optional` 或 `not needed`。
+- `Commit scope`: 允许进入提交的文件或行为边界。
+
+实现者按该段执行 Git 交付动作。`optional` 由实现者根据工作树和后续依赖判断，并在 resolution 中记录决定；`required` 必须在关闭 issue 前完成；`not needed` 则只交付 issue 规定的工作树和证据，不创建提交或推送。提交信息、推送目标和 PR 关联也属于该 issue 的交付范围。质量和规范验证统一由 `/code-review` 的 Standards 与 Spec 双轴复核负责。
+
 ## Pull requests as a request surface
 
 否。外部 PR 不作为本仓库的请求分流入口。

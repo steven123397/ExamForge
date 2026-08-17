@@ -59,6 +59,7 @@ Node 依赖仓库锁定的版本；调度器测试使用仓库脚本固定 Pytho
 
 ## 6. Git 与产物
 
-- 不自动 `git commit` 或 `git push`，除非用户在当前任务中明确授权。
-- 不回滚、覆盖或清理用户已有改动。
+- 当前工作的 Git 交付动作由对应 GitHub issue 末尾的 `Delivery decision` 决定；先读取该段，再执行其中声明的 commit、push 或 PR 动作。
+- issue 没有 `Delivery decision` 时，先补齐 issue 决策，再进入 Git 写入步骤；不根据个人惯例猜测交付动作。
+- 保留用户已有改动；提交前检查 diff 范围和提交内容是否与 issue 一致。
 - 不提交 `.pytest_cache/`、`__pycache__/`、`.venv/`、`node_modules/`、`dist/`、`build/`、`coverage/` 或 `.codegraph/`。
